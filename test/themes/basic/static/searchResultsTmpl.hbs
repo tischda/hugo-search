@@ -1,0 +1,52 @@
+<!-- loaded by search.js -->
+
+<h5>
+  {{#hasMultiplePages}}Page {{page}} of {{/hasMultiplePages}}
+  {{total_hits}} results ({{searchTime}})
+</h5>
+
+<div class="col-md-8">
+{{#hits}}
+<div class="hit">
+    <a class="resultLink" href="{{id}}">{{fields.title}}</a>
+    <span class="badge pull-right">{{roundScore}}</span>
+    <div class="panel panel-default">
+	<div class="panel-heading">
+	    <b>{{fields.author}}</b> on <time>
+             <script>
+		var date = new Date('{{fields.date}}');
+		var array = [ date.getDate(), date.getMonth()+1, date.getFullYear() ];
+		$('time').text(array.join('/'));
+	     </script>
+           </time>
+	</div>
+	<div class="panel-body">
+	    {{#fragments}}
+		<div>
+		    {{#content}}
+			<div>{{{.}}}</div>
+		    {{/content}}
+		</div>
+	    {{/fragments}}
+	</div>
+    </div>
+</div>
+{{/hits}}
+</div>
+
+{{#hasMultiplePages}}
+<br />
+<div class="col-md-4 col-md-offset-4">
+    <div class="container pagination">
+	{{#notOnFirstPage}}
+	    <a href="" onclick="jumpToPage({{page}}-1, event)">&laquo;</a>
+	{{/notOnFirstPage}}
+	{{#validPages}}
+	    <a href="" onclick="jumpToPage({{index}}, event)">{{index}}</a>
+	{{/validPages}}
+	{{#notOnLastPage}}
+	    <a href="" onclick="jumpToPage({{page}}+1, event)">&raquo;</a>
+	{{/notOnLastPage}}
+    </div>
+</div>
+{{/hasMultiplePages}}

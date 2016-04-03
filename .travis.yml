@@ -1,0 +1,19 @@
+language: go
+go:
+    - 1.4.3
+    - 1.5.3
+    - 1.6
+
+script:
+    - go get golang.org/x/tools/cmd/vet
+    - go get golang.org/x/tools/cmd/cover
+    - go get github.com/blevesearch/bleve
+    - go get github.com/blevesearch/bleve/http
+    - go get github.com/spf13/hugo/commands
+    - go get github.com/spf13/hugo/hugolib
+    - go get github.com/spf13/viper
+    - go get github.com/rs/cors
+    - go vet
+    - make build
+    - make test
+    - ./hugo-search -version

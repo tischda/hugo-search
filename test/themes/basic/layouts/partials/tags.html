@@ -1,0 +1,4 @@
+{{ $baseUrl := .Site.BaseURL }}
+{{ range .Params.tags }}
+  [{{ . }}]
+{{ end }}

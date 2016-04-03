@@ -1,0 +1,5 @@
+baseurl = "../"
+uglyurls = true
+
+title = "hugo-search test site"
+theme = "basic"

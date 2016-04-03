@@ -1,0 +1,19 @@
+h1 {
+  color: red;
+}
+
+div.facet {
+  margin-top: 0.5em;
+}
+
+div.hit {
+  margin-bottom: 1.5em;
+}
+
+span.badge {
+  margin-left: 1em;
+}
+
+div.panel-heading {
+  margin-bottom: 0.5em;
+}

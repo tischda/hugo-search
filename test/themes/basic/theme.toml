@@ -1,0 +1,7 @@
+baseurl = "../"
+relativeURLs = true
+uglyurls = true
+
+
+name = "basic"
+description = "Basic theme for the static site generator Hugo"

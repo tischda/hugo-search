@@ -1,0 +1,26 @@
+<!-- loaded by search.js -->
+
+{{#each facets}}
+    <div class="facet panel panel-default">
+	<div class="panel-heading"><b>{{@key}}</b></div>
+	<div class="panel-body">
+	    {{#each terms}}
+	    <div class="checkbox">
+	      <label>
+		<input name="f{{@../key}}" type="checkbox" value="{{term}}" onclick="toggleFilter('{{@../key}}','{{term}}',event);" {{checked isChecked}}>
+		{{term}} ({{count}})
+	      </label>
+	    </div>
+	    {{/each}}
+	    {{#each date_ranges}}
+	    <div class="checkbox">
+	      <label>
+		<input name="f{{@../key}}" type="checkbox" value="{{name}}" onclick="toggleFilter('{{@../key}}','{{name}}',event);" {{checked isChecked}}>
+		{{name}} ({{count}})
+	      </label>
+	    </div>
+	    {{/each}}
+	</div>
+    </div>
+{{/each}}
+
