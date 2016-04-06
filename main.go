@@ -20,9 +20,12 @@ func main() {
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
-	if *showVersion {
+	if flag.Arg(0) == "version" || *showVersion {
 		fmt.Println("hugo-search version", version)
 		return
+	}
+	if flag.NArg() > 0 {
+		flag.PrintDefaults()
 	}
 	log.SetFlags(0)
 
