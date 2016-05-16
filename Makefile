@@ -4,13 +4,15 @@
 # Compiler: GO 1.6
 # ----------------------------------------------------------------------------
 
+PROJECT_DIR=$(notdir $(shell pwd))
+
 HUGO_PORT  = 1313
 BLEVE_PORT = 8080
 
 all: get build
 
 build:
-	go build -ldflags "-X main.version=`git describe --tags` -s"
+	go build -ldflags "-X main.version=`git describe --tags` -s -w"
 
 get:
 	go get -v
@@ -18,18 +20,24 @@ get:
 test: fmt
 	go test -v -cover
 
-fmt:
-	go fmt
-
-install:
-	go install -a -ldflags "-X main.version=`git describe --tags` -s"
-
-clean:
-	go clean
-
 cover:
 	go test -coverprofile=coverage.out
 	go tool cover -html=coverage.out
+
+fmt:
+	go fmt
+
+vet:
+	go vet -v
+
+install:
+	go install -a -ldflags "-X main.version=`git describe --tags` -s -w"
+
+dist: clean build
+	upx -9 ${PROJECT_DIR}.exe
+
+clean:
+	go clean
 
 start:  $(EXECUTABLE)
 	cmd /c start hugo -s test server --port=$(HUGO_PORT)
