@@ -31,7 +31,7 @@ vet:
 	go vet -v
 
 install:
-	go install -a -ldflags "-X main.version=`git describe --tags` -s -w"
+	go install -ldflags "-X main.version=`git describe --tags` -s -w"
 
 dist: clean build
 	upx -9 ${PROJECT_DIR}.exe
