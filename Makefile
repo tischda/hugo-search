@@ -6,18 +6,21 @@
 
 PROJECT_DIR=$(notdir $(shell pwd))
 
+BUILD_TAG=`git describe --tags 2>/dev/null`
+LDFLAGS=-ldflags "-X main.version=${BUILD_TAG} -s -w"
+
 HUGO_PORT  = 1313
 BLEVE_PORT = 8080
 
 all: get build
 
 build:
-	go build -ldflags "-X main.version=`git describe --tags` -s -w"
+	go build ${LDFLAGS}
 
 get:
 	go get -v
 
-test: fmt
+test: vet
 	go test -v -cover
 
 cover:
@@ -31,7 +34,7 @@ vet:
 	go vet -v
 
 install:
-	go install -ldflags "-X main.version=`git describe --tags` -s -w"
+	go install ${LDFLAGS}
 
 dist: clean build
 	upx -9 ${PROJECT_DIR}.exe
@@ -40,10 +43,11 @@ clean:
 	go clean
 
 start:  $(EXECUTABLE)
-	cmd /c start hugo -s test server --port=$(HUGO_PORT)
-	cmd /c start hugo-search --addr=:$(BLEVE_PORT) --hugoPath=test --indexPath=test/indexes/search.bleve
-	cmd /c start http://localhost:$(HUGO_PORT)/
+	start hugo -s test server --port=$(HUGO_PORT)
+	start hugo-search --addr=:$(BLEVE_PORT) --hugoPath=test --indexPath=test/indexes/search.bleve
+	start "http://localhost:$(HUGO_PORT)/"
 
+# mind the double slashes, this is run under /bin/sh in Windows...
 stop: 
-	pskill.exe hugo-search
-	pskill.exe hugo
+	taskkill //F //IM hugo-search.exe
+	taskkill //F //IM hugo.exe
