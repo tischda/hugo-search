@@ -3,3 +3,7 @@ uglyurls = true
 
 title = "hugo-search test site"
 theme = "basic"
+
+[params]
+    # Default search URL (no trailing slash!)
+    searchUrl = "http://localhost:8080"

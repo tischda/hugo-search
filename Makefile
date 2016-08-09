@@ -20,7 +20,7 @@ build:
 get:
 	go get -v
 
-test: vet
+test: clean vet
 	go test -v -cover
 
 cover:
@@ -39,10 +39,13 @@ install:
 dist: clean build
 	upx -9 ${PROJECT_DIR}.exe
 
+# mind stupid option for MSYS to recognize slashes!
 clean:
 	go clean
+	rm -rf --no-preserve-root test/indexes
+	rm -rf --no-preserve-root test/public
 
-start:  $(EXECUTABLE)
+start:
 	start hugo -s test server --port=$(HUGO_PORT)
 	start hugo-search --addr=:$(BLEVE_PORT) --hugoPath=test --indexPath=test/indexes/search.bleve
 	start "http://localhost:$(HUGO_PORT)/"
@@ -51,3 +54,5 @@ start:  $(EXECUTABLE)
 stop: 
 	taskkill //F //IM hugo-search.exe
 	taskkill //F //IM hugo.exe
+
+restart: stop start

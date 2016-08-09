@@ -1,8 +1,5 @@
 "use strict";
 
-// the URL of your hosted search index
-var searchURL = 'http://localhost:8080/api/search.bleve/_search';
-
 // the number of results to show per page
 var resultsPerPage = 5;
 
@@ -253,11 +250,13 @@ function setupPager(results) {
 
     // now see if we have too many pages
     if (results.validPages.length > maxPagesToShow) {
-        numPagesToRemove = results.validPages.length - maxPagesToShow;
-        frontPagesToRemove = backPagesToRemove = 0;
+        var numPagesToRemove = results.validPages.length - maxPagesToShow;
+        var frontPagesToRemove = 0;
+        var backPagesToRemove = 0;
+
         while (numPagesToRemove - frontPagesToRemove - backPagesToRemove > 0) {
-            numPagesBefore = results.page - 1 - frontPagesToRemove;
-            numPagesAfter = results.validPages.length - results.page - backPagesToRemove;
+            var numPagesBefore = results.page - 1 - frontPagesToRemove;
+            var numPagesAfter = results.validPages.length - results.page - backPagesToRemove;
             if (numPagesAfter > numPagesBefore) {
                 backPagesToRemove++;
             } else {

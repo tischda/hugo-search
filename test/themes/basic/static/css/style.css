@@ -1,5 +1,5 @@
 h1 {
-  color: red;
+  color: darkblue;
 }
 
 div.facet {
@@ -16,4 +16,8 @@ span.badge {
 
 div.panel-heading {
   margin-bottom: 0.5em;
+}
+
+li {
+  margin-left: 1em;
 }

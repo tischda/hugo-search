@@ -7,3 +7,6 @@
   </form>
 </div>
 
+<script type="text/javascript">
+   var searchURL = '{{ if  getenv "BLEVE_URL" }}{{getenv "BLEVE_URL"}}{{else}}{{ .Site.Params.searchUrl }}{{end}}/api/search.bleve/_search';
+</script>
