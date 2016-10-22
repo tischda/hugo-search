@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+
 	"testing"
 )
 
@@ -18,8 +19,9 @@ func TestHttpServer(t *testing.T) {
 
 	// prepare index
 	buildIndexFromSite(testHugoPath, testIndexPath)
+
 	index := registerIndex(testIndexPath, testIndexName)
-	defer index.Close()
+	defer unregisterIndex(index, testIndexName)
 
 	// http recorder
 	recorder := httptest.NewRecorder()

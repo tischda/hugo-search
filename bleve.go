@@ -14,7 +14,7 @@ import (
 func startSearchServer(addr string, indexPath string) {
 	indexName := path.Base(indexPath)
 	index := registerIndex(indexPath, indexName)
-	defer index.Close()
+	defer unregisterIndex(index, indexName)
 	handler := getCorsHandler(indexName)
 
 	log.Printf("Search server listening on %v", addr)
@@ -30,6 +30,12 @@ func registerIndex(indexPath string, indexName string) bleve.Index {
 	checkFatal(err)
 	bleveHttp.RegisterIndexName(indexName, index)
 	return index
+}
+
+// unregister and close the index
+func unregisterIndex(index bleve.Index, indexName string) {
+	bleveHttp.UnregisterIndexByName(indexName)
+	index.Close()
 }
 
 //  Cross Origin Resource Sharing (https://www.w3.org/TR/cors/)

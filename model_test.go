@@ -18,7 +18,7 @@ func setUp() {
 	expected = &PageEntry{
 		Type:         "page",
 		Section:      "",
-		Content:      "  Lorem ipsum  Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n ",
+		Content:      " Lorem ipsum Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n",
 		WordCount:    10,
 		ReadingTime:  1,
 		Keywords:     []string{},

@@ -1,7 +1,7 @@
 # ----------------------------------------------------------------------------
 # Makefile for hugo-search (windows specific)
 # 
-# Compiler: GO 1.7.1
+# Compiler: GO 1.7.3
 # ----------------------------------------------------------------------------
 
 PROJECT_DIR=$(notdir $(shell pwd))
@@ -39,11 +39,13 @@ install:
 dist: clean build
 	upx -9 ${PROJECT_DIR}.exe
 
-# mind stupid option for MSYS to recognize slashes!
+# notice the absurd --no-preserve-root option needed for MSYS to recognize slashes!
+# and rm.exe must be in a path with no spaces, eg. c:/sbin/git-sdk-64/usr/bin/rm.exe
+# strange that rd /s/q does not work... looks like make is running a bash interpreter
 clean:
 	go clean
-	rm -rf --no-preserve-root test/indexes
-	rm -rf --no-preserve-root test/public
+	rm --no-preserve-root -rf test/indexes
+	rm --no-preserve-root -rf test/public
 
 start:
 	start hugo -s test server --port=$(HUGO_PORT)

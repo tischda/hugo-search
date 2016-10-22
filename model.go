@@ -8,7 +8,7 @@ import (
 )
 
 // PageEntry maps the hugo internal page structure to a JSON structure
-// that bleve search can understand.
+// that blevesearch can understand.
 type PageEntry struct {
 	Title        string    `json:"title"`
 	Type         string    `json:"type"`
@@ -35,8 +35,8 @@ func newIndexEntry(page *hugolib.Page) *PageEntry {
 		Type:         page.Type(),
 		Section:      page.Section(),
 		Content:      page.Plain(),
-		WordCount:    float64(page.WordCount),
-		ReadingTime:  float64(page.ReadingTime),
+		WordCount:    float64(page.WordCount()),
+		ReadingTime:  float64(page.ReadingTime()),
 		Keywords:     page.Keywords,
 		Date:         page.Date,
 		LastModified: page.Lastmod,
