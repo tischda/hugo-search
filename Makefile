@@ -1,10 +1,11 @@
-# ----------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------
 # Makefile for hugo-search (windows specific)
 # 
 # Compiler: GO 1.7.4
 # Make: http://win-builds.org/doku.php/1.5.0_packages#make_40-5_-_gnu_make_utility_to_maintain_groups_of_programs
-# ----------------------------------------------------------------------------
+# -------------------------------------------------------------------------------------------------------------------
 
+# This does not work if set via environment variables
 SHELL=/Windows/system32/cmd.exe
 PROJECT_DIR=$(notdir $(shell pwd))
 
@@ -52,8 +53,7 @@ start: clean install
 	cmd /c "start hugo-search --addr=:$(BLEVE_PORT) --hugoPath=test --indexPath=test/indexes/search.bleve --verbose"
 	cmd /c "start http://localhost:$(HUGO_PORT)/"
 
-# mind the double slashes, this is run under /bin/sh in Windows...
-stop: 
+stop:
 	taskkill /F /IM hugo-search.exe
 	taskkill /F /IM hugo.exe
 

@@ -12,6 +12,10 @@ script:
     - go get github.com/spf13/hugo/hugolib
     - go get github.com/spf13/viper
     - go get github.com/rs/cors
-    - make test
-    - make build
+	- go clean
+	- rm -rf test/indexes
+	- rm -rf test/public
+    - go vet -v
+    - go test -v -cover
+    - go build -ldflags "-X main.version=$(git describe --tags) -s -w"
     - ./hugo-search -version
