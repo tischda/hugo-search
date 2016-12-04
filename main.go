@@ -10,7 +10,7 @@ import (
 // go build -ldflags "-x main.version=$(git describe --tags)"
 var version string
 
-var verbose = flag.Bool("v", false, "verbose output")
+var verbose = flag.Bool("verbose", false, "verbose output")
 
 func main() {
 	var (

@@ -15,7 +15,7 @@ func buildIndexFromSite(theHugoPath string, theIndexPath string) {
 	index := createIndex(theIndexPath)
 	defer index.Close()
 	for _, page := range pages {
-		if pageHasTitle(page) {
+		if pageHasTitle(page) && pageHasValidContent(page) {
 			addPageToIndex(index, page)
 		}
 	}
@@ -42,8 +42,7 @@ func createIndex(path string) bleve.Index {
 
 // adds a hugo page to the bleve search index
 func addPageToIndex(index bleve.Index, page *hugolib.Page) {
-	link, err := page.RelPermalink()
-	checkFatal(err)
+	link := page.RelPermalink()
 	checkFatal(index.Index(link, newIndexEntry(page)))
 	if *verbose {
 		log.Printf("Indexed: %s [%s]", page.File.Path(), page.Title)

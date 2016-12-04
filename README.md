@@ -20,7 +20,7 @@ Usage of hugo-search:
         path of the bleve index (default "indexes/search.bleve")
   -stepAnalysis
         display memory and timing of different steps of the program
-  -v    verbose output
+  -verbose    verbose output
   -version
         print version and exit
 ~~~

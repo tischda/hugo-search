@@ -4,13 +4,18 @@ import "testing"
 
 const testHugoPath = "test"
 
-// checks number of posts in site (drafts don't count)
+// checks the number of pages built for the site (drafts don't count, but taxonomies do)
 func TestReadSitePages(t *testing.T) {
-	actual := readSitePages(testHugoPath).Len()
-	expected := 5
+	pages := readSitePages(testHugoPath)
+	actual := pages.Len()
+	expected := 11
 
 	if expected != actual {
-		t.Errorf("Expected: %d, was: %d", expected, actual)
+		var titles []string
+		for _, page := range pages {
+			titles = append(titles, "'"+page.Title+":"+page.Kind+"'")
+		}
+		t.Errorf("Expected: %d, was: %d, pages returned:\n%s", expected, actual, titles)
 	}
 }
 
@@ -27,5 +32,30 @@ func TestPageHasTitle(t *testing.T) {
 	}
 	if !(a && b) {
 		t.Errorf("Expected: has title==(true && false), was: (%v && %v)", a, b)
+	}
+}
+
+// checks that valid pages are detected and special pages discarded
+func TestPageHasValidContent(t *testing.T) {
+	cases := map[string]bool{
+		"title-page-3":          true,
+		"":                      true,
+		"title-page-1":          true,
+		"title-page-2":          true,
+		"Search Results":        false,
+		"Fails":                 true,
+		"Folder1s":              true,
+		"Tag1":                  false,
+		"Tag2":                  false,
+		"Tags":                  false,
+		"hugo-search test site": true,
+	}
+	pages := readSitePages(testHugoPath)
+	for _, page := range pages {
+		expected := cases[page.Title]
+		actual := pageHasValidContent(page)
+		if expected != actual {
+			t.Errorf("Expected: %t, was: %t, page: '%s'", expected, actual, page.Title)
+		}
 	}
 }
