@@ -3,13 +3,13 @@
   <header>
     <h1>List of pages</h1>
   </header>
-<section id="main">
+  <section id="main">
     <div>
-      {{ range .Data.Pages }}
-	<p>
+      <ul>
+        {{ range .Data.Pages }}
           <li><a href="{{ .Permalink }}">{{ .Title }}</a></li>
-	</p>
-      {{ end }}
+        {{ end }}
+      </ul>
     </div>
   </section>
 </section>

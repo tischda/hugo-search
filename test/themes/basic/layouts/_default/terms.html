@@ -1,0 +1,16 @@
+{{ partial "header" . }}
+<article id="main-content">
+  <header>
+    <h1>{{ partial "title" . }}</h1>
+  </header>
+  <ul>
+  {{ range $key,$value := .Data.Terms.Alphabetical }}
+    <li>
+      <a href="{{ $value.Name | urlize }}">{{ $value.Name }}</a> {{ $value.Count }}
+    </li>
+  {{ end }}
+  </ul>
+</article>
+{{ partial "footer" . }}
+
+

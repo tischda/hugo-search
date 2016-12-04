@@ -1,7 +1,7 @@
 {{ partial "header" . }}
 <article id="main-content">
   <header>
-    <h1>{{ .Title }}</h1>
+    <h1>{{ partial "title" . }}</h1>
     <div class="metas">
       <time datetime="{{ .Date.Format "2006-01-02" }}">{{ .Date.Format "02/01/2006" }}</time>
       {{ if .IsPage }}

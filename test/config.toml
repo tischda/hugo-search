@@ -1,7 +1,8 @@
-baseurl = "../"
-uglyurls = true
+baseUrl = "http://localhost/"
 
 title = "hugo-search test site"
+pluralizelisttitles = "false"
+
 theme = "basic"
 
 [params]

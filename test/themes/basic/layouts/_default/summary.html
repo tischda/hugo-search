@@ -1,0 +1,19 @@
+<article>
+  <div>
+    <h3><a href="{{ .Permalink }}">{{ partial "title" . }}</a></h3>
+  </div>
+  <p>
+  {{ if .IsPage }}
+    <blockquote cite="{{ .Permalink }}">
+      {{ if .Description }}
+        {{ .Description }}
+      {{ else }}
+        {{ .Summary }}
+      {{ end }}
+      <p>
+        <a class="readmore" href="{{ .Permalink }}">{{ .Site.Data.Strings.readmore }} read more...</a>
+      </p>
+    </blockquote>
+  {{ end }}
+  </p>
+</article>

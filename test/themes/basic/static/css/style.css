@@ -1,6 +1,37 @@
+/* general styles */
+
 h1 {
   color: darkblue;
 }
+
+ul {
+  line-height: 1.5em;
+}
+
+a.label {
+    background: #BDBDBD;
+    padding: 0 .5em .1em;
+    color: #fff;
+    border-radius: 5px;
+    font-family: monospace;
+    text-decoration: none;
+}
+
+a.label:hover {
+  background-color: #2053AB;
+}
+
+a.readmore {
+    text-decoration: none;
+}
+
+a.readmore:hover {
+    text-decoration: underline;
+}
+
+
+
+/* search results */
 
 div.facet {
   margin-top: 0.5em;
@@ -16,8 +47,4 @@ span.badge {
 
 div.panel-heading {
   margin-bottom: 0.5em;
-}
-
-li {
-  margin-left: 1em;
 }
