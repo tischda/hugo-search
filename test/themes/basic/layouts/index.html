@@ -7,7 +7,7 @@
     <div>
       <ul>
         {{ range .Data.Pages }}
-          <li><a href="{{ .Permalink }}">{{ .Title }}</a></li>
+          <li><a href="{{ .Permalink }}">{{ if .Title }}{{ .Title }}{{else}}#{{end}}</a></li>
         {{ end }}
       </ul>
     </div>

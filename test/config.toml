@@ -1,9 +1,11 @@
 baseUrl = "http://localhost/"
 
-title = "hugo-search test site"
+title = "hugo-search TEST site"
 pluralizelisttitles = "false"
 
 theme = "basic"
+
+SectionPagesMenu = "main"
 
 [params]
     # Default search URL (no trailing slash!)

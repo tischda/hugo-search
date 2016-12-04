@@ -6,7 +6,7 @@
   <ul>
   {{ range $key,$value := .Data.Terms.Alphabetical }}
     <li>
-      <a href="{{ $value.Name | urlize }}">{{ $value.Name }}</a> {{ $value.Count }}
+      <a href="{{ $value.Name | urlize }}">{{ $value.Name }}</a> : count = {{ $value.Count }}
     </li>
   {{ end }}
   </ul>

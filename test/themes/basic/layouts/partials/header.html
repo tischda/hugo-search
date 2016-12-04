@@ -9,7 +9,14 @@
 <body>
   <main id="main-wrapper">
     <header id="main-header">
-      <p>{{ .Site.Title }} - <a href="/">Home</a></p>
-        {{ partial "search-form.html" . }}
+      <p><b>{{ .Site.Title }}</b> [ <a href="/">Home</a> ] -
+        Menu: 
+          {{ $currentNode := . }}
+          {{ range .Site.Menus.main }}
+            <a href="{{.URL}}">{{ .Name }}</a> /
+          {{ end }}
+          <a href="/tags/">Tags</a>
+      </p>
+      {{ partial "search-form.html" . }}
       <hr/>
     </header>

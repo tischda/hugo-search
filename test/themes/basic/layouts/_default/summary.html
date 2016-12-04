@@ -1,6 +1,6 @@
 <article>
   <div>
-    <h3><a href="{{ .Permalink }}">{{ partial "title" . }}</a></h3>
+    <h3><a href="{{ .Permalink }}">{{ if .Title }}{{ .Title }}{{else}}#{{end}}</a></h3>
   </div>
   <p>
   {{ if .IsPage }}

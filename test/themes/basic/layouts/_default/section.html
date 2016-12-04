@@ -4,7 +4,7 @@
   <h1 id="title">{{ .Title }}</h1>
     <ul id="list">
       {{ range .Data.Pages }}
-        <li><a href="{{ .Permalink }}">{{ partial "title" . }}</a></li>
+        <li><a href="{{ .Permalink }}">{{ if .Title }}{{ .Title }}{{else}}#{{end}}</a></li>
       {{ end }}
     </ul>
   </div>

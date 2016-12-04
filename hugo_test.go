@@ -43,12 +43,12 @@ func TestPageHasValidContent(t *testing.T) {
 		"title-page-1":          true,
 		"title-page-2":          true,
 		"Search Results":        false,
-		"Fails":                 true,
-		"Folder1s":              true,
+		"Fail":                  true,
+		"Folder1":               true,
 		"Tag1":                  false,
 		"Tag2":                  false,
 		"Tags":                  false,
-		"hugo-search test site": true,
+		"hugo-search TEST site": true,
 	}
 	pages := readSitePages(testHugoPath)
 	for _, page := range pages {
