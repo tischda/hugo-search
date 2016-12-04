@@ -1,12 +1,14 @@
 # ----------------------------------------------------------------------------
 # Makefile for hugo-search (windows specific)
 # 
-# Compiler: GO 1.7.3
+# Compiler: GO 1.7.4
+# Make: http://win-builds.org/doku.php/1.5.0_packages#make_40-5_-_gnu_make_utility_to_maintain_groups_of_programs
 # ----------------------------------------------------------------------------
 
+SHELL=/Windows/system32/cmd.exe
 PROJECT_DIR=$(notdir $(shell pwd))
 
-BUILD_TAG=`git describe --tags 2>/dev/null`
+BUILD_TAG=$(shell git describe --tags)
 LDFLAGS=-ldflags "-X main.version=${BUILD_TAG} -s -w"
 
 HUGO_PORT  = 1313
@@ -39,22 +41,20 @@ install:
 dist: clean build
 	upx -9 ${PROJECT_DIR}.exe
 
-# notice the absurd --no-preserve-root option needed for MSYS to recognize slashes!
-# and rm.exe must be in a path with no spaces, eg. c:/sbin/git-sdk-64/usr/bin/rm.exe
-# strange that rd /s/q does not work... looks like make is running a bash interpreter
+# rm is an external : C:\Program Files\Git\usr\bin\rm.exe
 clean:
 	go clean
-	rm --no-preserve-root -rf test/indexes
-	rm --no-preserve-root -rf test/public
+	rm -rf test/indexes
+	rm -rf test/public
 
-start:
-	start hugo -s test server --port=$(HUGO_PORT)
-	start hugo-search --addr=:$(BLEVE_PORT) --hugoPath=test --indexPath=test/indexes/search.bleve
-	start "http://localhost:$(HUGO_PORT)/"
+start: clean install
+	cmd /c "start hugo -s test server --port=$(HUGO_PORT)"
+	cmd /c "start hugo-search --addr=:$(BLEVE_PORT) --hugoPath=test --indexPath=test/indexes/search.bleve --verbose"
+	cmd /c "start http://localhost:$(HUGO_PORT)/"
 
 # mind the double slashes, this is run under /bin/sh in Windows...
 stop: 
-	taskkill //F //IM hugo-search.exe
-	taskkill //F //IM hugo.exe
+	taskkill /F /IM hugo-search.exe
+	taskkill /F /IM hugo.exe
 
 restart: stop start
