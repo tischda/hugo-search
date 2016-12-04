@@ -1,6 +1,6 @@
 ## Changelog
 
-##### hugo-search 1.1.0 - (04 December 2016)
+##### hugo-search 1.1.1 - (04 December 2016)
 
     * Code clean up
     * Unregister index before closing
