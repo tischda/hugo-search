@@ -1,3 +1,4 @@
 coverage.out
 hugo-search
 indexes
+vendor/**/

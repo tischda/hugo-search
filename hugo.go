@@ -20,6 +20,8 @@ func readSitePages(path string) hugolib.Pages {
 	dir, _ := filepath.Abs(path)
 	viper.Set("WorkingDir", dir)
 
+	// Hugo 0.19+ // cfg := new(hugolib.DepsCfg)
+	// Hugo 0.19+ // sites, err := hugolib.NewHugoSitesFromConfiguration(*cfg)
 	sites, err := hugolib.NewHugoSitesFromConfiguration()
 
 	if err != nil {
