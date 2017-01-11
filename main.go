@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 )
 
 // http://technosophos.com/2014/06/11/compile-time-string-in-go.html
@@ -26,6 +27,7 @@ func main() {
 	}
 	if flag.NArg() > 0 {
 		flag.PrintDefaults()
+		os.Exit(1)
 	}
 	log.SetFlags(0)
 
