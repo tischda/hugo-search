@@ -13,6 +13,7 @@ git clone https://github.com/tischda/hugo-search
 cd hugo-search
 
 govendor sync
+make install
 ~~~
 
 
@@ -60,7 +61,7 @@ $ curl http://localhost:8080/api/search.bleve/_search -d '{"query":{"query":"lor
 {"status":{"total":1,"failed":0,"successful":1},"request":{"query":{"query":"lorem","boost":1},"size":0,"from":0,"highlight":null,"fields":null,"facets":null,"explain":false},"hits":[],"total_hits":3,"max_score":0.15713484143442302,"took":0,"facets":{}}
 ~~~
 
-### explore index with bleve-explorer
+### Explore index with bleve-explorer
 
 Warning: Cannot use while `hugo-search` is running.
 
@@ -70,4 +71,4 @@ go get github.com/blevesearch/bleve-explorer
 bleve-explorer -dataDir indexes
 ~~~
 
-check on http://localhost:8095/
+check on [http://localhost:8095/](http://localhost:8095/)
