@@ -4,11 +4,42 @@ import "testing"
 
 const testHugoPath = "test"
 
-// checks the number of pages built for the site (drafts don't count, but taxonomies do)
+// checks the number of pages built for the site (drafts don't count)
 func TestReadSitePages(t *testing.T) {
 	pages := readSitePages(testHugoPath)
 	actual := pages.Len()
-	expected := 11
+
+	/* hugo 0.18.1
+
+	   ['title-page-3:page'
+	    ':page'
+	    'title-page-1:page'
+	    'title-page-2:page'
+	    'Search Results:page'
+	    'Fail:section'
+	    'Folder1:section'
+	    'Tag1:taxonomy'
+	    'Tag2:taxonomy'
+	    'Tags:taxonomyTerm'
+	    'hugo-search TEST site:home'] 11
+
+
+	     hugo 0.31.1
+
+	   ['title-page-3:page'
+	    ':page'
+	    'title-page-1:page'
+	    'title-page-2:page'
+	    'Search Results:page'
+	    'Categories:taxonomyTerm'
+	    'Fail:section'
+	    'Folder1:section'
+	    'Tag1:taxonomy'
+	    'Tag2:taxonomy'
+	    'Tags:taxonomyTerm'
+	    'hugo-search TEST site:home'] 12
+	*/
+	expected := 12
 
 	if expected != actual {
 		var titles []string
@@ -43,6 +74,7 @@ func TestPageHasValidContent(t *testing.T) {
 		"title-page-1":          true,
 		"title-page-2":          true,
 		"Search Results":        false,
+		"Categories":            false,
 		"Fail":                  true,
 		"Folder1":               true,
 		"Tag1":                  false,

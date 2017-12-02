@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/spf13/hugo/hugolib"
+	"github.com/gohugoio/hugo/hugolib"
 )
 
 // PageEntry maps the hugo internal page structure to a JSON structure

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/hugo/hugolib"
+	"github.com/gohugoio/hugo/hugolib"
 )
 
 var expected *PageEntry

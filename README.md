@@ -16,23 +16,7 @@ govendor sync
 make install
 ~~~
 
-
-### Dependencies
-
-Note that blevesearch vendors with [gvt](https://github.com/FiloSottile/gvt) and hugo with 
-[govendor](https://github.com/kardianos/govendor). I copy-pasted `vendor.json` from hugo and
-converted the manifest from bleve manually. Finally, I pinned the versions for bleve and hugo:
-
-~~~
-./gvt-manifest-to-govendor.sh > ./vendor-bleve.sh
-./vendor-bleve.sh
-
-govendor fetch github.com/blevesearch/bleve/...@v0.5
-govendor fetch github.com/spf13/hugo/...@v0.18
-govendor fetch github.com/rs/cors
-~~~
-
-I agree, this is cumbersome.
+Dependencies are compiled from HEAD of each project and pinned down with govendor.
 
 
 ### Usage

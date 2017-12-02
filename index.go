@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/blevesearch/bleve"
-	"github.com/spf13/hugo/hugolib"
+	"github.com/gohugoio/hugo/hugolib"
 )
 
 // builds the search index by passing all pages of hugo site that have a title to the indexer
@@ -15,6 +15,7 @@ func buildIndexFromSite(theHugoPath string, theIndexPath string) {
 	index := createIndex(theIndexPath)
 	defer index.Close()
 	for _, page := range pages {
+		// TODO: home page has no title, are we properly reading the config file ?
 		if pageHasTitle(page) && pageHasValidContent(page) {
 			addPageToIndex(index, page)
 		}

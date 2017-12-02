@@ -1,5 +1,13 @@
 ## Changelog
 
+##### hugo-search 1.3.0 - (02 December 2017)
+
+    * Fix code to match latest versions of hugo and bleve
+
+##### hugo-search 1.2.0 - (11 January 2017)
+
+    * Fix versions with govendor
+
 ##### hugo-search 1.1.1 - (04 December 2016)
 
     * Code clean up

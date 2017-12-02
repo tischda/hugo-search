@@ -1,7 +1,7 @@
 # -------------------------------------------------------------------------------------------------------------------
 # Makefile for hugo-search (windows specific)
 # 
-# Compiler: GO 1.7.4
+# Compiler: GO 1.9.2
 # Make: http://win-builds.org/doku.php/1.5.0_packages#make_40-5_-_gnu_make_utility_to_maintain_groups_of_programs
 # -------------------------------------------------------------------------------------------------------------------
 
@@ -18,7 +18,7 @@ BLEVE_PORT = 8080
 all: get build
 
 build:
-	go build ${LDFLAGS}
+	go build -i ${LDFLAGS}
 
 get:
 	go get -v

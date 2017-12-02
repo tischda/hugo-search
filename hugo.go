@@ -5,32 +5,39 @@ import (
 
 	"path/filepath"
 
-	"github.com/spf13/hugo/hugolib"
-	"github.com/spf13/viper"
+	"os"
+
+	"github.com/gohugoio/hugo/deps"
+	"github.com/gohugoio/hugo/hugofs"
+	"github.com/gohugoio/hugo/hugolib"
 )
 
 // returns all pages of the hugo site located at path
-func readSitePages(path string) hugolib.Pages {
+func readSitePages(source string) hugolib.Pages {
 
-	// warning: if you specify configFilename, it will not search path
-	checkFatal(hugolib.LoadGlobalConfig(path, ""))
+	// all this is done in InitializeConfig() (cf. commands/hugo.go)
+	// but we're not calling it because it does
+	// not allow us to set the workdingDir
+	osFs := hugofs.Os
+	config, err := hugolib.LoadConfig(osFs, source, "")
+	checkFatal(err)
 
-	// this would be done in InitializeConfig() that we're NOT calling
-	// because it does not allow us to specify the source (path)
-	dir, _ := filepath.Abs(path)
-	viper.Set("WorkingDir", dir)
-
-	// Hugo 0.19+ // cfg := new(hugolib.DepsCfg)
-	// Hugo 0.19+ // sites, err := hugolib.NewHugoSitesFromConfiguration(*cfg)
-	sites, err := hugolib.NewHugoSitesFromConfiguration()
-
-	if err != nil {
-		log.Println("FATAL: Error creating sites", err)
+	var dir string
+	if source != "" {
+		dir, _ = filepath.Abs(source)
+	} else {
+		dir, _ = os.Getwd()
 	}
+	config.Set("workingDir", dir)
 
-	if err := sites.Build(hugolib.BuildCfg{SkipRender: true}); err != nil {
-		log.Println("FATAL: Error Processing Source Content", err)
-	}
+	fs := hugofs.NewFrom(osFs, config)
+
+	// cf. hugolib/hugo_sites_build_test.go
+	sites, err := hugolib.NewHugoSites(deps.DepsCfg{Cfg: config, Fs: fs})
+	checkFatal(err)
+
+	err = sites.Build(hugolib.BuildCfg{SkipRender: true})
+	checkFatal(err)
 
 	return sites.Pages()
 }
@@ -51,6 +58,7 @@ func pageHasTitle(page *hugolib.Page) (foundTitle bool) {
 // 'title-page-1:page'		yes
 // 'title-page-2:page'		yes
 // 'Search Results:page'	no	dynamic content, do not index (wish there was a kind 'searchResults')
+// 'Categories:taxonomyTerm'    no	dynamic content, do not index
 // 'Fails:section'		yes
 // 'Folder1s:section'		yes
 // 'Tag1:taxonomy'		no	dynamic content, do not index
