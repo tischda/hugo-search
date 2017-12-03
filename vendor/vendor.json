@@ -255,7 +255,7 @@
 			"revisionTime": "2014-12-30T01:30:33Z"
 		},
 		{
-			"checksumSHA1": "HwxULvSF+b8gh743flzAMY/RhtE=",
+			"checksumSHA1": "mgj+zuxi8AgQsRmBY8LR2ys4gaM=",
 			"path": "github.com/blevesearch/segment",
 			"revision": "762005e7a34fd909a84586299f1dd457371d36ee",
 			"revisionTime": "2016-09-15T18:50:41Z"
@@ -795,6 +795,12 @@
 			"revisionTime": "2017-11-28T02:01:48Z"
 		},
 		{
+			"checksumSHA1": "8SH0adTcQlA+W5dzqiQ3Hft2VXg=",
+			"path": "golang.org/x/sys/unix",
+			"revision": "478fcf54317e52ab69f40bb4c7a1520288d7f7ea",
+			"revisionTime": "2016-12-05T15:46:50Z"
+		},
+		{
 			"checksumSHA1": "tltivJ/uj/lqLk05IqGfCv2F/E8=",
 			"path": "golang.org/x/text/secure/bidirule",
 			"revision": "572a2b141f625f4360cf42a41a43622067e0510b",
@@ -807,19 +813,19 @@
 			"revisionTime": "2017-11-28T07:01:43Z"
 		},
 		{
-			"checksumSHA1": "iB6/RoQIzBaZxVi+t7tzbkwZTlo=",
+			"checksumSHA1": "tk+lpF2CDV7e5RwwRY5ZTCGrd9o=",
 			"path": "golang.org/x/text/unicode/bidi",
 			"revision": "572a2b141f625f4360cf42a41a43622067e0510b",
 			"revisionTime": "2017-11-28T07:01:43Z"
 		},
 		{
-			"checksumSHA1": "km/8bLtOpIP7sua4MnEmiSDYTAE=",
+			"checksumSHA1": "BwRNKgzIMUxk56OScxyr43BV6IE=",
 			"path": "golang.org/x/text/unicode/norm",
 			"revision": "572a2b141f625f4360cf42a41a43622067e0510b",
 			"revisionTime": "2017-11-28T07:01:43Z"
 		},
 		{
-			"checksumSHA1": "vqpfIpBlmIbvehshHVEITE0v0F4=",
+			"checksumSHA1": "CLRfzbz+C4J5SHl2yt6Iz+sWRZE=",
 			"path": "golang.org/x/text/width",
 			"revision": "572a2b141f625f4360cf42a41a43622067e0510b",
 			"revisionTime": "2017-11-28T07:01:43Z"
