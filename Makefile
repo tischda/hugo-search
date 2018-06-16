@@ -10,7 +10,7 @@ SHELL=/Windows/system32/cmd.exe
 PROJECT_DIR=$(notdir $(shell pwd))
 
 BUILD_TAG=$(shell git describe --tags)
-LDFLAGS=-ldflags "-X main.version=${BUILD_TAG} -s -w"
+LDFLAGS=all=-ldflags "-X main.version=${BUILD_TAG} -s -w"
 
 HUGO_PORT  = 1313
 BLEVE_PORT = 8080
