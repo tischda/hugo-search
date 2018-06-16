@@ -1,6 +1,6 @@
 language: go
 go:
-    - 1.9.2
+    - 1.10.3
 
 script:
     - go get github.com/stretchr/testify
@@ -11,5 +11,5 @@ script:
     - rm -rf test/public
     - go vet -v
     - go test -v -cover
-    - go build -ldflags "-X main.version=$(git describe --tags) -s -w"
+    - go build -ldflags "all=-X main.version=$(git describe --tags) -s -w"
     - ./hugo-search -version
