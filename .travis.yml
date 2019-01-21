@@ -1,15 +1,12 @@
 language: go
 go:
-    - 1.10.3
+    - 1.11.4
 
 script:
     - go get github.com/stretchr/testify
-    - go get github.com/kardianos/govendor
-    - govendor sync
-    - go clean
     - rm -rf test/indexes
     - rm -rf test/public
     - go vet -v
     - go test -v -cover
-    - go build -ldflags "all=-X main.version=$(git describe --tags) -s -w"
+    - go build -mod=vendor -ldflags "all=-X main.version=$(git describe --tags) -s -w"
     - ./hugo-search -version

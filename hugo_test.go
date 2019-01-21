@@ -44,7 +44,7 @@ func TestReadSitePages(t *testing.T) {
 	if expected != actual {
 		var titles []string
 		for _, page := range pages {
-			titles = append(titles, "'"+page.Title+":"+page.Kind+"'")
+			titles = append(titles, "'"+page.Title()+":"+page.Kind+"'")
 		}
 		t.Errorf("Expected: %d, was: %d, pages returned:\n%s", expected, actual, titles)
 	}
@@ -55,9 +55,9 @@ func TestPageHasTitle(t *testing.T) {
 	pages := readSitePages(testHugoPath)
 	var a, b bool
 	for _, page := range pages {
-		if page.Title == "title-page-1" {
+		if page.Title() == "title-page-1" {
 			a = pageHasTitle(page)
-		} else if page.Title == "" {
+		} else if page.Title() == "" {
 			b = !pageHasTitle(page)
 		}
 	}
@@ -84,10 +84,10 @@ func TestPageHasValidContent(t *testing.T) {
 	}
 	pages := readSitePages(testHugoPath)
 	for _, page := range pages {
-		expected := cases[page.Title]
+		expected := cases[page.Title()]
 		actual := pageHasValidContent(page)
 		if expected != actual {
-			t.Errorf("Expected: %t, was: %t, page: '%s'", expected, actual, page.Title)
+			t.Errorf("Expected: %t, was: %t, page: '%s'", expected, actual, page.Title())
 		}
 	}
 }

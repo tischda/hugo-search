@@ -6,14 +6,12 @@ A [Bleve](http://www.blevesearch.com) search server for your [Hugo](http://gohug
 
 ~~~
 go get github.com/stretchr/testify
-go get github.com/kardianos/govendor
 
 git clone https://github.com/tischda/hugo-search
 
 cd hugo-search
 
-govendor sync
-make install
+make build
 ~~~
 
 Dependencies are compiled from HEAD of each project and pinned down with govendor.

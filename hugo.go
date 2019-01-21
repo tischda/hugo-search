@@ -12,22 +12,26 @@ import (
 	"github.com/gohugoio/hugo/hugolib"
 )
 
-// returns all pages of the hugo site located at path
-func readSitePages(source string) hugolib.Pages {
-
-	// all this is done in InitializeConfig() (cf. commands/hugo.go)
-	// but we're not calling it because it does
-	// not allow us to set the workdingDir
-	osFs := hugofs.Os
-	config, err := hugolib.LoadConfig(osFs, source, "")
-	checkFatal(err)
+// Returns all pages of the hugo site located at path.
+// This function duplicates code from InitializeConfig() (cf. commands/hugo.go)
+// because it does not allow us to set the workdingDir
+func readSitePages(path string) hugolib.Pages {
 
 	var dir string
-	if source != "" {
-		dir, _ = filepath.Abs(source)
+	if path != "" {
+		dir, _ = filepath.Abs(path)
+
 	} else {
 		dir, _ = os.Getwd()
 	}
+	osFs := hugofs.Os
+
+	// WorkdingDir is not evaluated here
+	cfg := hugolib.ConfigSourceDescriptor{Fs: osFs, Path: dir}
+	config, _, err := hugolib.LoadConfig(cfg)
+	checkFatal(err)
+
+	// We still need to set workdingDir
 	config.Set("workingDir", dir)
 
 	fs := hugofs.NewFrom(osFs, config)
@@ -44,7 +48,7 @@ func readSitePages(source string) hugolib.Pages {
 
 // checks if the page has a title (that will appear in the search result)
 func pageHasTitle(page *hugolib.Page) (foundTitle bool) {
-	foundTitle = len(page.Title) > 0
+	foundTitle = len(page.Title()) > 0
 	if !foundTitle && *verbose {
 		log.Println("WARN: Title metadata missing in document:", page.File.Path())
 	}
@@ -68,7 +72,7 @@ func pageHasTitle(page *hugolib.Page) (foundTitle bool) {
 func pageHasValidContent(page *hugolib.Page) bool {
 	switch page.Kind {
 	case "page":
-		if page.Title == "Search Results" {
+		if page.Title() == "Search Results" {
 			break
 		}
 		fallthrough
@@ -78,7 +82,7 @@ func pageHasValidContent(page *hugolib.Page) bool {
 		return true
 	}
 	if *verbose {
-		log.Printf("Ignoring: %s [%s] of kind: %s", page.File.Path(), page.Title, page.Kind)
+		log.Printf("Ignoring: %s [%s] of kind: %s", page.File.Path(), page.Title(), page.Kind)
 	}
 	return false
 }

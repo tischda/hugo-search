@@ -57,7 +57,7 @@ func comparePages(t *testing.T, actual *PageEntry, expected *PageEntry) {
 func findPage(title string) *hugolib.Page {
 	pages := readSitePages(testHugoPath)
 	for _, page := range pages {
-		if page.Title == title {
+		if page.Title() == title {
 			return page
 		}
 	}

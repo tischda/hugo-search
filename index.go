@@ -46,6 +46,6 @@ func addPageToIndex(index bleve.Index, page *hugolib.Page) {
 	link := page.RelPermalink()
 	checkFatal(index.Index(link, newIndexEntry(page)))
 	if *verbose {
-		log.Printf("Indexed: %s [%s]", page.File.Path(), page.Title)
+		log.Printf("Indexed: %s [%s]", page.File.Path(), page.Title())
 	}
 }

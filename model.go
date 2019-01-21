@@ -24,14 +24,16 @@ type PageEntry struct {
 
 func newIndexEntry(page *hugolib.Page) *PageEntry {
 	var author string
-	switch str := page.Params["author"].(type) {
+
+	// BUG: page.Author() and page.Authors() return empty values
+	switch str := page.Params()["author"].(type) {
 	case string:
 		author = str
 	case []string:
 		author = strings.Join(str, ", ")
 	}
 	return &PageEntry{
-		Title:        page.Title,
+		Title:        page.Title(),
 		Type:         page.Type(),
 		Section:      page.Section(),
 		Content:      page.Plain(),

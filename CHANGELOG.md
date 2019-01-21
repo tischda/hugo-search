@@ -1,5 +1,10 @@
 ## Changelog
 
+##### hugo-search 1.4.0 - (21 January 2019)
+
+    * Use go modules instead of govendor
+    * Update Bleve & Hugo dependencies
+
 ##### hugo-search 1.3.0 - (02 December 2017)
 
     * Fix code to match latest versions of hugo and bleve

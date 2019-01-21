@@ -1,4 +1,5 @@
+bin
 coverage.out
 hugo-search
 indexes
-vendor/**/
+*.exe
