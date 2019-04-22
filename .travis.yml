@@ -8,7 +8,6 @@ env:
 script:
     - rm -rf test/indexes
     - rm -rf test/public
-    - go vet
-    - go test -v -cover
+    - go test -mod=vendor -v -cover
     - go build -mod=vendor -ldflags "all=-X main.version=$(git describe --tags) -s -w"
     - ./hugo-search -version
