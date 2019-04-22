@@ -24,13 +24,13 @@ import (
 	"github.com/gohugoio/hugo/transform"
 
 	"github.com/gohugoio/hugo/media"
-	"github.com/tdewolff/minify"
-	"github.com/tdewolff/minify/css"
-	"github.com/tdewolff/minify/html"
-	"github.com/tdewolff/minify/js"
-	"github.com/tdewolff/minify/json"
-	"github.com/tdewolff/minify/svg"
-	"github.com/tdewolff/minify/xml"
+	"github.com/tdewolff/minify/v2"
+	"github.com/tdewolff/minify/v2/css"
+	"github.com/tdewolff/minify/v2/html"
+	"github.com/tdewolff/minify/v2/js"
+	"github.com/tdewolff/minify/v2/json"
+	"github.com/tdewolff/minify/v2/svg"
+	"github.com/tdewolff/minify/v2/xml"
 )
 
 // Client wraps a minifier.
@@ -71,8 +71,13 @@ func New(mediaTypes media.Types, outputFormats output.Formats) Client {
 		KeepDefaultAttrVals:     true,
 	}
 
+	cssMin := &css.Minifier{
+		Decimals: -1,
+		KeepCSS2: true,
+	}
+
 	// We use the Type definition of the media types defined in the site if found.
-	addMinifierFunc(m, mediaTypes, "css", css.Minify)
+	addMinifier(m, mediaTypes, "css", cssMin)
 	addMinifierFunc(m, mediaTypes, "js", js.Minify)
 	m.AddFuncRegexp(regexp.MustCompile("^(application|text)/(x-)?(java|ecma)script$"), js.Minify)
 	m.AddFuncRegexp(regexp.MustCompile("^(application|text)/(x-|ld\\+)?json$"), json.Minify)

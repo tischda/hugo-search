@@ -87,7 +87,7 @@ func (p *Page) initTargetPathDescriptor() error {
 		Kind:        p.Kind,
 		Sections:    p.sections,
 		UglyURLs:    p.s.Info.uglyURLs(p),
-		Dir:         filepath.ToSlash(p.Source.Dir()),
+		Dir:         filepath.ToSlash(p.Dir()),
 		URL:         p.frontMatterURL,
 		IsMultihost: p.s.owner.IsMultihost(),
 	}
@@ -144,7 +144,7 @@ func (p *Page) initURLs() error {
 		// Any language code in the path will be added later.
 		p.relTargetPathBase = strings.TrimPrefix(p.relTargetPathBase, prefix+"/")
 	}
-	p.relPermalink = p.s.PathSpec.PrependBasePath(rel)
+	p.relPermalink = p.s.PathSpec.PrependBasePath(rel, false)
 	p.layoutDescriptor = p.createLayoutDescriptor()
 	return nil
 }
@@ -310,7 +310,7 @@ func (p *Page) createRelativeTargetPathForOutputFormat(f output.Format) string {
 	}
 
 	// For /index.json etc. we must  use the full path.
-	if strings.HasSuffix(f.BaseFilename(), "html") {
+	if f.MediaType.FullSuffix() == ".html" && filepath.Base(tp) == "index.html" {
 		tp = strings.TrimSuffix(tp, f.BaseFilename())
 	}
 

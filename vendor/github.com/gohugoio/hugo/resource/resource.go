@@ -14,7 +14,6 @@
 package resource
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,12 +26,12 @@ import (
 
 	"github.com/gohugoio/hugo/output"
 	"github.com/gohugoio/hugo/tpl"
+	"github.com/pkg/errors"
 
+	"github.com/gohugoio/hugo/cache/filecache"
 	"github.com/gohugoio/hugo/common/collections"
 	"github.com/gohugoio/hugo/common/hugio"
 	"github.com/gohugoio/hugo/common/loggers"
-
-	jww "github.com/spf13/jwalterweatherman"
 
 	"github.com/spf13/afero"
 
@@ -51,6 +50,7 @@ var (
 	_ ResourcesLanguageMerger = (*Resources)(nil)
 	_ permalinker             = (*genericResource)(nil)
 	_ collections.Slicer      = (*genericResource)(nil)
+	_ Identifier              = (*genericResource)(nil)
 )
 
 var noData = make(map[string]interface{})
@@ -77,6 +77,8 @@ type Cloner interface {
 
 // Resource represents a linkable resource, i.e. a content page, image etc.
 type Resource interface {
+	resourceBase
+
 	// Permalink represents the absolute link to this resource.
 	Permalink() string
 
@@ -87,9 +89,6 @@ type Resource interface {
 	// part of the MIME type, e.g. "image", "application", "text" etc.
 	// For content pages, this value is "page".
 	ResourceType() string
-
-	// MediaType is this resource's MIME type.
-	MediaType() media.Type
 
 	// Name is the logical name of this resource. This can be set in the front matter
 	// metadata for this resource. If not set, Hugo will assign a value.
@@ -110,6 +109,13 @@ type Resource interface {
 	Params() map[string]interface{}
 }
 
+// resourceBase pulls out the minimal set of operations to define a Resource,
+// to simplify testing etc.
+type resourceBase interface {
+	// MediaType is this resource's MIME type.
+	MediaType() media.Type
+}
+
 // ResourcesLanguageMerger describes an interface for merging resources from a
 // different language.
 type ResourcesLanguageMerger interface {
@@ -122,12 +128,17 @@ type translatedResource interface {
 	TranslationKey() string
 }
 
+// Identifier identifies a resource.
+type Identifier interface {
+	Key() string
+}
+
 // ContentResource represents a Resource that provides a way to get to its content.
 // Most Resource types in Hugo implements this interface, including Page.
 // This should be used with care, as it will read the file content into memory, but it
 // should be cached as effectively as possible by the implementation.
 type ContentResource interface {
-	Resource
+	resourceBase
 
 	// Content returns this resource's content. It will be equivalent to reading the content
 	// that RelPermalink points to in the published folder.
@@ -144,7 +155,7 @@ type OpenReadSeekCloser func() (hugio.ReadSeekCloser, error)
 
 // ReadSeekCloserResource is a Resource that supports loading its content.
 type ReadSeekCloserResource interface {
-	Resource
+	resourceBase
 	ReadSeekCloser() (hugio.ReadSeekCloser, error)
 }
 
@@ -273,7 +284,7 @@ type Spec struct {
 	MediaTypes    media.Types
 	OutputFormats output.Formats
 
-	Logger *jww.Notepad
+	Logger *loggers.Logger
 
 	TextTemplates tpl.TemplateParseFinder
 
@@ -282,12 +293,15 @@ type Spec struct {
 
 	imageCache    *imageCache
 	ResourceCache *ResourceCache
-
-	GenImagePath  string
-	GenAssetsPath string
+	FileCaches    filecache.Caches
 }
 
-func NewSpec(s *helpers.PathSpec, logger *jww.Notepad, outputFormats output.Formats, mimeTypes media.Types) (*Spec, error) {
+func NewSpec(
+	s *helpers.PathSpec,
+	fileCaches filecache.Caches,
+	logger *loggers.Logger,
+	outputFormats output.Formats,
+	mimeTypes media.Types) (*Spec, error) {
 
 	imaging, err := decodeImaging(s.Cfg.GetStringMap("imaging"))
 	if err != nil {
@@ -298,24 +312,16 @@ func NewSpec(s *helpers.PathSpec, logger *jww.Notepad, outputFormats output.Form
 		logger = loggers.NewErrorLogger()
 	}
 
-	genImagePath := filepath.FromSlash("_gen/images")
-	// The transformed assets (CSS etc.)
-	genAssetsPath := filepath.FromSlash("_gen/assets")
-
 	rs := &Spec{PathSpec: s,
 		Logger:        logger,
-		GenImagePath:  genImagePath,
-		GenAssetsPath: genAssetsPath,
 		imaging:       &imaging,
 		MediaTypes:    mimeTypes,
 		OutputFormats: outputFormats,
+		FileCaches:    fileCaches,
 		imageCache: newImageCache(
+			fileCaches.ImageCache(),
+
 			s,
-			// We're going to write a cache pruning routine later, so make it extremely
-			// unlikely that the user shoots him or herself in the foot
-			// and this is set to a value that represents data he/she
-			// cares about. This should be set in stone once released.
-			genImagePath,
 		)}
 
 	rs.ResourceCache = newResourceCache(rs)
@@ -542,7 +548,7 @@ type resourceHash struct {
 type publishOnce struct {
 	publisherInit sync.Once
 	publisherErr  error
-	logger        *jww.Notepad
+	logger        *loggers.Logger
 }
 
 func (l *publishOnce) publish(s Source) error {
@@ -660,7 +666,7 @@ func (l *genericResource) initHash() error {
 		var f hugio.ReadSeekCloser
 		f, err = l.ReadSeekCloser()
 		if err != nil {
-			err = fmt.Errorf("failed to open source file: %s", err)
+			err = errors.Wrap(err, "failed to open source file")
 			return
 		}
 		defer f.Close()
@@ -714,7 +720,7 @@ func (l *genericResource) publishIfNeeded() {
 
 func (l *genericResource) Permalink() string {
 	l.publishIfNeeded()
-	return l.spec.PermalinkForBaseURL(l.relPermalinkForRel(l.relTargetDirFile.path()), l.spec.BaseURL.HostURL())
+	return l.spec.PermalinkForBaseURL(l.relPermalinkForRel(l.relTargetDirFile.path(), true), l.spec.BaseURL.HostURL())
 }
 
 func (l *genericResource) RelPermalink() string {
@@ -722,12 +728,16 @@ func (l *genericResource) RelPermalink() string {
 	return l.relPermalinkFor(l.relTargetDirFile.path())
 }
 
+func (l *genericResource) Key() string {
+	return l.relTargetDirFile.path()
+}
+
 func (l *genericResource) relPermalinkFor(target string) string {
-	return l.relPermalinkForRel(target)
+	return l.relPermalinkForRel(target, false)
 
 }
 func (l *genericResource) permalinkFor(target string) string {
-	return l.spec.PermalinkForBaseURL(l.relPermalinkForRel(target), l.spec.BaseURL.HostURL())
+	return l.spec.PermalinkForBaseURL(l.relPermalinkForRel(target, true), l.spec.BaseURL.HostURL())
 
 }
 func (l *genericResource) relTargetPathsFor(target string) []string {
@@ -772,23 +782,23 @@ func (l *genericResource) updateParams(params map[string]interface{}) {
 	}
 }
 
-func (l *genericResource) relPermalinkForRel(rel string) string {
-	return l.spec.PathSpec.URLizeFilename(l.relTargetPathForRel(rel, false, true))
+func (l *genericResource) relPermalinkForRel(rel string, isAbs bool) string {
+	return l.spec.PathSpec.URLizeFilename(l.relTargetPathForRel(rel, false, isAbs, true))
 }
 
 func (l *genericResource) relTargetPathsForRel(rel string) []string {
 	if len(l.baseTargetPathDirs) == 0 {
-		return []string{l.relTargetPathForRelAndBasePath(rel, "", false)}
+		return []string{l.relTargetPathForRelAndBasePath(rel, "", false, false)}
 	}
 
 	var targetPaths = make([]string, len(l.baseTargetPathDirs))
 	for i, dir := range l.baseTargetPathDirs {
-		targetPaths[i] = l.relTargetPathForRelAndBasePath(rel, dir, false)
+		targetPaths[i] = l.relTargetPathForRelAndBasePath(rel, dir, false, false)
 	}
 	return targetPaths
 }
 
-func (l *genericResource) relTargetPathForRel(rel string, addBaseTargetPath, isURL bool) string {
+func (l *genericResource) relTargetPathForRel(rel string, addBaseTargetPath, isAbs, isURL bool) string {
 	if addBaseTargetPath && len(l.baseTargetPathDirs) > 1 {
 		panic("multiple baseTargetPathDirs")
 	}
@@ -797,10 +807,10 @@ func (l *genericResource) relTargetPathForRel(rel string, addBaseTargetPath, isU
 		basePath = l.baseTargetPathDirs[0]
 	}
 
-	return l.relTargetPathForRelAndBasePath(rel, basePath, isURL)
+	return l.relTargetPathForRelAndBasePath(rel, basePath, isAbs, isURL)
 }
 
-func (l *genericResource) relTargetPathForRelAndBasePath(rel, basePath string, isURL bool) string {
+func (l *genericResource) relTargetPathForRelAndBasePath(rel, basePath string, isAbs, isURL bool) string {
 	if l.targetPathBuilder != nil {
 		rel = l.targetPathBuilder(rel)
 	}
@@ -817,8 +827,11 @@ func (l *genericResource) relTargetPathForRelAndBasePath(rel, basePath string, i
 		rel = path.Join(l.baseOffset, rel)
 	}
 
-	if isURL && l.spec.PathSpec.BasePath != "" {
-		rel = path.Join(l.spec.PathSpec.BasePath, rel)
+	if isURL {
+		bp := l.spec.PathSpec.GetBasePath(!isAbs)
+		if bp != "" {
+			rel = path.Join(bp, rel)
+		}
 	}
 
 	if len(rel) == 0 || rel[0] != '/' {

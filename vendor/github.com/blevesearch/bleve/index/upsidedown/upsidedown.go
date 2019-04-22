@@ -775,7 +775,7 @@ func (udc *UpsideDownCouch) termVectorsFromTokenFreq(field uint16, tf *analysis.
 }
 
 func (udc *UpsideDownCouch) termFieldVectorsFromTermVectors(in []*TermVector) []*index.TermFieldVector {
-	if len(in) <= 0 {
+	if len(in) == 0 {
 		return nil
 	}
 
@@ -957,6 +957,11 @@ func (udc *UpsideDownCouch) Batch(batch *index.Batch) (err error) {
 		atomic.AddUint64(&udc.stats.numPlainTextBytesIndexed, numPlainTextBytes)
 	} else {
 		atomic.AddUint64(&udc.stats.errors, 1)
+	}
+
+	persistedCallback := batch.PersistedCallback()
+	if persistedCallback != nil {
+		persistedCallback(err)
 	}
 	return
 }

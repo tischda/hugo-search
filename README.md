@@ -2,19 +2,20 @@
 
 A [Bleve](http://www.blevesearch.com) search server for your [Hugo](http://gohugo.io) site.
 
-### Install
+### Dependencies
+
+This project uses [go 1.11 modules](https://github.com/golang/go/wiki/Modules)
+
+
+### Compile
+
+Outside of GOPATH:
 
 ~~~
-go get github.com/stretchr/testify
-
 git clone https://github.com/tischda/hugo-search
-
 cd hugo-search
-
 make build
 ~~~
-
-Dependencies are compiled from HEAD of each project and pinned down with govendor.
 
 
 ### Usage
@@ -27,8 +28,6 @@ Usage of hugo-search:
         path of the hugo site (default ".")
   -indexPath string
         path of the bleve index (default "indexes/search.bleve")
-  -stepAnalysis
-        display memory and timing of different steps of the program
   -verbose    verbose output
   -version
         print version and exit

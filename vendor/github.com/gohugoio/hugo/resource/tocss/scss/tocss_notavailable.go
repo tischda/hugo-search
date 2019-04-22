@@ -16,7 +16,7 @@
 package scss
 
 import (
-	"github.com/gohugoio/hugo/common/errors"
+	"github.com/gohugoio/hugo/common/herrors"
 	"github.com/gohugoio/hugo/resource"
 )
 
@@ -26,5 +26,5 @@ func Supports() bool {
 }
 
 func (t *toCSSTransformation) Transform(ctx *resource.ResourceTransformationCtx) error {
-	return errors.ErrFeatureNotAvailable
+	return herrors.ErrFeatureNotAvailable
 }

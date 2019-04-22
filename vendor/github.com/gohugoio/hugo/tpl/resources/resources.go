@@ -11,12 +11,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package resources provides template functions for working with resources.
 package resources
 
 import (
 	"errors"
 	"fmt"
 	"path/filepath"
+
+	_errors "github.com/pkg/errors"
 
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/resource"
@@ -32,6 +35,10 @@ import (
 
 // New returns a new instance of the resources-namespaced template functions.
 func New(deps *deps.Deps) (*Namespace, error) {
+	if deps.ResourceSpec == nil {
+		return &Namespace{}, nil
+	}
+
 	scssClient, err := scss.New(deps.BaseFs.Assets, deps.ResourceSpec)
 	if err != nil {
 		return nil, err
@@ -256,7 +263,7 @@ func (ns *Namespace) resolveArgs(args []interface{}) (resource.Resource, map[str
 
 	m, err := cast.ToStringMapE(args[0])
 	if err != nil {
-		return nil, nil, fmt.Errorf("invalid options type: %s", err)
+		return nil, nil, _errors.Wrap(err, "invalid options type")
 	}
 
 	return r, m, nil

@@ -19,8 +19,6 @@ import (
 
 	"errors"
 
-	jww "github.com/spf13/jwalterweatherman"
-
 	"github.com/fsnotify/fsnotify"
 	"github.com/gohugoio/hugo/helpers"
 )
@@ -28,12 +26,28 @@ import (
 // Build builds all sites. If filesystem events are provided,
 // this is considered to be a potential partial rebuild.
 func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) error {
+	errCollector := h.StartErrorCollector()
+	errs := make(chan error)
+
+	go func(from, to chan error) {
+		var errors []error
+		i := 0
+		for e := range from {
+			i++
+			if i > 50 {
+				break
+			}
+			errors = append(errors, e)
+		}
+		to <- h.pickOneAndLogTheRest(errors)
+
+		close(to)
+
+	}(errCollector, errs)
 
 	if h.Metrics != nil {
 		h.Metrics.Reset()
 	}
-
-	//t0 := time.Now()
 
 	// Need a pointer as this may be modified.
 	conf := &config
@@ -43,31 +57,46 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) error {
 		conf.whatChanged = &whatChanged{source: true, other: true}
 	}
 
-	for _, s := range h.Sites {
-		s.Deps.BuildStartListeners.Notify()
-	}
+	var prepareErr error
 
-	if len(events) > 0 {
-		// Rebuild
-		if err := h.initRebuild(conf); err != nil {
-			return err
+	if !config.PartialReRender {
+		prepare := func() error {
+			for _, s := range h.Sites {
+				s.Deps.BuildStartListeners.Notify()
+			}
+
+			if len(events) > 0 {
+				// Rebuild
+				if err := h.initRebuild(conf); err != nil {
+					return err
+				}
+			} else {
+				if err := h.init(conf); err != nil {
+					return err
+				}
+			}
+
+			if err := h.process(conf, events...); err != nil {
+				return err
+			}
+
+			if err := h.assemble(conf); err != nil {
+				return err
+			}
+			return nil
 		}
-	} else {
-		if err := h.init(conf); err != nil {
-			return err
+
+		prepareErr = prepare()
+		if prepareErr != nil {
+			h.SendError(prepareErr)
 		}
+
 	}
 
-	if err := h.process(conf, events...); err != nil {
-		return err
-	}
-
-	if err := h.assemble(conf); err != nil {
-		return err
-	}
-
-	if err := h.render(conf); err != nil {
-		return err
+	if prepareErr == nil {
+		if err := h.render(conf); err != nil {
+			h.SendError(err)
+		}
 	}
 
 	if h.Metrics != nil {
@@ -79,7 +108,19 @@ func (h *HugoSites) Build(config BuildCfg, events ...fsnotify.Event) error {
 		h.Log.FEEDBACK.Println()
 	}
 
-	errorCount := h.Log.LogCountForLevel(jww.LevelError)
+	select {
+	// Make sure the channel always gets something.
+	case errCollector <- nil:
+	default:
+	}
+	close(errCollector)
+
+	err := <-errs
+	if err != nil {
+		return err
+	}
+
+	errorCount := h.Log.ErrorCounter.Count()
 	if errorCount > 0 {
 		return fmt.Errorf("logged %d error(s)", errorCount)
 	}
@@ -103,8 +144,8 @@ func (h *HugoSites) init(config *BuildCfg) error {
 		h.reset()
 	}
 
-	if config.CreateSitesFromConfig {
-		if err := h.createSitesFromConfig(); err != nil {
+	if config.NewConfig != nil {
+		if err := h.createSitesFromConfig(config.NewConfig); err != nil {
 			return err
 		}
 	}
@@ -113,8 +154,8 @@ func (h *HugoSites) init(config *BuildCfg) error {
 }
 
 func (h *HugoSites) initRebuild(config *BuildCfg) error {
-	if config.CreateSitesFromConfig {
-		return errors.New("Rebuild does not support 'CreateSitesFromConfig'.")
+	if config.NewConfig != nil {
+		return errors.New("Rebuild does not support 'NewConfig'.")
 	}
 
 	if config.ResetState {
@@ -228,8 +269,10 @@ func (h *HugoSites) assemble(config *BuildCfg) error {
 }
 
 func (h *HugoSites) render(config *BuildCfg) error {
-	for _, s := range h.Sites {
-		s.initRenderFormats()
+	if !config.PartialReRender {
+		for _, s := range h.Sites {
+			s.initRenderFormats()
+		}
 	}
 
 	for _, s := range h.Sites {
@@ -242,15 +285,23 @@ func (h *HugoSites) render(config *BuildCfg) error {
 
 				isRenderingSite := s == s2
 
-				if err := s2.preparePagesForRender(isRenderingSite && i == 0); err != nil {
-					return err
+				if !config.PartialReRender {
+					if err := s2.preparePagesForRender(isRenderingSite && i == 0); err != nil {
+						return err
+					}
 				}
 
 			}
 
 			if !config.SkipRender {
-				if err := s.render(config, i); err != nil {
-					return err
+				if config.PartialReRender {
+					if err := s.renderPages(config); err != nil {
+						return err
+					}
+				} else {
+					if err := s.render(config, i); err != nil {
+						return err
+					}
 				}
 			}
 		}

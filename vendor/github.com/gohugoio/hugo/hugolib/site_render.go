@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pkg/errors"
+
 	"github.com/gohugoio/hugo/output"
 )
 
@@ -30,7 +32,7 @@ func (s *Site) renderPages(cfg *BuildCfg) error {
 	pages := make(chan *Page)
 	errs := make(chan error)
 
-	go errorCollator(results, errs)
+	go s.errorCollator(results, errs)
 
 	numWorkers := getGoMaxProcs() * 4
 
@@ -41,7 +43,7 @@ func (s *Site) renderPages(cfg *BuildCfg) error {
 		go pageRenderer(s, pages, results, wg)
 	}
 
-	if len(s.headlessPages) > 0 {
+	if !cfg.PartialReRender && len(s.headlessPages) > 0 {
 		wg.Add(1)
 		go headlessPagesPublisher(s, wg)
 	}
@@ -60,7 +62,7 @@ func (s *Site) renderPages(cfg *BuildCfg) error {
 
 	err := <-errs
 	if err != nil {
-		return fmt.Errorf("Error(s) rendering pages: %s", err)
+		return errors.Wrap(err, "failed to render pages")
 	}
 	return nil
 }
@@ -132,7 +134,7 @@ func pageRenderer(s *Site, pages <-chan *Page, results chan<- error, wg *sync.Wa
 
 			if shouldRender {
 				if err := pageOutput.renderResources(); err != nil {
-					s.Log.ERROR.Printf("Failed to render resources for page %q: %s", page, err)
+					s.SendError(page.errorf(err, "failed to render page resources"))
 					continue
 				}
 			}
@@ -144,7 +146,7 @@ func pageRenderer(s *Site, pages <-chan *Page, results chan<- error, wg *sync.Wa
 			} else {
 				layouts, err = s.layouts(pageOutput)
 				if err != nil {
-					s.Log.ERROR.Printf("Failed to resolve layout output %q for page %q: %s", outFormat.Name, page, err)
+					s.Log.ERROR.Printf("Failed to resolve layout for output %q for page %q: %s", outFormat.Name, page, err)
 					continue
 				}
 			}
@@ -301,7 +303,7 @@ func (s *Site) render404() error {
 		s.Log.ERROR.Printf("Failed to create target path for page %q: %s", p, err)
 	}
 
-	return s.renderAndWritePage(&s.PathSpec.ProcessingStats.Pages, "404 page", targetPath, pageOutput, s.appendThemeTemplates(nfLayouts)...)
+	return s.renderAndWritePage(&s.PathSpec.ProcessingStats.Pages, "404 page", targetPath, pageOutput, nfLayouts...)
 }
 
 func (s *Site) renderSitemap() error {
@@ -352,7 +354,7 @@ func (s *Site) renderSitemap() error {
 	addLanguagePrefix := n.Site.IsMultiLingual()
 
 	return s.renderAndWriteXML(&s.PathSpec.ProcessingStats.Sitemaps, "sitemap",
-		n.addLangPathPrefixIfFlagSet(page.Sitemap.Filename, addLanguagePrefix), n, s.appendThemeTemplates(smLayouts)...)
+		n.addLangPathPrefixIfFlagSet(page.Sitemap.Filename, addLanguagePrefix), n, smLayouts...)
 }
 
 func (s *Site) renderRobotsTXT() error {
@@ -383,7 +385,7 @@ func (s *Site) renderRobotsTXT() error {
 		s.Log.ERROR.Printf("Failed to create target path for page %q: %s", p, err)
 	}
 
-	return s.renderAndWritePage(&s.PathSpec.ProcessingStats.Pages, "Robots Txt", targetPath, pageOutput, s.appendThemeTemplates(rLayouts)...)
+	return s.renderAndWritePage(&s.PathSpec.ProcessingStats.Pages, "Robots Txt", targetPath, pageOutput, rLayouts...)
 
 }
 

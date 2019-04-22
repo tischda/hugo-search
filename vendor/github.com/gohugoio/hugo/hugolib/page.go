@@ -18,12 +18,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"reflect"
-	"unicode"
 
-	"github.com/gohugoio/hugo/media"
+	"github.com/gohugoio/hugo/common/hugo"
 
 	"github.com/gohugoio/hugo/common/maps"
+	"github.com/gohugoio/hugo/common/urls"
+	"github.com/gohugoio/hugo/media"
 
 	"github.com/gohugoio/hugo/langs"
 
@@ -36,7 +38,6 @@ import (
 	"github.com/gohugoio/hugo/resource"
 
 	"github.com/gohugoio/hugo/output"
-	"github.com/gohugoio/hugo/parser"
 	"github.com/mitchellh/mapstructure"
 
 	"html/template"
@@ -50,7 +51,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	bp "github.com/gohugoio/hugo/bufferpool"
 	"github.com/gohugoio/hugo/compare"
 	"github.com/gohugoio/hugo/source"
 	"github.com/spf13/cast"
@@ -70,7 +70,15 @@ var (
 
 	// Assert that it implements the interface needed for related searches.
 	_ related.Document = (*Page)(nil)
+
+	// Page supports ref and relref
+	_ urls.RefLinker = (*Page)(nil)
 )
+
+// Wraps a Page.
+type pageContainer interface {
+	page() *Page
+}
 
 const (
 	KindPage = "page"
@@ -140,6 +148,7 @@ type Page struct {
 	contentv        template.HTML
 	summary         template.HTML
 	TableOfContents template.HTML
+
 	// Passed to the shortcodes
 	pageWithoutContent *PageWithoutContent
 
@@ -160,7 +169,6 @@ type Page struct {
 
 	extension   string
 	contentType string
-	renderable  bool
 
 	Layout string
 
@@ -170,18 +178,11 @@ type Page struct {
 
 	linkTitle string
 
-	frontmatter []byte
-
-	// rawContent is the raw content read from the content file.
-	rawContent []byte
-
-	// workContent is a copy of rawContent that may be mutated during site build.
-	workContent []byte
+	// Content items.
+	pageContent
 
 	// whether the content is in a CJK language.
 	isCJKLanguage bool
-
-	shortcodeState *shortcodeHandler
 
 	// the content stripped for HTML
 	plain      string // TODO should be []byte
@@ -193,7 +194,7 @@ type Page struct {
 	// menus
 	pageMenus PageMenus
 
-	Source
+	source.File
 
 	Position `json:"-"`
 
@@ -300,20 +301,27 @@ func (p *Page) initContent() {
 		defer cancel()
 		c := make(chan error, 1)
 
+		p.contentInitMu.Lock()
+		defer p.contentInitMu.Unlock()
+
 		go func() {
 			var err error
-			p.contentInitMu.Lock()
-			defer p.contentInitMu.Unlock()
 
-			err = p.prepareForRender()
+			err = p.prepareContent()
 			if err != nil {
-				p.s.Log.ERROR.Printf("Failed to prepare page %q for render: %s", p.Path(), err)
+				c <- err
 				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
 
 			if len(p.summary) == 0 {
 				if err = p.setAutoSummary(); err != nil {
-					err = fmt.Errorf("Failed to set user auto summary for page %q: %s", p.pathOrTitle(), err)
+					err = p.errorf(err, "failed to set auto summary")
 				}
 			}
 			c <- err
@@ -321,10 +329,10 @@ func (p *Page) initContent() {
 
 		select {
 		case <-ctx.Done():
-			p.s.Log.WARN.Printf("WARNING: Timed out creating content for page %q (.Content will be empty). This is most likely a circular shortcode content loop that should be fixed. If this is just a shortcode calling a slow remote service, try to set \"timeout=20000\" (or higher, value is in milliseconds) in config.toml.\n", p.pathOrTitle())
+			p.s.Log.WARN.Printf("Timed out creating content for page %q (.Content will be empty). This is most likely a circular shortcode content loop that should be fixed. If this is just a shortcode calling a slow remote service, try to set \"timeout=30000\" (or higher, value is in milliseconds) in config.toml.\n", p.pathOrTitle())
 		case err := <-c:
 			if err != nil {
-				p.s.Log.ERROR.Println(err)
+				p.s.SendError(err)
 			}
 		}
 	})
@@ -361,12 +369,7 @@ func (p *Page) Summary() template.HTML {
 
 // Sites is a convenience method to get all the Hugo sites/languages configured.
 func (p *Page) Sites() SiteInfos {
-	infos := make(SiteInfos, len(p.s.owner.Sites))
-	for i, site := range p.s.owner.Sites {
-		infos[i] = &site.Info
-	}
-
-	return infos
+	return p.s.owner.siteInfos()
 }
 
 // SearchKeywords implements the related.Document interface needed for fast page searches.
@@ -475,7 +478,7 @@ func (p *Page) BundleType() string {
 		return "branch"
 	}
 
-	var source interface{} = p.Source.File
+	var source interface{} = p.File
 	if fi, ok := source.(*fileInfo); ok {
 		switch fi.bundleTp {
 		case bundleBranch:
@@ -492,11 +495,6 @@ func (p *Page) MediaType() media.Type {
 	return media.OctetType
 }
 
-type Source struct {
-	Frontmatter []byte
-	Content     []byte
-	source.File
-}
 type PageMeta struct {
 	wordCount      int
 	fuzzyWordCount int
@@ -505,8 +503,8 @@ type PageMeta struct {
 }
 
 type Position struct {
-	Prev          *Page
-	Next          *Page
+	PrevPage      *Page
+	NextPage      *Page
 	PrevInSection *Page
 	NextInSection *Page
 }
@@ -517,9 +515,17 @@ func (ps Pages) String() string {
 	return fmt.Sprintf("Pages(%d)", len(ps))
 }
 
+// Used in tests.
+func (ps Pages) shuffle() {
+	for i := range ps {
+		j := rand.Intn(i + 1)
+		ps[i], ps[j] = ps[j], ps[i]
+	}
+}
+
 func (ps Pages) findPagePosByFilename(filename string) int {
 	for i, x := range ps {
-		if x.Source.Filename() == filename {
+		if x.Filename() == filename {
 			return i
 		}
 	}
@@ -552,8 +558,8 @@ func (ps Pages) findPagePosByFilnamePrefix(prefix string) int {
 
 	// Find the closest match
 	for i, x := range ps {
-		if strings.HasPrefix(x.Source.Filename(), prefix) {
-			diff := len(x.Source.Filename()) - prefixLen
+		if strings.HasPrefix(x.Filename(), prefix) {
+			diff := len(x.Filename()) - prefixLen
 			if lenDiff == -1 || diff < lenDiff {
 				lenDiff = diff
 				currPos = i
@@ -567,16 +573,11 @@ func (ps Pages) findPagePosByFilnamePrefix(prefix string) int {
 // will return -1 if not found
 func (ps Pages) findPagePos(page *Page) int {
 	for i, x := range ps {
-		if x.Source.Filename() == page.Source.Filename() {
+		if x.Filename() == page.Filename() {
 			return i
 		}
 	}
 	return -1
-}
-
-func (p *Page) createWorkContentCopy() {
-	p.workContent = make([]byte, len(p.rawContent))
-	copy(p.workContent, p.rawContent)
 }
 
 func (p *Page) Plain() string {
@@ -708,59 +709,11 @@ func (p *Page) Authors() AuthorList {
 }
 
 func (p *Page) UniqueID() string {
-	return p.Source.UniqueID()
+	return p.File.UniqueID()
 }
 
-// for logging
-func (p *Page) lineNumRawContentStart() int {
-	return bytes.Count(p.frontmatter, []byte("\n")) + 1
-}
-
-var (
-	internalSummaryDivider = []byte("HUGOMORE42")
-)
-
-// replaceDivider replaces the <!--more--> with an internal value and returns
-// whether the contentis truncated or not.
-// Note: The content slice will be modified if needed.
-func replaceDivider(content, from, to []byte) ([]byte, bool) {
-	dividerIdx := bytes.Index(content, from)
-	if dividerIdx == -1 {
-		return content, false
-	}
-
-	afterSummary := content[dividerIdx+len(from):]
-
-	// If the raw content has nothing but whitespace after the summary
-	// marker then the page shouldn't be marked as truncated.  This check
-	// is simplest against the raw content because different markup engines
-	// (rst and asciidoc in particular) add div and p elements after the
-	// summary marker.
-	truncated := bytes.IndexFunc(afterSummary, func(r rune) bool { return !unicode.IsSpace(r) }) != -1
-
-	content = append(content[:dividerIdx], append(to, afterSummary...)...)
-
-	return content, truncated
-
-}
-
-// We have to replace the <!--more--> with something that survives all the
-// rendering engines.
-func (p *Page) replaceDivider(content []byte) []byte {
-	summaryDivider := helpers.SummaryDivider
-	if p.Markup == "org" {
-		summaryDivider = []byte("# more")
-	}
-
-	replaced, truncated := replaceDivider(content, summaryDivider, internalSummaryDivider)
-
-	p.truncated = truncated
-
-	return replaced
-}
-
-// Returns the page as summary and main if a user defined split is provided.
-func (p *Page) setUserDefinedSummaryIfProvided(rawContentCopy []byte) (*summaryContent, error) {
+// Returns the page as summary and main.
+func (p *Page) setUserDefinedSummary(rawContentCopy []byte) (*summaryContent, error) {
 
 	sc, err := splitUserDefinedSummaryAndContent(p.Markup, rawContentCopy)
 
@@ -791,56 +744,48 @@ func splitUserDefinedSummaryAndContent(markup string, c []byte) (sc *summaryCont
 		}
 	}()
 
-	c = bytes.TrimSpace(c)
-	startDivider := bytes.Index(c, internalSummaryDivider)
+	startDivider := bytes.Index(c, internalSummaryDividerBaseBytes)
 
 	if startDivider == -1 {
 		return
 	}
 
-	endDivider := startDivider + len(internalSummaryDivider)
-	endSummary := startDivider
+	startTag := "p"
+	switch markup {
+	case "asciidoc":
+		startTag = "div"
 
-	var (
-		startMarkup []byte
-		endMarkup   []byte
-		addDiv      bool
-	)
+	}
+
+	// Walk back and forward to the surrounding tags.
+	start := bytes.LastIndex(c[:startDivider], []byte("<"+startTag))
+	end := bytes.Index(c[startDivider:], []byte("</"+startTag))
+
+	if start == -1 {
+		start = startDivider
+	} else {
+		start = startDivider - (startDivider - start)
+	}
+
+	if end == -1 {
+		end = startDivider + len(internalSummaryDividerBase)
+	} else {
+		end = startDivider + end + len(startTag) + 3
+	}
+
+	var addDiv bool
 
 	switch markup {
-	default:
-		startMarkup = []byte("<p>")
-		endMarkup = []byte("</p>")
-	case "asciidoc":
-		startMarkup = []byte("<div class=\"paragraph\">")
-		endMarkup = []byte("</div>")
 	case "rst":
-		startMarkup = []byte("<p>")
-		endMarkup = []byte("</p>")
 		addDiv = true
 	}
 
-	// Find the closest end/start markup string to the divider
-	fromStart := -1
-	fromIdx := bytes.LastIndex(c[:startDivider], startMarkup)
-	if fromIdx != -1 {
-		fromStart = startDivider - fromIdx - len(startMarkup)
-	}
-	fromEnd := bytes.Index(c[endDivider:], endMarkup)
+	withoutDivider := append(c[:start], bytes.Trim(c[end:], "\n")...)
 
-	if fromEnd != -1 && fromEnd <= fromStart {
-		endSummary = startDivider + fromEnd + len(endMarkup)
-	} else if fromStart != -1 && fromEnd != -1 {
-		endSummary = startDivider - fromStart - len(startMarkup)
-	}
-
-	withoutDivider := bytes.TrimSpace(append(c[:startDivider], c[endDivider:]...))
-	var (
-		summary []byte
-	)
+	var summary []byte
 
 	if len(withoutDivider) > 0 {
-		summary = bytes.TrimSpace(withoutDivider[:endSummary])
+		summary = bytes.TrimSpace(withoutDivider[:start])
 	}
 
 	if addDiv {
@@ -854,7 +799,7 @@ func splitUserDefinedSummaryAndContent(markup string, c []byte) (sc *summaryCont
 
 	sc = &summaryContent{
 		summary: summary,
-		content: withoutDivider,
+		content: bytes.TrimSpace(withoutDivider),
 	}
 
 	return
@@ -930,7 +875,7 @@ func (s *Site) newPageFromFile(fi *fileInfo) *Page {
 		pageContentInit: &pageContentInit{},
 		Kind:            kindFromFileInfo(fi),
 		contentType:     "",
-		Source:          Source{File: fi},
+		File:            fi,
 		Keywords:        []string{}, Sitemap: Sitemap{Priority: -1},
 		params:       make(map[string]interface{}),
 		translations: make(Pages, 0),
@@ -963,15 +908,18 @@ func (p *Page) Section() string {
 	if p.Kind == KindSection || p.Kind == KindTaxonomy || p.Kind == KindTaxonomyTerm {
 		return p.sections[0]
 	}
-	return p.Source.Section()
+	return p.File.Section()
 }
 
-func (s *Site) NewPageFrom(buf io.Reader, name string) (*Page, error) {
+func (s *Site) newPageFrom(buf io.Reader, name string) (*Page, error) {
 	p, err := s.NewPage(name)
 	if err != nil {
 		return p, err
 	}
 	_, err = p.ReadFrom(buf)
+	if err != nil {
+		return nil, err
+	}
 
 	return p, err
 }
@@ -992,11 +940,15 @@ func (s *Site) NewPage(name string) (*Page, error) {
 func (p *Page) ReadFrom(buf io.Reader) (int64, error) {
 	// Parse for metadata & body
 	if err := p.parse(buf); err != nil {
-		p.s.Log.ERROR.Printf("%s for %s", err, p.File.Path())
-		return 0, err
+		return 0, p.errWithFileContext(err)
+
 	}
 
-	return int64(len(p.rawContent)), nil
+	if err := p.mapContent(); err != nil {
+		return 0, p.errWithFileContext(err)
+	}
+
+	return int64(len(p.source.parsed.Input())), nil
 }
 
 func (p *Page) WordCount() int {
@@ -1196,16 +1148,22 @@ func (p *Page) subResourceTargetPathFactory(base string) string {
 	return path.Join(p.relTargetPathBase, base)
 }
 
-func (p *Page) initMainOutputFormat() error {
-	if p.mainPageOutput != nil {
-		return nil
+// Prepare this page for rendering for a new site. The flag start is set
+// for the first site and output format.
+func (p *Page) prepareForRender(start bool) error {
+	p.setContentInit(start)
+	if start {
+		return p.initMainOutputFormat()
 	}
+	return nil
+}
 
+func (p *Page) initMainOutputFormat() error {
 	outFormat := p.outputFormats[0]
 	pageOutput, err := newPageOutput(p, false, false, outFormat)
 
 	if err != nil {
-		return fmt.Errorf("Failed to create output page for type %q for page %q: %s", outFormat.Name, p.pathOrTitle(), err)
+		return p.errorf(err, "failed to create output page for type %q", outFormat.Name)
 	}
 
 	p.mainPageOutput = pageOutput
@@ -1247,7 +1205,7 @@ func (p *Page) setContentInit(start bool) error {
 
 }
 
-func (p *Page) prepareForRender() error {
+func (p *Page) prepareContent() error {
 	s := p.s
 
 	// If we got this far it means that this is either a new Page pointer
@@ -1271,13 +1229,13 @@ func (p *Page) prepareForRender() error {
 	// Note: The shortcodes in a page cannot access the page content it lives in,
 	// hence the withoutContent().
 	if workContentCopy, err = handleShortcodes(p.withoutContent(), workContentCopy); err != nil {
-		s.Log.ERROR.Printf("Failed to handle shortcodes for page %s: %s", p.BaseFileName(), err)
+		return err
 	}
 
-	if p.Markup != "html" {
+	if p.Markup != "html" && p.source.hasSummaryDivider {
 
 		// Now we know enough to create a summary of the page and count some words
-		summaryContent, err := p.setUserDefinedSummaryIfProvided(workContentCopy)
+		summaryContent, err := p.setUserDefinedSummary(workContentCopy)
 
 		if err != nil {
 			s.Log.ERROR.Printf("Failed to set user defined summary for page %q: %s", p.Path(), err)
@@ -1294,9 +1252,7 @@ func (p *Page) prepareForRender() error {
 	return nil
 }
 
-var ErrHasDraftAndPublished = errors.New("both draft and published parameters were found in page's frontmatter")
-
-func (p *Page) update(frontmatter map[string]interface{}) error {
+func (p *Page) updateMetaData(frontmatter map[string]interface{}) error {
 	if frontmatter == nil {
 		return errors.New("missing frontmatter data")
 	}
@@ -1304,8 +1260,8 @@ func (p *Page) update(frontmatter map[string]interface{}) error {
 	maps.ToLower(frontmatter)
 
 	var mtime time.Time
-	if p.Source.FileInfo() != nil {
-		mtime = p.Source.FileInfo().ModTime()
+	if p.FileInfo() != nil {
+		mtime = p.FileInfo().ModTime()
 	}
 
 	var gitAuthorDate time.Time
@@ -1318,7 +1274,7 @@ func (p *Page) update(frontmatter map[string]interface{}) error {
 		Params:        p.params,
 		Dates:         &p.PageDates,
 		PageURLs:      &p.URLPath,
-		BaseFilename:  p.BaseFileName(),
+		BaseFilename:  p.ContentBaseName(),
 		ModTime:       mtime,
 		GitAuthorDate: gitAuthorDate,
 	}
@@ -1507,13 +1463,12 @@ func (p *Page) update(frontmatter map[string]interface{}) error {
 	p.Markup = helpers.GuessType(p.Markup)
 	if p.Markup == "unknown" {
 		// Fall back to file extension (might also return "unknown")
-		p.Markup = helpers.GuessType(p.Source.Ext())
+		p.Markup = helpers.GuessType(p.Ext())
 	}
 
 	if draft != nil && published != nil {
 		p.Draft = *draft
-		p.s.Log.ERROR.Printf("page %s has both draft and published settings in its frontmatter. Using draft.", p.File.Path())
-		return ErrHasDraftAndPublished
+		p.s.Log.WARN.Printf("page %q has both draft and published settings in its frontmatter. Using draft.", p.Filename())
 	} else if draft != nil {
 		p.Draft = *draft
 	} else if published != nil {
@@ -1524,7 +1479,7 @@ func (p *Page) update(frontmatter map[string]interface{}) error {
 	if isCJKLanguage != nil {
 		p.isCJKLanguage = *isCJKLanguage
 	} else if p.s.Cfg.GetBool("hasCJKLanguage") {
-		if cjk.Match(p.rawContent) {
+		if cjk.Match(p.source.parsed.Input()) {
 			p.isCJKLanguage = true
 		} else {
 			p.isCJKLanguage = false
@@ -1692,7 +1647,12 @@ func (p *Page) Menus() PageMenus {
 	p.pageMenusInit.Do(func() {
 		p.pageMenus = PageMenus{}
 
-		if ms, ok := p.params["menu"]; ok {
+		ms, ok := p.params["menus"]
+		if !ok {
+			ms, ok = p.params["menu"]
+		}
+
+		if ok {
 			link := p.RelPermalink()
 
 			me := MenuEntry{Page: p, Name: p.LinkTitle(), Weight: p.Weight, URL: link}
@@ -1749,128 +1709,13 @@ func (p *Page) shouldRenderTo(f output.Format) bool {
 	return found
 }
 
-func (p *Page) parse(reader io.Reader) error {
-	psr, err := parser.ReadFrom(reader)
-	if err != nil {
-		return err
-	}
-
-	p.renderable = psr.IsRenderable()
-	p.frontmatter = psr.FrontMatter()
-	p.rawContent = psr.Content()
-	p.lang = p.Source.File.Lang()
-
-	meta, err := psr.Metadata()
-	if err != nil {
-		return fmt.Errorf("failed to parse page metadata for %q: %s", p.File.Path(), err)
-	}
-	if meta == nil {
-		// missing frontmatter equivalent to empty frontmatter
-		meta = map[string]interface{}{}
-	}
-
-	if p.s != nil && p.s.owner != nil {
-		gi, enabled := p.s.owner.gitInfo.forPage(p)
-		if gi != nil {
-			p.GitInfo = gi
-		} else if enabled {
-			p.s.Log.WARN.Printf("Failed to find GitInfo for page %q", p.Path())
-		}
-	}
-
-	return p.update(meta)
-}
-
+// RawContent returns the un-rendered source content without
+// any leading front matter.
 func (p *Page) RawContent() string {
-	return string(p.rawContent)
-}
-
-func (p *Page) SetSourceContent(content []byte) {
-	p.Source.Content = content
-}
-
-func (p *Page) SetSourceMetaData(in interface{}, mark rune) (err error) {
-	// See https://github.com/gohugoio/hugo/issues/2458
-	defer func() {
-		if r := recover(); r != nil {
-			var ok bool
-			err, ok = r.(error)
-			if !ok {
-				err = fmt.Errorf("error from marshal: %v", r)
-			}
-		}
-	}()
-
-	buf := bp.GetBuffer()
-	defer bp.PutBuffer(buf)
-
-	err = parser.InterfaceToFrontMatter(in, mark, buf)
-	if err != nil {
-		return
+	if p.source.posMainContent == -1 {
+		return ""
 	}
-
-	_, err = buf.WriteRune('\n')
-	if err != nil {
-		return
-	}
-
-	p.Source.Frontmatter = buf.Bytes()
-
-	return
-}
-
-func (p *Page) SafeSaveSourceAs(path string) error {
-	return p.saveSourceAs(path, true)
-}
-
-func (p *Page) SaveSourceAs(path string) error {
-	return p.saveSourceAs(path, false)
-}
-
-func (p *Page) saveSourceAs(path string, safe bool) error {
-	b := bp.GetBuffer()
-	defer bp.PutBuffer(b)
-
-	b.Write(p.Source.Frontmatter)
-	b.Write(p.Source.Content)
-
-	bc := make([]byte, b.Len(), b.Len())
-	copy(bc, b.Bytes())
-
-	return p.saveSource(bc, path, safe)
-}
-
-func (p *Page) saveSource(by []byte, inpath string, safe bool) (err error) {
-	if !filepath.IsAbs(inpath) {
-		inpath = p.s.PathSpec.AbsPathify(inpath)
-	}
-	p.s.Log.INFO.Println("creating", inpath)
-	if safe {
-		err = helpers.SafeWriteToDisk(inpath, bytes.NewReader(by), p.s.Fs.Source)
-	} else {
-		err = helpers.WriteToDisk(inpath, bytes.NewReader(by), p.s.Fs.Source)
-	}
-	if err != nil {
-		return
-	}
-	return nil
-}
-
-func (p *Page) SaveSource() error {
-	return p.SaveSourceAs(p.FullFilePath())
-}
-
-// TODO(bep) lazy consolidate
-func (p *Page) processShortcodes() error {
-	p.shortcodeState = newShortcodeHandler(p)
-	tmpContent, err := p.shortcodeState.extractShortcodes(string(p.workContent), p.withoutContent())
-	if err != nil {
-		return err
-	}
-	p.workContent = []byte(tmpContent)
-
-	return nil
-
+	return string(p.source.parsed.Input()[p.source.posMainContent:])
 }
 
 func (p *Page) FullFilePath() string {
@@ -1886,8 +1731,8 @@ func (p *Page) FullFilePath() string {
 // For pages that do not (sections witout content page etc.), it returns the
 // virtual path, consistent with where you would add a source file.
 func (p *Page) absoluteSourceRef() string {
-	if p.Source.File != nil {
-		sourcePath := p.Source.Path()
+	if p.File != nil {
+		sourcePath := p.Path()
 		if sourcePath != "" {
 			return "/" + filepath.ToSlash(sourcePath)
 		}
@@ -1929,8 +1774,8 @@ func (p *Page) prepareData(s *Site) error {
 		case KindHome:
 			pages = s.RegularPages
 		case KindTaxonomy:
-			plural := p.sections[0]
-			term := p.sections[1]
+			plural := path.Join(p.sections[:len(p.sections)-1]...)
+			term := p.sections[len(p.sections)-1]
 
 			if s.Info.preserveTaxonomyNames {
 				if v, ok := s.taxonomiesOrigKey[fmt.Sprintf("%s-%s", plural, term)]; ok {
@@ -1947,7 +1792,7 @@ func (p *Page) prepareData(s *Site) error {
 			p.data["Term"] = term
 			pages = taxonomy.Pages()
 		case KindTaxonomyTerm:
-			plural := p.sections[0]
+			plural := path.Join(p.sections...)
 			singular := s.taxonomiesPluralSingular[plural]
 
 			p.data["Singular"] = singular
@@ -2030,8 +1875,8 @@ func (p *Page) copy(initContent bool) *Page {
 	return &c
 }
 
-func (p *Page) Hugo() *HugoInfo {
-	return hugoInfo
+func (p *Page) Hugo() hugo.Info {
+	return p.s.Info.hugoInfo
 }
 
 // GetPage looks up a page for the given ref.
@@ -2041,79 +1886,6 @@ func (p *Page) Hugo() *HugoInfo {
 // an error if the ref is ambiguous.
 func (p *Page) GetPage(ref string) (*Page, error) {
 	return p.s.getPageNew(p, ref)
-}
-
-type refArgs struct {
-	Path         string
-	Lang         string
-	OutputFormat string
-}
-
-func (p *Page) decodeRefArgs(args map[string]interface{}) (refArgs, *SiteInfo, error) {
-	var ra refArgs
-	err := mapstructure.WeakDecode(args, &ra)
-	if err != nil {
-		return ra, nil, nil
-	}
-	s := p.Site
-
-	if ra.Lang != "" && ra.Lang != p.Lang() {
-		// Find correct site
-		found := false
-		for _, ss := range p.s.owner.Sites {
-			if ss.Lang() == ra.Lang {
-				found = true
-				s = &ss.Info
-			}
-		}
-
-		if !found {
-			p.s.siteRefLinker.logNotFound(ra.Path, fmt.Sprintf("no site found with lang %q", ra.Lang), p)
-			return ra, nil, nil
-		}
-	}
-
-	return ra, s, nil
-}
-
-func (p *Page) Ref(argsm map[string]interface{}) (string, error) {
-	args, s, err := p.decodeRefArgs(argsm)
-	if err != nil {
-		return "", fmt.Errorf("invalid arguments to Ref: %s", err)
-	}
-
-	if s == nil {
-		return p.s.siteRefLinker.notFoundURL, nil
-	}
-
-	if args.Path == "" {
-		return "", nil
-	}
-
-	if args.OutputFormat != "" {
-		return s.Ref(args.Path, p, args.OutputFormat)
-	}
-	return s.Ref(args.Path, p)
-}
-
-func (p *Page) RelRef(argsm map[string]interface{}) (string, error) {
-	args, s, err := p.decodeRefArgs(argsm)
-	if err != nil {
-		return "", fmt.Errorf("invalid arguments to Ref: %s", err)
-	}
-
-	if s == nil {
-		return p.s.siteRefLinker.notFoundURL, nil
-	}
-
-	if args.Path == "" {
-		return "", nil
-	}
-
-	if args.OutputFormat != "" {
-		return s.RelRef(args.Path, p, args.OutputFormat)
-	}
-	return s.RelRef(args.Path, p)
 }
 
 func (p *Page) String() string {
@@ -2218,8 +1990,6 @@ func (p *Page) initLanguage() {
 		language := ml.Language(p.lang)
 
 		if language == nil {
-			// It can be a file named stefano.chiodino.md.
-			p.s.Log.WARN.Printf("Page language (if it is that) not found in multilang setup: %s.", p.lang)
 			language = ml.DefaultLang
 		}
 
@@ -2303,8 +2073,20 @@ func (p *Page) setValuesForKind(s *Site) {
 
 // Used in error logs.
 func (p *Page) pathOrTitle() string {
-	if p.Path() != "" {
-		return p.Path()
+	if p.Filename() != "" {
+		return p.Filename()
 	}
 	return p.title
+}
+
+func (p *Page) Next() *Page {
+	// TODO Remove the deprecation notice (but keep PrevPage as an alias) Hugo 0.52
+	helpers.Deprecated("Page", ".Next", "Use .PrevPage (yes, not .NextPage).", false)
+	return p.PrevPage
+}
+
+func (p *Page) Prev() *Page {
+	// TODO Remove the deprecation notice (but keep NextPage as an alias) Hugo 0.52
+	helpers.Deprecated("Page", ".Prev", "Use .NextPage (yes, not .PrevPage).", false)
+	return p.NextPage
 }

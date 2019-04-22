@@ -21,10 +21,13 @@ import (
 	"image/draw"
 	"image/jpeg"
 	"io"
+	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+
+	_errors "github.com/pkg/errors"
 
 	"github.com/disintegration/imaging"
 	"github.com/gohugoio/hugo/common/hugio"
@@ -123,9 +126,6 @@ type Image struct {
 
 	copyToDestinationInit sync.Once
 
-	// Lock used when creating alternate versions of this image.
-	createMu sync.Mutex
-
 	imaging *Imaging
 
 	format imaging.Format
@@ -210,6 +210,15 @@ func (i *Image) isJPEG() bool {
 	return strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg")
 }
 
+// Serialize image processing. The imaging library spins up its own set of Go routines,
+// so there is not much to gain from adding more load to the mix. That
+// can even have negative effect in low resource scenarios.
+// Note that this only effects the non-cached scenario. Once the processed
+// image is written to disk, everything is fast, fast fast.
+const imageProcWorkers = 1
+
+var imageProcSem = make(chan bool, imageProcWorkers)
+
 func (i *Image) doWithImageConfig(action, spec string, f func(src image.Image, conf imageConfig) (image.Image, error)) (*Image, error) {
 	conf, err := parseImageConfig(spec)
 	if err != nil {
@@ -234,7 +243,12 @@ func (i *Image) doWithImageConfig(action, spec string, f func(src image.Image, c
 		}
 	}
 
-	return i.spec.imageCache.getOrCreate(i, conf, func(resourceCacheFilename string) (*Image, error) {
+	return i.spec.imageCache.getOrCreate(i, conf, func() (*Image, image.Image, error) {
+		imageProcSem <- true
+		defer func() {
+			<-imageProcSem
+		}()
+
 		ci := i.clone()
 
 		errOp := action
@@ -244,7 +258,7 @@ func (i *Image) doWithImageConfig(action, spec string, f func(src image.Image, c
 
 		src, err := i.decodeSource()
 		if err != nil {
-			return nil, &os.PathError{Op: errOp, Path: errPath, Err: err}
+			return nil, nil, &os.PathError{Op: errOp, Path: errPath, Err: err}
 		}
 
 		if conf.Rotate != 0 {
@@ -254,7 +268,7 @@ func (i *Image) doWithImageConfig(action, spec string, f func(src image.Image, c
 
 		converted, err := f(src, conf)
 		if err != nil {
-			return ci, &os.PathError{Op: errOp, Path: errPath, Err: err}
+			return ci, nil, &os.PathError{Op: errOp, Path: errPath, Err: err}
 		}
 
 		if i.format == imaging.PNG {
@@ -270,7 +284,7 @@ func (i *Image) doWithImageConfig(action, spec string, f func(src image.Image, c
 		ci.config = image.Config{Width: b.Max.X, Height: b.Max.Y}
 		ci.configLoaded = true
 
-		return ci, i.encodeToDestinations(converted, conf, resourceCacheFilename, ci.targetFilenames()...)
+		return ci, converted, nil
 	})
 
 }
@@ -362,7 +376,7 @@ func parseImageConfig(config string) (imageConfig, error) {
 			if err != nil {
 				return c, err
 			}
-			if c.Quality < 1 && c.Quality > 100 {
+			if c.Quality < 1 || c.Quality > 100 {
 				return c, errors.New("quality ranges from 1 to 100 inclusive")
 			}
 		} else if part[0] == 'r' {
@@ -430,7 +444,7 @@ func (i *Image) initConfig() error {
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to load image config: %s", err)
+		return _errors.Wrap(err, "failed to load image config")
 	}
 
 	return nil
@@ -439,86 +453,44 @@ func (i *Image) initConfig() error {
 func (i *Image) decodeSource() (image.Image, error) {
 	f, err := i.ReadSeekCloser()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open image for decode: %s", err)
+		return nil, _errors.Wrap(err, "failed to open image for decode")
 	}
 	defer f.Close()
 	img, _, err := image.Decode(f)
 	return img, err
 }
 
-func (i *Image) copyToDestination(src string) error {
-	var res error
-	i.copyToDestinationInit.Do(func() {
-		targetFilenames := i.targetFilenames()
-		var changedFilenames []string
+func (i *Image) openDestinationsForWriting() (io.WriteCloser, error) {
+	targetFilenames := i.targetFilenames()
+	var changedFilenames []string
 
-		// Fast path:
-		// This is a processed version of the original.
-		// If it exists on destination with the same filename and file size, it is
-		// the same file, so no need to transfer it again.
-		for _, targetFilename := range targetFilenames {
-			if fi, err := i.spec.BaseFs.PublishFs.Stat(targetFilename); err == nil && fi.Size() == i.osFileInfo.Size() {
-				continue
-			}
-			changedFilenames = append(changedFilenames, targetFilename)
+	// Fast path:
+	// This is a processed version of the original.
+	// If it exists on destination with the same filename and file size, it is
+	// the same file, so no need to transfer it again.
+	for _, targetFilename := range targetFilenames {
+		if fi, err := i.spec.BaseFs.PublishFs.Stat(targetFilename); err == nil && fi.Size() == i.osFileInfo.Size() {
+			continue
 		}
-
-		if len(changedFilenames) == 0 {
-			return
-		}
-
-		in, err := i.sourceFs().Open(src)
-		if err != nil {
-			res = err
-			return
-		}
-		defer in.Close()
-
-		out, err := helpers.OpenFilesForWriting(i.spec.BaseFs.PublishFs, changedFilenames...)
-
-		if err != nil {
-			res = err
-			return
-		}
-		defer out.Close()
-
-		_, err = io.Copy(out, in)
-		if err != nil {
-			res = err
-			return
-		}
-	})
-
-	if res != nil {
-		return fmt.Errorf("failed to copy image to destination: %s", res)
+		changedFilenames = append(changedFilenames, targetFilename)
 	}
-	return nil
+
+	if len(changedFilenames) == 0 {
+		return struct {
+			io.Writer
+			io.Closer
+		}{
+			ioutil.Discard,
+			ioutil.NopCloser(nil),
+		}, nil
+
+	}
+
+	return helpers.OpenFilesForWriting(i.spec.BaseFs.PublishFs, changedFilenames...)
+
 }
 
-func (i *Image) encodeToDestinations(img image.Image, conf imageConfig, resourceCacheFilename string, targetFilenames ...string) error {
-
-	file1, err := helpers.OpenFilesForWriting(i.spec.BaseFs.PublishFs, targetFilenames...)
-	if err != nil {
-		return err
-	}
-
-	defer file1.Close()
-
-	var w io.Writer
-
-	if resourceCacheFilename != "" {
-		// Also save it to the image resource cache for later reuse.
-		file2, err := helpers.OpenFileForWriting(i.spec.BaseFs.Resources.Fs, resourceCacheFilename)
-		if err != nil {
-			return err
-		}
-
-		w = io.MultiWriter(file1, file2)
-		defer file2.Close()
-	} else {
-		w = file1
-	}
-
+func (i *Image) encodeTo(conf imageConfig, img image.Image, w io.Writer) error {
 	switch i.format {
 	case imaging.JPEG:
 
@@ -541,7 +513,6 @@ func (i *Image) encodeToDestinations(img image.Image, conf imageConfig, resource
 	default:
 		return imaging.Encode(w, img, i.format)
 	}
-
 }
 
 func (i *Image) clone() *Image {

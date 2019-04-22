@@ -15,14 +15,16 @@ package i18n
 
 import (
 	"errors"
-	"fmt"
 
-	"github.com/gohugoio/hugo/helpers"
+	"github.com/gohugoio/hugo/common/herrors"
 
 	"github.com/gohugoio/hugo/deps"
+	"github.com/gohugoio/hugo/helpers"
+	"github.com/gohugoio/hugo/hugofs"
 	"github.com/gohugoio/hugo/source"
 	"github.com/nicksnyder/go-i18n/i18n/bundle"
 	"github.com/nicksnyder/go-i18n/i18n/language"
+	_errors "github.com/pkg/errors"
 )
 
 // TranslationProvider provides translation handling, i.e. loading
@@ -82,12 +84,12 @@ func (tp *TranslationProvider) Update(d *deps.Deps) error {
 func addTranslationFile(bundle *bundle.Bundle, r source.ReadableFile) error {
 	f, err := r.Open()
 	if err != nil {
-		return fmt.Errorf("Failed to open translations file %q: %s", r.LogicalName(), err)
+		return _errors.Wrapf(err, "failed to open translations file %q:", r.LogicalName())
 	}
-	defer f.Close()
 	err = bundle.ParseTranslationFileBytes(r.LogicalName(), helpers.ReaderToBytes(f))
+	f.Close()
 	if err != nil {
-		return fmt.Errorf("Failed to load translations in file %q: %s", r.LogicalName(), err)
+		return errWithFileContext(_errors.Wrapf(err, "failed to load translations"), r)
 	}
 	return nil
 }
@@ -97,4 +99,27 @@ func (tp *TranslationProvider) Clone(d *deps.Deps) error {
 	d.Translate = tp.t.Func(d.Language.Lang)
 
 	return nil
+}
+
+func errWithFileContext(inerr error, r source.ReadableFile) error {
+	rfi, ok := r.FileInfo().(hugofs.RealFilenameInfo)
+	if !ok {
+		return inerr
+	}
+
+	realFilename := rfi.RealFilename()
+	f, err := r.Open()
+	if err != nil {
+		return inerr
+	}
+	defer f.Close()
+
+	err, _ = herrors.WithFileContext(
+		inerr,
+		realFilename,
+		f,
+		herrors.SimpleLineMatcher)
+
+	return err
+
 }

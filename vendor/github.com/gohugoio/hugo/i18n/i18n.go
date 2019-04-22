@@ -14,10 +14,11 @@
 package i18n
 
 import (
+	"github.com/gohugoio/hugo/common/loggers"
 	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/helpers"
+
 	"github.com/nicksnyder/go-i18n/i18n/bundle"
-	jww "github.com/spf13/jwalterweatherman"
 )
 
 var (
@@ -28,11 +29,11 @@ var (
 type Translator struct {
 	translateFuncs map[string]bundle.TranslateFunc
 	cfg            config.Provider
-	logger         *jww.Notepad
+	logger         *loggers.Logger
 }
 
 // NewTranslator creates a new Translator for the given language bundle and configuration.
-func NewTranslator(b *bundle.Bundle, cfg config.Provider, logger *jww.Notepad) Translator {
+func NewTranslator(b *bundle.Bundle, cfg config.Provider, logger *loggers.Logger) Translator {
 	t := Translator{cfg: cfg, logger: logger, translateFuncs: make(map[string]bundle.TranslateFunc)}
 	t.initFuncs(b)
 	return t
@@ -44,11 +45,11 @@ func (t Translator) Func(lang string) bundle.TranslateFunc {
 	if f, ok := t.translateFuncs[lang]; ok {
 		return f
 	}
-	t.logger.WARN.Printf("Translation func for language %v not found, use default.", lang)
+	t.logger.INFO.Printf("Translation func for language %v not found, use default.", lang)
 	if f, ok := t.translateFuncs[t.cfg.GetString("defaultContentLanguage")]; ok {
 		return f
 	}
-	t.logger.WARN.Println("i18n not initialized, check that you have language file (in i18n) that matches the site language or the default language.")
+	t.logger.INFO.Println("i18n not initialized; if you need string translations, check that you have a bundle in /i18n that matches the site language or the default language.")
 	return func(translationID string, args ...interface{}) string {
 		return ""
 	}
@@ -60,7 +61,7 @@ func (t Translator) initFuncs(bndl *bundle.Bundle) {
 
 	defaultT, err := bndl.Tfunc(defaultContentLanguage)
 	if err != nil {
-		jww.WARN.Printf("No translation bundle found for default language %q", defaultContentLanguage)
+		t.logger.INFO.Printf("No translation bundle found for default language %q", defaultContentLanguage)
 	}
 
 	enableMissingTranslationPlaceholders := t.cfg.GetBool("enableMissingTranslationPlaceholders")
@@ -70,7 +71,7 @@ func (t Translator) initFuncs(bndl *bundle.Bundle) {
 		t.translateFuncs[currentLang] = func(translationID string, args ...interface{}) string {
 			tFunc, err := bndl.Tfunc(currentLang)
 			if err != nil {
-				jww.WARN.Printf("could not load translations for language %q (%s), will use default content language.\n", lang, err)
+				t.logger.WARN.Printf("could not load translations for language %q (%s), will use default content language.\n", lang, err)
 			}
 
 			translated := tFunc(translationID, args...)

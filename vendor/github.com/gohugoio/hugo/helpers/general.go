@@ -27,6 +27,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/gohugoio/hugo/common/hugo"
+
 	"github.com/gohugoio/hugo/hugofs"
 
 	"github.com/spf13/afero"
@@ -324,7 +326,7 @@ func InitLoggers() {
 // plenty of time to fix their templates.
 func Deprecated(object, item, alternative string, err bool) {
 	if err {
-		DistinctErrorLog.Printf("%s's %s is deprecated and will be removed in Hugo %s. %s", object, item, CurrentHugoVersion.Next().ReleaseVersion(), alternative)
+		DistinctErrorLog.Printf("%s's %s is deprecated and will be removed in Hugo %s. %s", object, item, hugo.CurrentVersion.Next().ReleaseVersion(), alternative)
 
 	} else {
 		// Make sure the users see this while avoiding build breakage. This will not lead to an os.Exit(-1)
@@ -392,11 +394,10 @@ func MD5FromFileFast(r io.ReadSeeker) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// MD5FromFile creates a MD5 hash from the given file.
-// It will not close the file.
-func MD5FromFile(f afero.File) (string, error) {
+// MD5FromReader creates a MD5 hash from the given reader.
+func MD5FromReader(r io.Reader) (string, error) {
 	h := md5.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, r); err != nil {
 		return "", nil
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil

@@ -20,6 +20,7 @@ import (
 
 	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/langs"
+	"github.com/pkg/errors"
 
 	"github.com/gohugoio/hugo/hugofs"
 )
@@ -33,7 +34,6 @@ type Paths struct {
 	BaseURL
 
 	// If the baseURL contains a base path, e.g. https://example.com/docs, then "/docs" will be the BasePath.
-	// This will not be set if canonifyURLs is enabled.
 	BasePath string
 
 	// Directories
@@ -83,13 +83,13 @@ func New(fs *hugofs.Fs, cfg config.Provider) (*Paths, error) {
 	baseURL, err := newBaseURLFromString(baseURLstr)
 
 	if err != nil {
-		return nil, fmt.Errorf("Failed to create baseURL from %q: %s", baseURLstr, err)
+		return nil, errors.Wrapf(err, "Failed to create baseURL from %q:", baseURLstr)
 	}
 
-	contentDir := cfg.GetString("contentDir")
-	workingDir := cfg.GetString("workingDir")
-	resourceDir := cfg.GetString("resourceDir")
-	publishDir := cfg.GetString("publishDir")
+	contentDir := filepath.Clean(cfg.GetString("contentDir"))
+	workingDir := filepath.Clean(cfg.GetString("workingDir"))
+	resourceDir := filepath.Clean(cfg.GetString("resourceDir"))
+	publishDir := filepath.Clean(cfg.GetString("publishDir"))
 
 	if contentDir == "" {
 		return nil, fmt.Errorf("contentDir not set")
@@ -189,6 +189,15 @@ func New(fs *hugofs.Fs, cfg config.Provider) (*Paths, error) {
 	p.PublishDir = absPublishDir
 
 	return p, nil
+}
+
+// GetBasePath returns any path element in baseURL if needed.
+func (p *Paths) GetBasePath(isRelativeURL bool) string {
+	if isRelativeURL && p.CanonifyURLs {
+		// The baseURL will be prepended later.
+		return ""
+	}
+	return p.BasePath
 }
 
 func (p *Paths) Lang() string {

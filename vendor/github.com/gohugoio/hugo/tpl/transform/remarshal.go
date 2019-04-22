@@ -2,10 +2,12 @@ package transform
 
 import (
 	"bytes"
-	"errors"
 	"strings"
 
+	"github.com/pkg/errors"
+
 	"github.com/gohugoio/hugo/parser"
+	"github.com/gohugoio/hugo/parser/metadecoders"
 	"github.com/spf13/cast"
 )
 
@@ -33,26 +35,12 @@ func (ns *Namespace) Remarshal(format string, data interface{}) (string, error) 
 		return "", err
 	}
 
-	fromFormat, err := detectFormat(from)
-	if err != nil {
-		return "", err
+	fromFormat := metadecoders.Default.FormatFromContentString(from)
+	if fromFormat == "" {
+		return "", errors.New("failed to detect format from content")
 	}
 
-	var metaHandler func(d []byte) (map[string]interface{}, error)
-
-	switch fromFormat {
-	case "yaml":
-		metaHandler = parser.HandleYAMLMetaData
-	case "toml":
-		metaHandler = parser.HandleTOMLMetaData
-	case "json":
-		metaHandler = parser.HandleJSONMetaData
-	}
-
-	meta, err := metaHandler([]byte(from))
-	if err != nil {
-		return "", err
-	}
+	meta, err := metadecoders.Default.UnmarshalToMap([]byte(from), fromFormat)
 
 	var result bytes.Buffer
 	if err := parser.InterfaceToConfig(meta, mark, &result); err != nil {
@@ -62,37 +50,10 @@ func (ns *Namespace) Remarshal(format string, data interface{}) (string, error) 
 	return result.String(), nil
 }
 
-func toFormatMark(format string) (rune, error) {
-	// TODO(bep) the parser package needs a cleaning.
-	switch format {
-	case "yaml":
-		return rune(parser.YAMLLead[0]), nil
-	case "toml":
-		return rune(parser.TOMLLead[0]), nil
-	case "json":
-		return rune(parser.JSONLead[0]), nil
+func toFormatMark(format string) (metadecoders.Format, error) {
+	if f := metadecoders.FormatFromString(format); f != "" {
+		return f, nil
 	}
 
-	return 0, errors.New("failed to detect target data serialization format")
-}
-
-func detectFormat(data string) (string, error) {
-	jsonIdx := strings.Index(data, "{")
-	yamlIdx := strings.Index(data, ":")
-	tomlIdx := strings.Index(data, "=")
-
-	if jsonIdx != -1 && (yamlIdx == -1 || jsonIdx < yamlIdx) && (tomlIdx == -1 || jsonIdx < tomlIdx) {
-		return "json", nil
-	}
-
-	if yamlIdx != -1 && (tomlIdx == -1 || yamlIdx < tomlIdx) {
-		return "yaml", nil
-	}
-
-	if tomlIdx != -1 {
-		return "toml", nil
-	}
-
-	return "", errors.New("failed to detect data serialization format")
-
+	return "", errors.New("failed to detect target data serialization format")
 }

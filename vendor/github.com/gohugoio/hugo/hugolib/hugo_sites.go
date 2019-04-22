@@ -1,4 +1,4 @@
-// Copyright 2016-present The Hugo Authors. All rights reserved.
+// Copyright 2018 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,20 +16,25 @@ package hugolib
 import (
 	"errors"
 	"io"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 
+	"github.com/gohugoio/hugo/config"
+
+	"github.com/gohugoio/hugo/publisher"
+
+	"github.com/gohugoio/hugo/common/herrors"
+	"github.com/gohugoio/hugo/common/loggers"
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/langs"
-	"github.com/gohugoio/hugo/publisher"
 
 	"github.com/gohugoio/hugo/i18n"
 	"github.com/gohugoio/hugo/tpl"
 	"github.com/gohugoio/hugo/tpl/tplimpl"
-	jww "github.com/spf13/jwalterweatherman"
 )
 
 // HugoSites represents the sites to build. Each site represents a language.
@@ -53,6 +58,48 @@ type HugoSites struct {
 	gitInfo *gitInfo
 }
 
+func (h *HugoSites) siteInfos() SiteInfos {
+	infos := make(SiteInfos, len(h.Sites))
+	for i, site := range h.Sites {
+		infos[i] = &site.Info
+	}
+	return infos
+}
+
+func (h *HugoSites) pickOneAndLogTheRest(errors []error) error {
+	if len(errors) == 0 {
+		return nil
+	}
+
+	var i int
+
+	for j, err := range errors {
+		// If this is in server mode, we want to return an error to the client
+		// with a file context, if possible.
+		if herrors.UnwrapErrorWithFileContext(err) != nil {
+			i = j
+			break
+		}
+	}
+
+	// Log the rest, but add a threshold to avoid flooding the log.
+	const errLogThreshold = 5
+
+	for j, err := range errors {
+		if j == i || err == nil {
+			continue
+		}
+
+		if j >= errLogThreshold {
+			break
+		}
+
+		h.Log.ERROR.Println(err)
+	}
+
+	return errors[i]
+}
+
 func (h *HugoSites) IsMultihost() bool {
 	return h != nil && h.multihost
 }
@@ -69,7 +116,7 @@ func (h *HugoSites) NumLogErrors() int {
 	if h == nil {
 		return 0
 	}
-	return int(h.Log.LogCountForLevelsGreaterThanorEqualTo(jww.LevelError))
+	return int(h.Log.ErrorCounter.Count())
 }
 
 func (h *HugoSites) PrintProcessingStats(w io.Writer) {
@@ -189,6 +236,27 @@ func applyDeps(cfg deps.DepsCfg, sites ...*Site) error {
 			continue
 		}
 
+		onCreated := func(d *deps.Deps) error {
+			s.Deps = d
+
+			// Set up the main publishing chain.
+			s.publisher = publisher.NewDestinationPublisher(d.PathSpec.BaseFs.PublishFs, s.outputFormatsConfig, s.mediaTypesConfig, cfg.Cfg.GetBool("minify"))
+
+			if err := s.initializeSiteInfo(); err != nil {
+				return err
+			}
+
+			d.Site = &s.Info
+
+			siteConfig, err := loadSiteConfig(s.Language)
+			if err != nil {
+				return err
+			}
+			s.siteConfig = siteConfig
+			s.siteRefLinker, err = newSiteRefLinker(s.Language, s)
+			return err
+		}
+
 		cfg.Language = s.Language
 		cfg.MediaTypes = s.mediaTypesConfig
 		cfg.OutputFormats = s.outputFormatsConfig
@@ -203,37 +271,23 @@ func applyDeps(cfg deps.DepsCfg, sites ...*Site) error {
 			}
 
 			d.OutputFormatsConfig = s.outputFormatsConfig
-			s.Deps = d
+
+			if err := onCreated(d); err != nil {
+				return err
+			}
 
 			if err = d.LoadResources(); err != nil {
 				return err
 			}
 
 		} else {
-			d, err = d.ForLanguage(cfg)
+			d, err = d.ForLanguage(cfg, onCreated)
 			if err != nil {
 				return err
 			}
 			d.OutputFormatsConfig = s.outputFormatsConfig
-			s.Deps = d
 		}
 
-		// Set up the main publishing chain.
-		s.publisher = publisher.NewDestinationPublisher(d.PathSpec.BaseFs.PublishFs, s.outputFormatsConfig, s.mediaTypesConfig, cfg.Cfg.GetBool("minify"))
-
-		if err := s.initializeSiteInfo(); err != nil {
-			return err
-		}
-
-		siteConfig, err := loadSiteConfig(s.Language)
-		if err != nil {
-			return err
-		}
-		s.siteConfig = siteConfig
-		s.siteRefLinker, err = newSiteRefLinker(s.Language, s)
-		if err != nil {
-			return err
-		}
 	}
 
 	return nil
@@ -250,7 +304,9 @@ func NewHugoSites(cfg deps.DepsCfg) (*HugoSites, error) {
 
 func (s *Site) withSiteTemplates(withTemplates ...func(templ tpl.TemplateHandler) error) func(templ tpl.TemplateHandler) error {
 	return func(templ tpl.TemplateHandler) error {
-		templ.LoadTemplates("")
+		if err := templ.LoadTemplates(""); err != nil {
+			return err
+		}
 
 		for _, wt := range withTemplates {
 			if wt == nil {
@@ -301,20 +357,21 @@ func (h *HugoSites) reset() {
 
 // resetLogs resets the log counters etc. Used to do a new build on the same sites.
 func (h *HugoSites) resetLogs() {
-	h.Log.ResetLogCounters()
+	h.Log.Reset()
+	loggers.GlobalErrorCounter.Reset()
 	for _, s := range h.Sites {
 		s.Deps.DistinctErrorLog = helpers.NewDistinctLogger(h.Log.ERROR)
 	}
 }
 
-func (h *HugoSites) createSitesFromConfig() error {
+func (h *HugoSites) createSitesFromConfig(cfg config.Provider) error {
 	oldLangs, _ := h.Cfg.Get("languagesSorted").(langs.Languages)
 
 	if err := loadLanguageSettings(h.Cfg, oldLangs); err != nil {
 		return err
 	}
 
-	depsCfg := deps.DepsCfg{Fs: h.Fs, Cfg: h.Cfg}
+	depsCfg := deps.DepsCfg{Fs: h.Fs, Cfg: cfg}
 
 	sites, err := createSitesFromConfig(depsCfg)
 
@@ -358,13 +415,18 @@ func (h *HugoSites) toSiteInfos() []*SiteInfo {
 type BuildCfg struct {
 	// Reset site state before build. Use to force full rebuilds.
 	ResetState bool
-	// Re-creates the sites from configuration before a build.
+	// If set, we re-create the sites from the given configuration before a build.
 	// This is needed if new languages are added.
-	CreateSitesFromConfig bool
+	NewConfig config.Provider
 	// Skip rendering. Useful for testing.
 	SkipRender bool
 	// Use this to indicate what changed (for rebuilds).
 	whatChanged *whatChanged
+
+	// This is a partial re-render of some selected pages. This means
+	// we should skip most of the processing.
+	PartialReRender bool
+
 	// Recently visited URLs. This is used for partial re-rendering.
 	RecentlyVisited map[string]bool
 }
@@ -373,6 +435,7 @@ type BuildCfg struct {
 // a Page: If it is recently visited (the home pages will always be in this set) or changed.
 // Note that a page does not have to have a content page / file.
 // For regular builds, this will allways return true.
+// TODO(bep) rename/work this.
 func (cfg *BuildCfg) shouldRender(p *Page) bool {
 	if p.forceRender {
 		p.forceRender = false
@@ -384,6 +447,9 @@ func (cfg *BuildCfg) shouldRender(p *Page) bool {
 	}
 
 	if cfg.RecentlyVisited[p.RelPermalink()] {
+		if cfg.PartialReRender {
+			_ = p.initMainOutputFormat()
+		}
 		return true
 	}
 
@@ -420,7 +486,7 @@ func (h *HugoSites) renderCrossSitesArtifacts() error {
 	smLayouts := []string{"sitemapindex.xml", "_default/sitemapindex.xml", "_internal/_default/sitemapindex.xml"}
 
 	return s.renderAndWriteXML(&s.PathSpec.ProcessingStats.Sitemaps, "sitemapindex",
-		sitemapDefault.Filename, h.toSiteInfos(), s.appendThemeTemplates(smLayouts)...)
+		sitemapDefault.Filename, h.toSiteInfos(), smLayouts...)
 }
 
 func (h *HugoSites) assignMissingTranslations() error {
@@ -455,6 +521,15 @@ func (h *HugoSites) assignMissingTranslations() error {
 func (h *HugoSites) createMissingPages() error {
 	var newPages Pages
 
+	singularPlural := func(p *Page) (string, string) {
+		slen := len(p.sections)
+		singular := p.sections[slen-1]
+		singular = p.s.PathSpec.MakePathSanitized(singular)
+		plural := path.Join((p.sections[:slen-1])...)
+
+		return singular, plural
+	}
+
 	for _, s := range h.Sites {
 		if s.isEnabled(KindHome) {
 			// home pages
@@ -479,6 +554,7 @@ func (h *HugoSites) createMissingPages() error {
 		if len(taxonomies) > 0 {
 			taxonomyPages := s.findPagesByKind(KindTaxonomy)
 			taxonomyTermsPages := s.findPagesByKind(KindTaxonomyTerm)
+
 			for _, plural := range taxonomies {
 				if s.isEnabled(KindTaxonomyTerm) {
 					foundTaxonomyTermsPage := false
@@ -505,11 +581,10 @@ func (h *HugoSites) createMissingPages() error {
 							key = s.PathSpec.MakeSegment(key)
 						}
 						for _, p := range taxonomyPages {
-							// Some people may have /authors/MaxMustermann etc. as paths.
-							// p.sections contains the raw values from the file system.
-							// See https://github.com/gohugoio/hugo/issues/4238
-							singularKey := s.PathSpec.MakePathSanitized(p.sections[1])
-							if p.sections[0] == plural && singularKey == key {
+
+							singularKey, pluralKey := singularPlural(p)
+
+							if pluralKey == plural && singularKey == key {
 								foundTaxonomyPage = true
 								break
 							}
@@ -601,15 +676,13 @@ func (h *HugoSites) setupTranslations() {
 
 func (s *Site) preparePagesForRender(start bool) error {
 	for _, p := range s.Pages {
-		p.setContentInit(start)
-		if err := p.initMainOutputFormat(); err != nil {
+		if err := p.prepareForRender(start); err != nil {
 			return err
 		}
 	}
 
 	for _, p := range s.headlessPages {
-		p.setContentInit(start)
-		if err := p.initMainOutputFormat(); err != nil {
+		if err := p.prepareForRender(start); err != nil {
 			return err
 		}
 	}
@@ -628,6 +701,7 @@ func handleShortcodes(p *PageWithoutContent, rawContentCopy []byte) ([]byte, err
 		err := p.shortcodeState.executeShortcodesForDelta(p)
 
 		if err != nil {
+
 			return rawContentCopy, err
 		}
 

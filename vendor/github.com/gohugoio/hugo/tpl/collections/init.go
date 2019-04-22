@@ -39,6 +39,20 @@ func init() {
 			[][2]string{},
 		)
 
+		ns.AddMethodMapping(ctx.Complement,
+			[]string{"complement"},
+			[][2]string{
+				{`{{ slice "a" "b" "c" "d" "e" "f" | complement (slice "b" "c") (slice "d" "e")  }}`, `[a f]`},
+			},
+		)
+
+		ns.AddMethodMapping(ctx.SymDiff,
+			[]string{"symdiff"},
+			[][2]string{
+				{`{{ slice 1 2 3 | symdiff (slice 3 4) }}`, `[1 2 4]`},
+			},
+		)
+
 		ns.AddMethodMapping(ctx.Delimit,
 			[]string{"delimit"},
 			[][2]string{

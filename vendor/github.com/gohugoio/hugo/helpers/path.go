@@ -24,7 +24,10 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/gohugoio/hugo/config"
+
 	"github.com/gohugoio/hugo/common/hugio"
+	_errors "github.com/pkg/errors"
 	"github.com/spf13/afero"
 	"golang.org/x/text/transform"
 	"golang.org/x/text/unicode/norm"
@@ -81,26 +84,8 @@ var segmentReplacer = strings.NewReplacer("/", "-", "#", "-")
 // segment.  MakeSegment is similar to MakePath but disallows the '/' and
 // '#' characters because of their reserved meaning in URIs.
 func (p *PathSpec) MakeSegment(s string) string {
-	s = p.MakePathSanitized(strings.Trim(segmentReplacer.Replace(s), "- "))
+	return p.MakePathSanitized(segmentReplacer.Replace(s))
 
-	var pos int
-	var last byte
-	b := make([]byte, len(s))
-
-	for i := 0; i < len(s); i++ {
-		// consolidate dashes
-		if s[i] == '-' && last == '-' {
-			continue
-		}
-
-		b[pos], last = s[i], s[i]
-		pos++
-	}
-
-	if p.DisablePathToLower {
-		return string(b[:pos])
-	}
-	return strings.ToLower(string(b[:pos]))
 }
 
 // MakePath takes a string with any characters and replace it
@@ -109,7 +94,7 @@ func (p *PathSpec) MakeSegment(s string) string {
 // whilst preserving the original casing of the string.
 // E.g. Social Media -> Social-Media
 func (p *PathSpec) MakePath(s string) string {
-	return p.UnicodeSanitize(strings.Replace(strings.TrimSpace(s), " ", "-", -1))
+	return p.UnicodeSanitize(s)
 }
 
 // MakePathSanitized creates a Unicode-sanitized string, with the spaces replaced
@@ -148,15 +133,25 @@ func ishex(c rune) bool {
 // a predefined set of special Unicode characters.
 // If RemovePathAccents configuration flag is enabled, Uniccode accents
 // are also removed.
+// Spaces will be replaced with a single hyphen, and sequential hyphens will be reduced to one.
 func (p *PathSpec) UnicodeSanitize(s string) string {
 	source := []rune(s)
 	target := make([]rune, 0, len(source))
+	var prependHyphen bool
 
 	for i, r := range source {
-		if r == '%' && i+2 < len(source) && ishex(source[i+1]) && ishex(source[i+2]) {
+		isAllowed := r == '.' || r == '/' || r == '\\' || r == '_' || r == '#' || r == '+' || r == '~'
+		isAllowed = isAllowed || unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r)
+		isAllowed = isAllowed || (r == '%' && i+2 < len(source) && ishex(source[i+1]) && ishex(source[i+2]))
+
+		if isAllowed {
+			if prependHyphen {
+				target = append(target, '-')
+				prependHyphen = false
+			}
 			target = append(target, r)
-		} else if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsMark(r) || r == '.' || r == '/' || r == '\\' || r == '_' || r == '-' || r == '#' || r == '+' || r == '~' {
-			target = append(target, r)
+		} else if len(target) > 0 && (r == '-' || unicode.IsSpace(r)) {
+			prependHyphen = true
 		}
 	}
 
@@ -277,6 +272,13 @@ func PathAndExt(in string) (string, string) {
 // the extension including the delmiter, i.e. ".md".
 func FileAndExt(in string) (string, string) {
 	return fileAndExt(in, fpb)
+}
+
+// FileAndExtNoDelimiter takes a path and returns the file and extension separated,
+// the extension excluding the delmiter, e.g "md".
+func FileAndExtNoDelimiter(in string) (string, string) {
+	file, ext := fileAndExt(in, fpb)
+	return file, strings.TrimPrefix(ext, ".")
 }
 
 // Filename takes a path, strips out the extension,
@@ -405,6 +407,8 @@ func ExtractRootPaths(paths []string) []string {
 
 }
 
+var numInPathRe = regexp.MustCompile("\\.(\\d+)\\.")
+
 // FindCWD returns the current working directory from where the Hugo
 // executable is run.
 func FindCWD() (string, error) {
@@ -501,11 +505,11 @@ func getRealFileInfo(fs afero.Fs, path string) (os.FileInfo, string, error) {
 	if fileInfo.Mode()&os.ModeSymlink == os.ModeSymlink {
 		link, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			return nil, "", fmt.Errorf("Cannot read symbolic link '%s', error was: %s", path, err)
+			return nil, "", _errors.Wrapf(err, "Cannot read symbolic link %q", path)
 		}
 		fileInfo, err = LstatIfPossible(fs, link)
 		if err != nil {
-			return nil, "", fmt.Errorf("Cannot stat '%s', error was: %s", link, err)
+			return nil, "", _errors.Wrapf(err, "Cannot stat %q", link)
 		}
 		realPath = link
 	}
@@ -568,18 +572,72 @@ func OpenFilesForWriting(fs afero.Fs, filenames ...string) (io.WriteCloser, erro
 func OpenFileForWriting(fs afero.Fs, filename string) (afero.File, error) {
 	filename = filepath.Clean(filename)
 	// Create will truncate if file already exists.
+	// os.Create will create any new files with mode 0666 (before umask).
 	f, err := fs.Create(filename)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return nil, err
 		}
-		if err = fs.MkdirAll(filepath.Dir(filename), 0777); err != nil { // rwx, rw, r before umask
+		if err = fs.MkdirAll(filepath.Dir(filename), 0777); err != nil { //  before umask
 			return nil, err
 		}
 		f, err = fs.Create(filename)
 	}
 
 	return f, err
+}
+
+// GetCacheDir returns a cache dir from the given filesystem and config.
+// The dir will be created if it does not exist.
+func GetCacheDir(fs afero.Fs, cfg config.Provider) (string, error) {
+	cacheDir := getCacheDir(cfg)
+	if cacheDir != "" {
+		exists, err := DirExists(cacheDir, fs)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			err := fs.MkdirAll(cacheDir, 0777) // Before umask
+			if err != nil {
+				return "", _errors.Wrap(err, "failed to create cache dir")
+			}
+		}
+		return cacheDir, nil
+	}
+
+	// Fall back to a cache in /tmp.
+	return GetTempDir("hugo_cache", fs), nil
+
+}
+
+func getCacheDir(cfg config.Provider) string {
+	// Always use the cacheDir config if set.
+	cacheDir := cfg.GetString("cacheDir")
+	if len(cacheDir) > 1 {
+		return addTrailingFileSeparator(cacheDir)
+	}
+
+	// Both of these are fairly distinctive OS env keys used by Netlify.
+	if os.Getenv("DEPLOY_PRIME_URL") != "" && os.Getenv("PULL_REQUEST") != "" {
+		// Netlify's cache behaviour is not documented, the currently best example
+		// is this project:
+		// https://github.com/philhawksworth/content-shards/blob/master/gulpfile.js
+		return "/opt/build/cache/hugo_cache/"
+
+	}
+
+	// This will fall back to an hugo_cache folder in the tmp dir, which should work fine for most CI
+	// providers. See this for a working CircleCI setup:
+	// https://github.com/bep/hugo-sass-test/blob/6c3960a8f4b90e8938228688bc49bdcdd6b2d99e/.circleci/config.yml
+	// If not, they can set the HUGO_CACHEDIR environment variable or cacheDir config key.
+	return ""
+}
+
+func addTrailingFileSeparator(s string) string {
+	if !strings.HasSuffix(s, FilePathSeparator) {
+		s = s + FilePathSeparator
+	}
+	return s
 }
 
 // GetTempDir returns a temporary directory with the given sub path.

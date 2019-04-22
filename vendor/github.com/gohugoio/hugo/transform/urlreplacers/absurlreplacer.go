@@ -16,18 +16,10 @@ package urlreplacers
 import (
 	"bytes"
 	"io"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/gohugoio/hugo/transform"
-)
-
-type matchState int
-
-const (
-	matchStateNone matchState = iota
-	matchStateWhitespace
-	matchStatePartial
-	matchStateFull
 )
 
 type absurllexer struct {
@@ -41,31 +33,24 @@ type absurllexer struct {
 
 	pos   int // input position
 	start int // item start position
-	width int // width of last element
 
-	matchers []absURLMatcher
-
-	ms      matchState
-	matches [3]bool // track matches of the 3 prefixes
-	idx     int     // last index in matches checked
-
+	quotes [][]byte
 }
 
 type stateFunc func(*absurllexer) stateFunc
 
-// prefix is how to identify and which func to handle the replacement.
 type prefix struct {
-	r []rune
-	f func(l *absurllexer)
+	disabled bool
+	b        []byte
+	f        func(l *absurllexer)
 }
 
-// new prefixes can be added below, but note:
-// - the matches array above must be expanded.
-// - the prefix must with the current logic end with '='
-var prefixes = []*prefix{
-	{r: []rune{'s', 'r', 'c', '='}, f: checkCandidateBase},
-	{r: []rune{'h', 'r', 'e', 'f', '='}, f: checkCandidateBase},
-	{r: []rune{'s', 'r', 'c', 's', 'e', 't', '='}, f: checkCandidateSrcset},
+func newPrefixState() []*prefix {
+	return []*prefix{
+		{b: []byte("src="), f: checkCandidateBase},
+		{b: []byte("href="), f: checkCandidateBase},
+		{b: []byte("srcset="), f: checkCandidateSrcset},
+	}
 }
 
 type absURLMatcher struct {
@@ -73,186 +58,159 @@ type absURLMatcher struct {
 	quote []byte
 }
 
-// match check rune inside word. Will be != ' '.
-func (l *absurllexer) match(r rune) {
-
-	var found bool
-
-	// note, the prefixes can start off on the same foot, i.e.
-	// src and srcset.
-	if l.ms == matchStateWhitespace {
-		l.idx = 0
-		for j, p := range prefixes {
-			if r == p.r[l.idx] {
-				l.matches[j] = true
-				found = true
-				// checkMatchState will only return true when r=='=', so
-				// we can safely ignore the return value here.
-				l.checkMatchState(r, j)
-			}
-		}
-
-		if !found {
-			l.ms = matchStateNone
-		}
-
-		return
-	}
-
-	l.idx++
-	for j, m := range l.matches {
-		// still a match?
-		if m {
-			if prefixes[j].r[l.idx] == r {
-				found = true
-				if l.checkMatchState(r, j) {
-					return
-				}
-			} else {
-				l.matches[j] = false
-			}
-		}
-	}
-
-	if !found {
-		l.ms = matchStateNone
-	}
-}
-
-func (l *absurllexer) checkMatchState(r rune, idx int) bool {
-	if r == '=' {
-		l.ms = matchStateFull
-		for k := range l.matches {
-			if k != idx {
-				l.matches[k] = false
-			}
-		}
-		return true
-	}
-
-	l.ms = matchStatePartial
-
-	return false
-}
-
 func (l *absurllexer) emit() {
 	l.w.Write(l.content[l.start:l.pos])
 	l.start = l.pos
 }
 
+var (
+	relURLPrefix    = []byte("/")
+	relURLPrefixLen = len(relURLPrefix)
+)
+
+func (l *absurllexer) consumeQuote() []byte {
+	for _, q := range l.quotes {
+		if bytes.HasPrefix(l.content[l.pos:], q) {
+			l.pos += len(q)
+			l.emit()
+			return q
+		}
+	}
+	return nil
+}
+
 // handle URLs in src and href.
 func checkCandidateBase(l *absurllexer) {
-	for _, m := range l.matchers {
-		if !bytes.HasPrefix(l.content[l.pos:], m.match) {
-			continue
-		}
-		// check for schemaless URLs
-		posAfter := l.pos + len(m.match)
-		if posAfter >= len(l.content) {
-			return
-		}
-		r, _ := utf8.DecodeRune(l.content[posAfter:])
-		if r == '/' {
-			// schemaless: skip
-			return
-		}
-		if l.pos > l.start {
-			l.emit()
-		}
-		l.pos += len(m.match)
-		l.w.Write(m.quote)
-		l.w.Write(l.path)
-		l.start = l.pos
+	l.consumeQuote()
+
+	if !bytes.HasPrefix(l.content[l.pos:], relURLPrefix) {
+		return
 	}
+
+	// check for schemaless URLs
+	posAfter := l.pos + relURLPrefixLen
+	if posAfter >= len(l.content) {
+		return
+	}
+	r, _ := utf8.DecodeRune(l.content[posAfter:])
+	if r == '/' {
+		// schemaless: skip
+		return
+	}
+	if l.pos > l.start {
+		l.emit()
+	}
+	l.pos += relURLPrefixLen
+	l.w.Write(l.path)
+	l.start = l.pos
+}
+
+func (l *absurllexer) posAfterURL(q []byte) int {
+	if len(q) > 0 {
+		// look for end quote
+		return bytes.Index(l.content[l.pos:], q)
+	}
+
+	return bytes.IndexFunc(l.content[l.pos:], func(r rune) bool {
+		return r == '>' || unicode.IsSpace(r)
+	})
+
 }
 
 // handle URLs in srcset.
 func checkCandidateSrcset(l *absurllexer) {
-	// special case, not frequent (me think)
-	for _, m := range l.matchers {
-		if !bytes.HasPrefix(l.content[l.pos:], m.match) {
-			continue
-		}
-
-		// check for schemaless URLs
-		posAfter := l.pos + len(m.match)
-		if posAfter >= len(l.content) {
-			return
-		}
-		r, _ := utf8.DecodeRune(l.content[posAfter:])
-		if r == '/' {
-			// schemaless: skip
-			continue
-		}
-
-		posLastQuote := bytes.Index(l.content[l.pos+1:], m.quote)
-
-		// safe guard
-		if posLastQuote < 0 || posLastQuote > 2000 {
-			return
-		}
-
-		if l.pos > l.start {
-			l.emit()
-		}
-
-		section := l.content[l.pos+len(m.quote) : l.pos+posLastQuote+1]
-
-		fields := bytes.Fields(section)
-		l.w.Write(m.quote)
-		for i, f := range fields {
-			if f[0] == '/' {
-				l.w.Write(l.path)
-				l.w.Write(f[1:])
-
-			} else {
-				l.w.Write(f)
-			}
-
-			if i < len(fields)-1 {
-				l.w.Write([]byte(" "))
-			}
-		}
-
-		l.w.Write(m.quote)
-		l.pos += len(section) + (len(m.quote) * 2)
-		l.start = l.pos
+	q := l.consumeQuote()
+	if q == nil {
+		// srcset needs to be quoted.
+		return
 	}
+
+	// special case, not frequent (me think)
+	if !bytes.HasPrefix(l.content[l.pos:], relURLPrefix) {
+		return
+	}
+
+	// check for schemaless URLs
+	posAfter := l.pos + relURLPrefixLen
+	if posAfter >= len(l.content) {
+		return
+	}
+	r, _ := utf8.DecodeRune(l.content[posAfter:])
+	if r == '/' {
+		// schemaless: skip
+		return
+	}
+
+	posEnd := l.posAfterURL(q)
+
+	// safe guard
+	if posEnd < 0 || posEnd > 2000 {
+		return
+	}
+
+	if l.pos > l.start {
+		l.emit()
+	}
+
+	section := l.content[l.pos : l.pos+posEnd+1]
+
+	fields := bytes.Fields(section)
+	for i, f := range fields {
+		if f[0] == '/' {
+			l.w.Write(l.path)
+			l.w.Write(f[1:])
+
+		} else {
+			l.w.Write(f)
+		}
+
+		if i < len(fields)-1 {
+			l.w.Write([]byte(" "))
+		}
+	}
+
+	l.pos += len(section)
+	l.start = l.pos
+
 }
 
 // main loop
 func (l *absurllexer) replace() {
 	contentLength := len(l.content)
-	var r rune
+
+	prefixes := newPrefixState()
 
 	for {
 		if l.pos >= contentLength {
-			l.width = 0
 			break
 		}
 
-		var width = 1
-		r = rune(l.content[l.pos])
-		if r >= utf8.RuneSelf {
-			r, width = utf8.DecodeRune(l.content[l.pos:])
-		}
-		l.width = width
-		l.pos += l.width
-		if r == ' ' {
-			l.ms = matchStateWhitespace
-		} else if l.ms != matchStateNone {
-			l.match(r)
-			if l.ms == matchStateFull {
-				var p *prefix
-				for i, m := range l.matches {
-					if m {
-						p = prefixes[i]
-						l.matches[i] = false
-					}
-				}
-				l.ms = matchStateNone
-				p.f(l)
+		nextPos := -1
+
+		var match *prefix
+
+		for _, p := range prefixes {
+			if p.disabled {
+				continue
 			}
+			idx := bytes.Index(l.content[l.pos:], p.b)
+
+			if idx == -1 {
+				p.disabled = true
+				// Find the closest match
+			} else if nextPos == -1 || idx < nextPos {
+				nextPos = idx
+				match = p
+			}
+		}
+
+		if nextPos == -1 {
+			// Done!
+			l.pos = contentLength
+			break
+		} else {
+			l.pos += nextPos + len(match.b)
+			match.f(l)
 		}
 	}
 
@@ -262,53 +220,32 @@ func (l *absurllexer) replace() {
 	}
 }
 
-func doReplace(path string, ct transform.FromTo, matchers []absURLMatcher) {
+func doReplace(path string, ct transform.FromTo, quotes [][]byte) {
 
 	lexer := &absurllexer{
-		content:  ct.From().Bytes(),
-		w:        ct.To(),
-		path:     []byte(path),
-		matchers: matchers}
+		content: ct.From().Bytes(),
+		w:       ct.To(),
+		path:    []byte(path),
+		quotes:  quotes}
 
 	lexer.replace()
 }
 
 type absURLReplacer struct {
-	htmlMatchers []absURLMatcher
-	xmlMatchers  []absURLMatcher
+	htmlQuotes [][]byte
+	xmlQuotes  [][]byte
 }
 
 func newAbsURLReplacer() *absURLReplacer {
-
-	// HTML
-	dqHTMLMatch := []byte("\"/")
-	sqHTMLMatch := []byte("'/")
-
-	// XML
-	dqXMLMatch := []byte("&#34;/")
-	sqXMLMatch := []byte("&#39;/")
-
-	dqHTML := []byte("\"")
-	sqHTML := []byte("'")
-
-	dqXML := []byte("&#34;")
-	sqXML := []byte("&#39;")
-
 	return &absURLReplacer{
-		htmlMatchers: []absURLMatcher{
-			{dqHTMLMatch, dqHTML},
-			{sqHTMLMatch, sqHTML},
-		},
-		xmlMatchers: []absURLMatcher{
-			{dqXMLMatch, dqXML},
-			{sqXMLMatch, sqXML},
-		}}
+		htmlQuotes: [][]byte{[]byte("\""), []byte("'")},
+		xmlQuotes:  [][]byte{[]byte("&#34;"), []byte("&#39;")}}
 }
 
 func (au *absURLReplacer) replaceInHTML(path string, ct transform.FromTo) {
-	doReplace(path, ct, au.htmlMatchers)
+	doReplace(path, ct, au.htmlQuotes)
 }
 
 func (au *absURLReplacer) replaceInXML(path string, ct transform.FromTo) {
-	doReplace(path, ct, au.xmlMatchers)
+	doReplace(path, ct, au.xmlQuotes)
 }
