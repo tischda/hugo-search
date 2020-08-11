@@ -35,7 +35,7 @@ import (
 
 	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/hugolib/pagemeta"
-	"github.com/gohugoio/hugo/resource"
+	"github.com/gohugoio/hugo/resources/resource"
 
 	"github.com/gohugoio/hugo/output"
 	"github.com/mitchellh/mapstructure"
@@ -1774,8 +1774,8 @@ func (p *Page) prepareData(s *Site) error {
 		case KindHome:
 			pages = s.RegularPages
 		case KindTaxonomy:
-			plural := path.Join(p.sections[:len(p.sections)-1]...)
-			term := p.sections[len(p.sections)-1]
+			plural := p.sections[0]
+			term := p.sections[1]
 
 			if s.Info.preserveTaxonomyNames {
 				if v, ok := s.taxonomiesOrigKey[fmt.Sprintf("%s-%s", plural, term)]; ok {
@@ -1792,7 +1792,7 @@ func (p *Page) prepareData(s *Site) error {
 			p.data["Term"] = term
 			pages = taxonomy.Pages()
 		case KindTaxonomyTerm:
-			plural := path.Join(p.sections...)
+			plural := p.sections[0]
 			singular := s.taxonomiesPluralSingular[plural]
 
 			p.data["Singular"] = singular
@@ -2048,10 +2048,41 @@ func kindFromFileInfo(fi *fileInfo) string {
 	return KindPage
 }
 
+func (p *Page) sectionsPath() string {
+	if len(p.sections) == 0 {
+		return ""
+	}
+	if len(p.sections) == 1 {
+		return p.sections[0]
+	}
+
+	return path.Join(p.sections...)
+}
+
+func (p *Page) kindFromSections() string {
+	if len(p.sections) == 0 || len(p.s.Taxonomies) == 0 {
+		return KindSection
+	}
+
+	sectionPath := p.sectionsPath()
+
+	for k, _ := range p.s.Taxonomies {
+		if k == sectionPath {
+			return KindTaxonomyTerm
+		}
+
+		if strings.HasPrefix(sectionPath, k) {
+			return KindTaxonomy
+		}
+	}
+
+	return KindSection
+}
+
 func (p *Page) setValuesForKind(s *Site) {
 	if p.Kind == kindUnknown {
 		// This is either a taxonomy list, taxonomy term or a section
-		nodeType := s.kindFromSections(p.sections)
+		nodeType := p.kindFromSections()
 
 		if nodeType == kindUnknown {
 			panic(fmt.Sprintf("Unable to determine page kind from %q", p.sections))

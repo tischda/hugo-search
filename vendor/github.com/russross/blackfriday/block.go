@@ -649,14 +649,17 @@ func isFenceLine(data []byte, info *string, oldmarker string, newlineOptional bo
 	}
 
 	i = skipChar(data, i, ' ')
-	if i >= len(data) || data[i] != '\n' {
-		if newlineOptional && i == len(data) {
+	if i >= len(data) {
+		if newlineOptional {
 			return i, marker
 		}
 		return 0, ""
 	}
+	if data[i] == '\n' {
+		i++ // Take newline into account
+	}
 
-	return i + 1, marker // Take newline into account.
+	return i, marker
 }
 
 // fencedCodeBlock returns the end index if data contains a fenced code block at the beginning,
@@ -1133,16 +1136,21 @@ func (p *parser) listItem(out *bytes.Buffer, data []byte, flags *int) int {
 		i++
 	}
 
+	// process the following lines
+	containsBlankLine := false
+	sublist := 0
+	codeBlockMarker := ""
+	if p.flags&EXTENSION_FENCED_CODE != 0 && i > line {
+		// determine if codeblock starts on the first line
+		_, codeBlockMarker = isFenceLine(data[line:i], nil, "", false)
+	}
+
 	// get working buffer
 	var raw bytes.Buffer
 
 	// put the first line into the working buffer
 	raw.Write(data[line:i])
 	line = i
-
-	// process the following lines
-	containsBlankLine := false
-	sublist := 0
 
 gatherlines:
 	for line < len(data) {
@@ -1152,7 +1160,6 @@ gatherlines:
 		for data[i-1] != '\n' {
 			i++
 		}
-
 		// if it is an empty line, guess that it is part of this item
 		// and move on to the next line
 		if p.isEmpty(data[line:i]) > 0 {
@@ -1169,6 +1176,28 @@ gatherlines:
 		}
 
 		chunk := data[line+indent : i]
+
+		if p.flags&EXTENSION_FENCED_CODE != 0 {
+			// determine if in or out of codeblock
+			// if in codeblock, ignore normal list processing
+			_, marker := isFenceLine(chunk, nil, codeBlockMarker, false)
+			if marker != "" {
+				if codeBlockMarker == "" {
+					// start of codeblock
+					codeBlockMarker = marker
+				} else {
+					// end of codeblock.
+					*flags |= LIST_ITEM_CONTAINS_BLOCK
+					codeBlockMarker = ""
+				}
+			}
+			// we are in a codeblock, write line, and continue
+			if codeBlockMarker != "" || marker != "" {
+				raw.Write(data[line+indent : i])
+				line = i
+				continue gatherlines
+			}
+		}
 
 		// evaluate how this line fits in
 		switch {

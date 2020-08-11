@@ -1,5 +1,7 @@
 module github.com/tischda/hugo-search
 
+go 1.14
+
 require (
 	cloud.google.com/go v0.36.0 // indirect
 	dmitri.shuralyov.com/app/changes v0.0.0-20181114035150-5af16e21babb // indirect

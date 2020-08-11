@@ -22,7 +22,6 @@ import (
 	"mime"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -40,7 +39,6 @@ import (
 	"github.com/gohugoio/hugo/common/hugo"
 	"github.com/gohugoio/hugo/common/maps"
 	"github.com/gohugoio/hugo/publisher"
-	"github.com/gohugoio/hugo/resource"
 	_errors "github.com/pkg/errors"
 
 	"github.com/gohugoio/hugo/langs"
@@ -63,6 +61,7 @@ import (
 	"github.com/gohugoio/hugo/hugolib/pagemeta"
 	"github.com/gohugoio/hugo/output"
 	"github.com/gohugoio/hugo/related"
+	"github.com/gohugoio/hugo/resources"
 	"github.com/gohugoio/hugo/source"
 	"github.com/gohugoio/hugo/tpl"
 	"github.com/spf13/afero"
@@ -761,7 +760,7 @@ func (s *Site) processPartial(events []fsnotify.Event) (whatChanged, error) {
 	cachePartitions := make([]string, len(events))
 
 	for i, ev := range events {
-		cachePartitions[i] = resource.ResourceKeyPartition(ev.Name)
+		cachePartitions[i] = resources.ResourceKeyPartition(ev.Name)
 
 		if s.isContentDirEvent(ev) {
 			logger.Println("Source changed", ev)
@@ -1587,37 +1586,6 @@ func (s *Site) resetBuildState() {
 	}
 }
 
-func (s *Site) singularPluralAll(sections []string) (string, string, string) {
-	slen := len(sections)
-	singular := sections[slen-1]
-	plural := path.Join((sections[:slen-1])...)
-	all := path.Join(sections...)
-
-	return singular, plural, all
-}
-
-func (s *Site) kindFromSections(sections []string) string {
-	if len(sections) == 0 {
-		return KindSection
-	}
-
-	_, plural, all := s.singularPluralAll(sections)
-
-	if _, ok := s.Taxonomies[all]; ok {
-		return KindTaxonomyTerm
-	} else if _, ok := s.Taxonomies[plural]; ok {
-		return KindTaxonomy
-	}
-
-	if _, isTaxonomy := s.Taxonomies[sections[0]]; isTaxonomy {
-		if len(sections) == 1 {
-			return KindTaxonomyTerm
-		}
-		return KindTaxonomy
-	}
-	return KindSection
-}
-
 func (s *Site) layouts(p *PageOutput) ([]string, error) {
 	return s.layoutHandler.For(p.layoutDescriptor, p.outputFormat)
 }
@@ -1864,10 +1832,8 @@ func (s *Site) newHomePage() *Page {
 }
 
 func (s *Site) newTaxonomyPage(plural, key string) *Page {
-	sections := strings.Split(plural, "/")
-	sections = append(sections, key)
 
-	p := s.newNodePage(KindTaxonomy, sections...)
+	p := s.newNodePage(KindTaxonomy, plural, key)
 
 	if s.Info.preserveTaxonomyNames {
 		p.title = key
@@ -1891,7 +1857,7 @@ func (s *Site) newSectionPage(name string) *Page {
 }
 
 func (s *Site) newTaxonomyTermsPage(plural string) *Page {
-	p := s.newNodePage(KindTaxonomyTerm, strings.Split(plural, "/")...)
+	p := s.newNodePage(KindTaxonomyTerm, plural)
 	p.title = s.titleFunc(plural)
 	return p
 }

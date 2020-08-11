@@ -202,7 +202,7 @@ func (l configLoader) loadConfig(configName string, v *viper.Viper) (string, err
 			filename = baseFilename
 		}
 	} else {
-		for _, ext := range []string{"toml", "yaml", "yml", "json"} {
+		for _, ext := range config.ValidConfigFileExtensions {
 			filenameToCheck := baseFilename + "." + ext
 			exists, _ := helpers.Exists(filenameToCheck, l.Fs)
 			if exists {
@@ -280,6 +280,10 @@ func (l configLoader) loadConfigFromConfigDir(v *viper.Viper) ([]string, error) 
 
 			if fi.IsDir() {
 				dirnames = append(dirnames, path)
+				return nil
+			}
+
+			if !config.IsValidConfigFilename(path) {
 				return nil
 			}
 
@@ -630,7 +634,6 @@ func loadDefaultSettingsFor(v *viper.Viper) error {
 	v.SetDefault("paginatePath", "page")
 	v.SetDefault("summaryLength", 70)
 	v.SetDefault("blackfriday", c.BlackFriday)
-	v.SetDefault("rSSUri", "index.xml")
 	v.SetDefault("rssLimit", -1)
 	v.SetDefault("sectionPagesMenu", "")
 	v.SetDefault("disablePathToLower", false)
