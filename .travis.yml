@@ -1,9 +1,6 @@
 language: go
 go:
-    - 1.12.4
-
-env:
-  - GO111MODULE=on
+    - 1.14.7
 
 script:
     - rm -rf test/indexes

@@ -4,7 +4,8 @@ A [Bleve](http://www.blevesearch.com) search server for your [Hugo](http://gohug
 
 ### Dependencies
 
-This project uses [go 1.11 modules](https://github.com/golang/go/wiki/Modules)
+* Hugo
+* Bleve search
 
 
 ### Compile
