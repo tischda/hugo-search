@@ -1,30 +1,15 @@
-# cloud.google.com/go v0.36.0
-## explicit
-# dmitri.shuralyov.com/app/changes v0.0.0-20181114035150-5af16e21babb
-## explicit
-# dmitri.shuralyov.com/service/change v0.0.0-20190203163610-217368fe4577
-## explicit
-# git.apache.org/thrift.git v0.12.0
-## explicit
 # github.com/BurntSushi/locker v0.0.0-20171006230638-a6e239ea1c69
 github.com/BurntSushi/locker
 # github.com/BurntSushi/toml v0.3.1
 github.com/BurntSushi/toml
 # github.com/PuerkitoBio/purell v1.1.1
-## explicit
 github.com/PuerkitoBio/purell
 # github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578
 github.com/PuerkitoBio/urlesc
-# github.com/RoaringBitmap/roaring v0.4.16
-## explicit
+# github.com/RoaringBitmap/roaring v0.4.23
 github.com/RoaringBitmap/roaring
-# github.com/Shopify/sarama v1.20.1
-## explicit
-# github.com/Smerity/govarint v0.0.0-20150407073650-7265e41f48f1
-## explicit
-# github.com/alecthomas/chroma v0.6.2
+# github.com/alecthomas/chroma v0.8.2
 github.com/alecthomas/chroma
-github.com/alecthomas/chroma/formatters
 github.com/alecthomas/chroma/formatters/html
 github.com/alecthomas/chroma/lexers
 github.com/alecthomas/chroma/lexers/a
@@ -53,16 +38,20 @@ github.com/alecthomas/chroma/lexers/v
 github.com/alecthomas/chroma/lexers/w
 github.com/alecthomas/chroma/lexers/x
 github.com/alecthomas/chroma/lexers/y
+github.com/alecthomas/chroma/lexers/z
 github.com/alecthomas/chroma/styles
+# github.com/armon/go-radix v1.0.0
+github.com/armon/go-radix
 # github.com/bep/debounce v1.2.0
-## explicit
-# github.com/bep/gitmap v1.0.0
+github.com/bep/debounce
+# github.com/bep/gitmap v1.1.2
 github.com/bep/gitmap
-# github.com/bep/go-tocss v0.6.0
-github.com/bep/go-tocss/scss
-github.com/bep/go-tocss/scss/libsass
-github.com/bep/go-tocss/tocss
-# github.com/blevesearch/bleve v0.7.1-0.20190116190817-d72521093e14
+# github.com/bep/golibsass v0.7.0
+github.com/bep/golibsass/internal/libsass
+github.com/bep/golibsass/libsass
+# github.com/bep/tmc v0.5.1
+github.com/bep/tmc
+# github.com/blevesearch/bleve v1.0.14
 ## explicit
 github.com/blevesearch/bleve
 github.com/blevesearch/bleve/analysis
@@ -81,7 +70,6 @@ github.com/blevesearch/bleve/index
 github.com/blevesearch/bleve/index/scorch
 github.com/blevesearch/bleve/index/scorch/mergeplan
 github.com/blevesearch/bleve/index/scorch/segment
-github.com/blevesearch/bleve/index/scorch/segment/zap
 github.com/blevesearch/bleve/index/store
 github.com/blevesearch/bleve/index/store/boltdb
 github.com/blevesearch/bleve/index/store/gtreap
@@ -101,60 +89,72 @@ github.com/blevesearch/bleve/search/query
 github.com/blevesearch/bleve/search/scorer
 github.com/blevesearch/bleve/search/searcher
 github.com/blevesearch/bleve/size
-# github.com/blevesearch/go-porterstemmer v1.0.1
-## explicit
+# github.com/blevesearch/go-porterstemmer v1.0.3
 github.com/blevesearch/go-porterstemmer
-# github.com/blevesearch/segment v0.0.0-20160915185041-762005e7a34f
-## explicit
+# github.com/blevesearch/mmap-go v1.0.2
+github.com/blevesearch/mmap-go
+# github.com/blevesearch/segment v0.9.0
 github.com/blevesearch/segment
-# github.com/boltdb/bolt v1.3.1
-## explicit
-github.com/boltdb/bolt
-# github.com/chaseadamsio/goorgeous v1.1.0
-github.com/chaseadamsio/goorgeous
-# github.com/coreos/etcd v3.3.12+incompatible
-## explicit
-# github.com/coreos/go-systemd v0.0.0-20190212144455-93d5ec2c7f76
-## explicit
-# github.com/couchbase/vellum v0.0.0-20190111184608-e91b68ff3efe
-## explicit
+# github.com/blevesearch/snowballstem v0.9.0
+github.com/blevesearch/snowballstem
+github.com/blevesearch/snowballstem/english
+# github.com/blevesearch/zap/v11 v11.0.14
+github.com/blevesearch/zap/v11
+# github.com/blevesearch/zap/v12 v12.0.14
+github.com/blevesearch/zap/v12
+# github.com/blevesearch/zap/v13 v13.0.6
+github.com/blevesearch/zap/v13
+# github.com/blevesearch/zap/v14 v14.0.5
+github.com/blevesearch/zap/v14
+# github.com/blevesearch/zap/v15 v15.0.3
+github.com/blevesearch/zap/v15
+# github.com/cli/safeexec v1.0.0
+github.com/cli/safeexec
+# github.com/couchbase/vellum v1.0.2
 github.com/couchbase/vellum
-github.com/couchbase/vellum/levenshtein2
+github.com/couchbase/vellum/levenshtein
 github.com/couchbase/vellum/regexp
 github.com/couchbase/vellum/utf8
 # github.com/danwakefield/fnmatch v0.0.0-20160403171240-cbb64ac3d964
 github.com/danwakefield/fnmatch
-# github.com/disintegration/imaging v1.6.0
-## explicit
-github.com/disintegration/imaging
-# github.com/dlclark/regexp2 v1.1.6
+# github.com/disintegration/gift v1.2.1
+github.com/disintegration/gift
+# github.com/dlclark/regexp2 v1.4.0
 github.com/dlclark/regexp2
 github.com/dlclark/regexp2/syntax
-# github.com/edsrzf/mmap-go v1.0.0
-## explicit
-github.com/edsrzf/mmap-go
-# github.com/eknkc/amber v0.0.0-20171010120322-cdade1c07385
-github.com/eknkc/amber
-github.com/eknkc/amber/parser
-# github.com/fortytw2/leaktest v1.3.0
-## explicit
-# github.com/fsnotify/fsnotify v1.4.7
+# github.com/evanw/esbuild v0.8.15
+github.com/evanw/esbuild/internal/ast
+github.com/evanw/esbuild/internal/bundler
+github.com/evanw/esbuild/internal/cache
+github.com/evanw/esbuild/internal/compat
+github.com/evanw/esbuild/internal/config
+github.com/evanw/esbuild/internal/css_ast
+github.com/evanw/esbuild/internal/css_lexer
+github.com/evanw/esbuild/internal/css_parser
+github.com/evanw/esbuild/internal/css_printer
+github.com/evanw/esbuild/internal/fs
+github.com/evanw/esbuild/internal/js_ast
+github.com/evanw/esbuild/internal/js_lexer
+github.com/evanw/esbuild/internal/js_parser
+github.com/evanw/esbuild/internal/js_printer
+github.com/evanw/esbuild/internal/logger
+github.com/evanw/esbuild/internal/renamer
+github.com/evanw/esbuild/internal/resolver
+github.com/evanw/esbuild/internal/runtime
+github.com/evanw/esbuild/internal/sourcemap
+github.com/evanw/esbuild/pkg/api
+# github.com/fsnotify/fsnotify v1.4.9
 github.com/fsnotify/fsnotify
+# github.com/getkin/kin-openapi v0.31.0
+github.com/getkin/kin-openapi/jsoninfo
+github.com/getkin/kin-openapi/openapi3
+# github.com/ghodss/yaml v1.0.0
+github.com/ghodss/yaml
 # github.com/glycerine/go-unsnap-stream v0.0.0-20181221182339-f9677308dec2
-## explicit
 github.com/glycerine/go-unsnap-stream
-# github.com/go-logfmt/logfmt v0.4.0
-## explicit
-# github.com/gobuffalo/buffalo-plugins v1.13.0
-## explicit
 # github.com/gobuffalo/envy v1.6.15
+## explicit
 github.com/gobuffalo/envy
-# github.com/gobuffalo/flect v0.1.0
-## explicit
-# github.com/gobuffalo/meta v0.0.0-20190207205153-50a99e08b8cf
-## explicit
-# github.com/gobuffalo/release v1.1.8
-## explicit
 # github.com/gobwas/glob v0.2.3
 github.com/gobwas/glob
 github.com/gobwas/glob/compiler
@@ -164,21 +164,22 @@ github.com/gobwas/glob/syntax/ast
 github.com/gobwas/glob/syntax/lexer
 github.com/gobwas/glob/util/runes
 github.com/gobwas/glob/util/strings
-# github.com/gogo/protobuf v1.2.1
-## explicit
-# github.com/gohugoio/hugo v0.54.0
+# github.com/gohugoio/hugo v0.79.1
 ## explicit
 github.com/gohugoio/hugo/bufferpool
-github.com/gohugoio/hugo/cache
 github.com/gohugoio/hugo/cache/filecache
 github.com/gohugoio/hugo/cache/namedmemcache
 github.com/gohugoio/hugo/common/collections
+github.com/gohugoio/hugo/common/constants
 github.com/gohugoio/hugo/common/herrors
+github.com/gohugoio/hugo/common/hexec
+github.com/gohugoio/hugo/common/hreflect
 github.com/gohugoio/hugo/common/hugio
 github.com/gohugoio/hugo/common/hugo
 github.com/gohugoio/hugo/common/loggers
 github.com/gohugoio/hugo/common/maps
 github.com/gohugoio/hugo/common/math
+github.com/gohugoio/hugo/common/para
 github.com/gohugoio/hugo/common/terminal
 github.com/gohugoio/hugo/common/text
 github.com/gohugoio/hugo/common/types
@@ -190,17 +191,38 @@ github.com/gohugoio/hugo/config/services
 github.com/gohugoio/hugo/deps
 github.com/gohugoio/hugo/docshelper
 github.com/gohugoio/hugo/helpers
-github.com/gohugoio/hugo/htesting
 github.com/gohugoio/hugo/hugofs
+github.com/gohugoio/hugo/hugofs/files
+github.com/gohugoio/hugo/hugofs/glob
 github.com/gohugoio/hugo/hugolib
 github.com/gohugoio/hugo/hugolib/filesystems
-github.com/gohugoio/hugo/hugolib/pagemeta
 github.com/gohugoio/hugo/hugolib/paths
-github.com/gohugoio/hugo/i18n
+github.com/gohugoio/hugo/identity
 github.com/gohugoio/hugo/langs
+github.com/gohugoio/hugo/langs/i18n
+github.com/gohugoio/hugo/lazy
+github.com/gohugoio/hugo/markup
+github.com/gohugoio/hugo/markup/asciidocext
+github.com/gohugoio/hugo/markup/asciidocext/asciidocext_config
+github.com/gohugoio/hugo/markup/blackfriday
+github.com/gohugoio/hugo/markup/blackfriday/blackfriday_config
+github.com/gohugoio/hugo/markup/converter
+github.com/gohugoio/hugo/markup/converter/hooks
+github.com/gohugoio/hugo/markup/goldmark
+github.com/gohugoio/hugo/markup/goldmark/goldmark_config
+github.com/gohugoio/hugo/markup/highlight
+github.com/gohugoio/hugo/markup/internal
+github.com/gohugoio/hugo/markup/markup_config
+github.com/gohugoio/hugo/markup/mmark
+github.com/gohugoio/hugo/markup/org
+github.com/gohugoio/hugo/markup/pandoc
+github.com/gohugoio/hugo/markup/rst
+github.com/gohugoio/hugo/markup/tableofcontents
 github.com/gohugoio/hugo/media
 github.com/gohugoio/hugo/metrics
 github.com/gohugoio/hugo/minifiers
+github.com/gohugoio/hugo/modules
+github.com/gohugoio/hugo/navigation
 github.com/gohugoio/hugo/output
 github.com/gohugoio/hugo/parser
 github.com/gohugoio/hugo/parser/metadecoders
@@ -208,11 +230,19 @@ github.com/gohugoio/hugo/parser/pageparser
 github.com/gohugoio/hugo/publisher
 github.com/gohugoio/hugo/related
 github.com/gohugoio/hugo/resources
+github.com/gohugoio/hugo/resources/images
+github.com/gohugoio/hugo/resources/images/exif
 github.com/gohugoio/hugo/resources/internal
+github.com/gohugoio/hugo/resources/jsconfig
+github.com/gohugoio/hugo/resources/page
+github.com/gohugoio/hugo/resources/page/pagemeta
+github.com/gohugoio/hugo/resources/postpub
 github.com/gohugoio/hugo/resources/resource
 github.com/gohugoio/hugo/resources/resource_factories/bundler
 github.com/gohugoio/hugo/resources/resource_factories/create
+github.com/gohugoio/hugo/resources/resource_transformers/babel
 github.com/gohugoio/hugo/resources/resource_transformers/integrity
+github.com/gohugoio/hugo/resources/resource_transformers/js
 github.com/gohugoio/hugo/resources/resource_transformers/minifier
 github.com/gohugoio/hugo/resources/resource_transformers/postcss
 github.com/gohugoio/hugo/resources/resource_transformers/templates
@@ -224,14 +254,22 @@ github.com/gohugoio/hugo/tpl/collections
 github.com/gohugoio/hugo/tpl/compare
 github.com/gohugoio/hugo/tpl/crypto
 github.com/gohugoio/hugo/tpl/data
+github.com/gohugoio/hugo/tpl/debug
 github.com/gohugoio/hugo/tpl/encoding
 github.com/gohugoio/hugo/tpl/fmt
 github.com/gohugoio/hugo/tpl/hugo
 github.com/gohugoio/hugo/tpl/images
 github.com/gohugoio/hugo/tpl/inflect
 github.com/gohugoio/hugo/tpl/internal
+github.com/gohugoio/hugo/tpl/internal/go_templates/fmtsort
+github.com/gohugoio/hugo/tpl/internal/go_templates/htmltemplate
+github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate
+github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate/parse
+github.com/gohugoio/hugo/tpl/internal/resourcehelpers
+github.com/gohugoio/hugo/tpl/js
 github.com/gohugoio/hugo/tpl/lang
 github.com/gohugoio/hugo/tpl/math
+github.com/gohugoio/hugo/tpl/openapi/openapi3
 github.com/gohugoio/hugo/tpl/os
 github.com/gohugoio/hugo/tpl/partials
 github.com/gohugoio/hugo/tpl/path
@@ -250,33 +288,10 @@ github.com/gohugoio/hugo/transform
 github.com/gohugoio/hugo/transform/livereloadinject
 github.com/gohugoio/hugo/transform/metainject
 github.com/gohugoio/hugo/transform/urlreplacers
-# github.com/golang/lint v0.0.0-20181217174547-8f45f776aaf1
-## explicit
-# github.com/golang/protobuf v1.2.0
+# github.com/golang/protobuf v1.3.2
 github.com/golang/protobuf/proto
-# github.com/golang/snappy v0.0.0-20190218232222-2a8bb927dd31
-## explicit
+# github.com/golang/snappy v0.0.1
 github.com/golang/snappy
-# github.com/gomodule/redigo v2.0.0+incompatible
-## explicit
-# github.com/google/pprof v0.0.0-20190208070709-b421f19a5c07
-## explicit
-# github.com/googleapis/gax-go v2.0.2+incompatible
-## explicit
-# github.com/gopherjs/gopherjs v0.0.0-20181103185306-d547d1d9531e
-## explicit
-# github.com/gorilla/mux v1.7.0
-## explicit
-# github.com/gregjones/httpcache v0.0.0-20190212212710-3befbb6ad0cc
-## explicit
-# github.com/grpc-ecosystem/grpc-gateway v1.7.0
-## explicit
-# github.com/hashicorp/go-immutable-radix v1.0.0
-github.com/hashicorp/go-immutable-radix
-# github.com/hashicorp/go-uuid v1.0.1
-## explicit
-# github.com/hashicorp/golang-lru v0.5.0
-github.com/hashicorp/golang-lru/simplelru
 # github.com/hashicorp/hcl v1.0.0
 github.com/hashicorp/hcl
 github.com/hashicorp/hcl/hcl/ast
@@ -288,124 +303,76 @@ github.com/hashicorp/hcl/hcl/token
 github.com/hashicorp/hcl/json/parser
 github.com/hashicorp/hcl/json/scanner
 github.com/hashicorp/hcl/json/token
-# github.com/jdkato/prose v1.1.0
+# github.com/jdkato/prose v1.2.0
 github.com/jdkato/prose/internal/util
 github.com/jdkato/prose/transform
 # github.com/joho/godotenv v1.3.0
 github.com/joho/godotenv
-# github.com/kisielk/errcheck v1.2.0
-## explicit
-# github.com/kyokomi/emoji v2.1.0+incompatible
-## explicit
+# github.com/kyokomi/emoji v2.2.4+incompatible
 github.com/kyokomi/emoji
-# github.com/magefile/mage v1.8.0
-## explicit
-# github.com/magiconair/properties v1.8.0
+# github.com/magiconair/properties v1.8.1
 github.com/magiconair/properties
 # github.com/markbates/inflect v1.0.4
 github.com/markbates/inflect
-# github.com/mattn/go-colorable v0.1.0
-## explicit
-# github.com/mattn/go-isatty v0.0.4
+# github.com/mattn/go-isatty v0.0.12
 github.com/mattn/go-isatty
-# github.com/mattn/go-runewidth v0.0.4
-## explicit
+# github.com/mattn/go-runewidth v0.0.7
 github.com/mattn/go-runewidth
 # github.com/miekg/mmark v1.3.6
 github.com/miekg/mmark
 # github.com/mitchellh/hashstructure v1.0.0
 github.com/mitchellh/hashstructure
-# github.com/mitchellh/mapstructure v1.1.2
+# github.com/mitchellh/mapstructure v1.3.3
 github.com/mitchellh/mapstructure
-# github.com/mschoch/smat v0.0.0-20160514031455-90eadee771ae
-## explicit
+# github.com/mschoch/smat v0.2.0
 github.com/mschoch/smat
-# github.com/muesli/smartcrop v0.0.0-20180228075044-f6ebaa786a12
+# github.com/muesli/smartcrop v0.3.0
 github.com/muesli/smartcrop
 github.com/muesli/smartcrop/options
-# github.com/nicksnyder/go-i18n v1.10.0
-github.com/nicksnyder/go-i18n/i18n/bundle
-github.com/nicksnyder/go-i18n/i18n/language
-github.com/nicksnyder/go-i18n/i18n/translation
-# github.com/olekukonko/tablewriter v0.0.1
-## explicit
+# github.com/nicksnyder/go-i18n/v2 v2.1.1
+github.com/nicksnyder/go-i18n/v2/i18n
+github.com/nicksnyder/go-i18n/v2/internal
+github.com/nicksnyder/go-i18n/v2/internal/plural
+# github.com/niklasfasching/go-org v1.3.2
+github.com/niklasfasching/go-org/org
+# github.com/olekukonko/tablewriter v0.0.4
 github.com/olekukonko/tablewriter
-# github.com/openzipkin/zipkin-go v0.1.5
-## explicit
-# github.com/pelletier/go-toml v1.2.0
+# github.com/pelletier/go-toml v1.8.1
 github.com/pelletier/go-toml
 # github.com/philhofer/fwd v1.0.0
-## explicit
 github.com/philhofer/fwd
-# github.com/pkg/errors v0.8.1
+# github.com/pkg/errors v0.9.1
 github.com/pkg/errors
-# github.com/prometheus/client_model v0.0.0-20190129233127-fd36f4220a90
-## explicit
-# github.com/prometheus/common v0.2.0
-## explicit
-# github.com/prometheus/procfs v0.0.0-20190209105433-f8d8b3f739bd
-## explicit
-# github.com/rogpeppe/go-internal v1.2.2
+# github.com/rogpeppe/go-internal v1.6.2
 github.com/rogpeppe/go-internal/modfile
 github.com/rogpeppe/go-internal/module
 github.com/rogpeppe/go-internal/semver
 # github.com/rs/cors v1.6.0
 ## explicit
 github.com/rs/cors
-# github.com/russross/blackfriday v1.5.3-0.20190124082335-a477dd164691
-## explicit
+# github.com/russross/blackfriday v1.5.3-0.20200218234912-41c5fccfd6f6
 github.com/russross/blackfriday
-# github.com/shurcooL/go v0.0.0-20190121191506-3fef8c783dec
-## explicit
-# github.com/shurcooL/gofontwoff v0.0.0-20181114050219-180f79e6909d
-## explicit
-# github.com/shurcooL/highlight_diff v0.0.0-20181222201841-111da2e7d480
-## explicit
-# github.com/shurcooL/highlight_go v0.0.0-20181215221002-9d8641ddf2e1
-## explicit
-# github.com/shurcooL/home v0.0.0-20190204141146-5c8ae21d4240
-## explicit
-# github.com/shurcooL/htmlg v0.0.0-20190120222857-1e8a37b806f3
-## explicit
-# github.com/shurcooL/httpfs v0.0.0-20181222201310-74dc9339e414
-## explicit
-# github.com/shurcooL/issues v0.0.0-20190120000219-08d8dadf8acb
-## explicit
-# github.com/shurcooL/issuesapp v0.0.0-20181229001453-b8198a402c58
-## explicit
-# github.com/shurcooL/notifications v0.0.0-20181111060504-bcc2b3082a7a
-## explicit
-# github.com/shurcooL/octicon v0.0.0-20181222203144-9ff1a4cf27f4
-## explicit
-# github.com/shurcooL/reactions v0.0.0-20181222204718-145cd5e7f3d1
-## explicit
-# github.com/shurcooL/sanitized_anchor_name v1.0.0
-## explicit
-github.com/shurcooL/sanitized_anchor_name
-# github.com/shurcooL/webdavfs v0.0.0-20181215192745-5988b2d638f6
-## explicit
-# github.com/sourcegraph/go-diff v0.5.1
-## explicit
-# github.com/spf13/afero v1.2.1
+# github.com/rwcarlsen/goexif v0.0.0-20190401172101-9e8deecbddbd
+github.com/rwcarlsen/goexif/exif
+github.com/rwcarlsen/goexif/tiff
+# github.com/sanity-io/litter v1.3.0
+github.com/sanity-io/litter
+# github.com/spf13/afero v1.4.1
 github.com/spf13/afero
 github.com/spf13/afero/mem
-# github.com/spf13/cast v1.3.0
+# github.com/spf13/cast v1.3.1
 github.com/spf13/cast
-# github.com/spf13/jwalterweatherman v1.0.1-0.20181028145347-94f6ae3ed3bc
+# github.com/spf13/jwalterweatherman v1.1.0
 github.com/spf13/jwalterweatherman
-# github.com/spf13/nitro v0.0.0-20131003134307-24d7ef30a12d
-github.com/spf13/nitro
-# github.com/spf13/pflag v1.0.3
+# github.com/spf13/pflag v1.0.5
 github.com/spf13/pflag
-# github.com/spf13/viper v1.3.1
+# github.com/spf13/viper v1.7.1
 github.com/spf13/viper
-# github.com/steveyen/gtreap v0.0.0-20150807155958-0abe01ef9be2
-## explicit
+# github.com/steveyen/gtreap v0.1.0
 github.com/steveyen/gtreap
-# github.com/tdewolff/minify v2.3.6+incompatible
-## explicit
-# github.com/tdewolff/minify/v2 v2.3.8
-## explicit
+# github.com/subosito/gotenv v1.2.0
+github.com/subosito/gotenv
+# github.com/tdewolff/minify/v2 v2.6.2
 github.com/tdewolff/minify/v2
 github.com/tdewolff/minify/v2/css
 github.com/tdewolff/minify/v2/html
@@ -413,9 +380,7 @@ github.com/tdewolff/minify/v2/js
 github.com/tdewolff/minify/v2/json
 github.com/tdewolff/minify/v2/svg
 github.com/tdewolff/minify/v2/xml
-# github.com/tdewolff/parse v2.3.4+incompatible
-## explicit
-# github.com/tdewolff/parse/v2 v2.3.5
+# github.com/tdewolff/parse/v2 v2.4.2
 github.com/tdewolff/parse/v2
 github.com/tdewolff/parse/v2/buffer
 github.com/tdewolff/parse/v2/css
@@ -426,28 +391,26 @@ github.com/tdewolff/parse/v2/strconv
 github.com/tdewolff/parse/v2/svg
 github.com/tdewolff/parse/v2/xml
 # github.com/tinylib/msgp v1.1.0
-## explicit
 github.com/tinylib/msgp/msgp
-# github.com/ugorji/go/codec v0.0.0-20190204201341-e444a5086c43
-## explicit
-# github.com/wellington/go-libsass v0.9.3-0.20181113175235-c63644206701
-github.com/wellington/go-libsass/libs
-# github.com/willf/bitset v1.1.9
-## explicit
+# github.com/willf/bitset v1.1.10
 github.com/willf/bitset
-# github.com/yosssi/ace v0.0.5
-github.com/yosssi/ace
-# go.opencensus.io v0.19.0
-## explicit
-# go4.org v0.0.0-20190218023631-ce4c26f7be8e
-## explicit
-# golang.org/x/build v0.0.0-20190215225244-0261b66eb045
-## explicit
-# golang.org/x/exp v0.0.0-20190212162250-21964bba6549
-## explicit
-# golang.org/x/image v0.0.0-20190209060608-ef4a1470e0dc
-## explicit
+# github.com/yuin/goldmark v1.2.1
+github.com/yuin/goldmark
+github.com/yuin/goldmark/ast
+github.com/yuin/goldmark/extension
+github.com/yuin/goldmark/extension/ast
+github.com/yuin/goldmark/parser
+github.com/yuin/goldmark/renderer
+github.com/yuin/goldmark/renderer/html
+github.com/yuin/goldmark/text
+github.com/yuin/goldmark/util
+# github.com/yuin/goldmark-highlighting v0.0.0-20200307114337-60d527fdb691
+github.com/yuin/goldmark-highlighting
+# go.etcd.io/bbolt v1.3.5
+go.etcd.io/bbolt
+# golang.org/x/image v0.0.0-20191214001246-9130b4cfad52
 golang.org/x/image/bmp
+golang.org/x/image/ccitt
 golang.org/x/image/draw
 golang.org/x/image/math/f64
 golang.org/x/image/riff
@@ -456,32 +419,28 @@ golang.org/x/image/tiff/lzw
 golang.org/x/image/vp8
 golang.org/x/image/vp8l
 golang.org/x/image/webp
-# golang.org/x/lint v0.0.0-20190409202823-959b441ac422
-## explicit
-# golang.org/x/net v0.0.0-20190311183353-d8887717615a
+# golang.org/x/net v0.0.0-20200202094626-16171245cfb2
+golang.org/x/net/html
+golang.org/x/net/html/atom
 golang.org/x/net/idna
-# golang.org/x/oauth2 v0.0.0-20190212230446-3e8b2be13635
-## explicit
-# golang.org/x/perf v0.0.0-20190124201629-844a5f5b46f4
-## explicit
-# golang.org/x/sync v0.0.0-20181221193216-37e7f081c4d4
+# golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e
 golang.org/x/sync/errgroup
-# golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a
+# golang.org/x/sys v0.0.0-20200501145240-bc7a7d42d5c3
+golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
 golang.org/x/sys/windows
-# golang.org/x/text v0.3.1-0.20180807135948-17ff2d5776d2
+# golang.org/x/text v0.3.4
+golang.org/x/text/internal/language
+golang.org/x/text/internal/language/compact
+golang.org/x/text/internal/tag
+golang.org/x/text/language
+golang.org/x/text/runes
 golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
 golang.org/x/text/width
-# google.golang.org/genproto v0.0.0-20190215211957-bd968387e4aa
-## explicit
-# google.golang.org/grpc v1.18.0
-## explicit
-# gopkg.in/yaml.v2 v2.2.2
+# gopkg.in/ini.v1 v1.51.1
+gopkg.in/ini.v1
+# gopkg.in/yaml.v2 v2.4.0
 gopkg.in/yaml.v2
-# honnef.co/go/tools v0.0.0-20190215041234-466a0476246c
-## explicit
-# sourcegraph.com/sqs/pbtypes v1.0.0
-## explicit

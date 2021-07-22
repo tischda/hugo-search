@@ -17,6 +17,7 @@ package bundler
 import (
 	"fmt"
 	"io"
+	"path"
 	"path/filepath"
 
 	"github.com/gohugoio/hugo/common/hugio"
@@ -41,6 +42,19 @@ type multiReadSeekCloser struct {
 	sources []hugio.ReadSeekCloser
 }
 
+func toReaders(sources []hugio.ReadSeekCloser) []io.Reader {
+	readers := make([]io.Reader, len(sources))
+	for i, r := range sources {
+		readers[i] = r
+	}
+	return readers
+}
+
+func newMultiReadSeekCloser(sources ...hugio.ReadSeekCloser) *multiReadSeekCloser {
+	mr := io.MultiReader(toReaders(sources)...)
+	return &multiReadSeekCloser{mr, sources}
+}
+
 func (r *multiReadSeekCloser) Read(p []byte) (n int, err error) {
 	return r.mr.Read(p)
 }
@@ -52,6 +66,9 @@ func (r *multiReadSeekCloser) Seek(offset int64, whence int) (newOffset int64, e
 			return
 		}
 	}
+
+	r.mr = io.MultiReader(toReaders(r.sources)...)
+
 	return
 }
 
@@ -65,7 +82,7 @@ func (r *multiReadSeekCloser) Close() error {
 // Concat concatenates the list of Resource objects.
 func (c *Client) Concat(targetPath string, r resource.Resources) (resource.Resource, error) {
 	// The CACHE_OTHER will make sure this will be re-created and published on rebuilds.
-	return c.rs.ResourceCache.GetOrCreate(resources.CACHE_OTHER, targetPath, func() (resource.Resource, error) {
+	return c.rs.ResourceCache.GetOrCreate(path.Join(resources.CACHE_OTHER, targetPath), func() (resource.Resource, error) {
 		var resolvedm media.Type
 
 		// The given set of resources must be of the same Media Type.
@@ -92,22 +109,33 @@ func (c *Client) Concat(targetPath string, r resource.Resources) (resource.Resou
 					}
 					return nil, err
 				}
+
 				rcsources = append(rcsources, rc)
 			}
 
-			readers := make([]io.Reader, len(rcsources))
-			for i := 0; i < len(rcsources); i++ {
-				readers[i] = rcsources[i]
+			// Arbitrary JavaScript files require a barrier between them to be safely concatenated together.
+			// Without this, the last line of one file can affect the first line of the next file and change how both files are interpreted.
+			if resolvedm.MainType == media.JavascriptType.MainType && resolvedm.SubType == media.JavascriptType.SubType {
+				readers := make([]hugio.ReadSeekCloser, 2*len(rcsources)-1)
+				j := 0
+				for i := 0; i < len(rcsources); i++ {
+					if i > 0 {
+						readers[j] = hugio.NewReadSeekerNoOpCloserFromString("\n;\n")
+						j++
+					}
+					readers[j] = rcsources[i]
+					j++
+				}
+				return newMultiReadSeekCloser(readers...), nil
 			}
 
-			mr := io.MultiReader(readers...)
+			return newMultiReadSeekCloser(rcsources...), nil
 
-			return &multiReadSeekCloser{mr: mr, sources: rcsources}, nil
 		}
 
-		composite, err := c.rs.NewForFs(
-			c.rs.FileCaches.AssetsCache().Fs,
+		composite, err := c.rs.New(
 			resources.ResourceSourceDescriptor{
+				Fs:                 c.rs.FileCaches.AssetsCache().Fs,
 				LazyPublish:        true,
 				OpenReadSeekCloser: concatr,
 				RelTargetFilename:  filepath.Clean(targetPath)})

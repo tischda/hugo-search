@@ -1,11 +1,11 @@
-# CSS [![GoDoc](http://godoc.org/github.com/tdewolff/parse/css?status.svg)](http://godoc.org/github.com/tdewolff/parse/css) [![GoCover](http://gocover.io/_badge/github.com/tdewolff/parse/css)](http://gocover.io/github.com/tdewolff/parse/css)
+# CSS [![GoDoc](http://godoc.org/github.com/tdewolff/parse/css?status.svg)](http://godoc.org/github.com/tdewolff/parse/css)
 
 This package is a CSS3 lexer and parser written in [Go][1]. Both follow the specification at [CSS Syntax Module Level 3](http://www.w3.org/TR/css-syntax-3/). The lexer takes an io.Reader and converts it into tokens until the EOF. The parser returns a parse tree of the full io.Reader input stream, but the low-level `Next` function can be used for stream parsing to returns grammar units until the EOF.
 
 ## Installation
 Run the following command
 
-	go get github.com/tdewolff/parse/css
+	go get -u github.com/tdewolff/parse/v2/css
 
 or add the following import and run project with `go get`
 

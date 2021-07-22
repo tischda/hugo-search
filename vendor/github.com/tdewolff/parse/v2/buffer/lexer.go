@@ -1,4 +1,4 @@
-package buffer // import "github.com/tdewolff/parse/buffer"
+package buffer
 
 import (
 	"io"
@@ -52,7 +52,7 @@ func NewLexerBytes(b []byte) *Lexer {
 	n := len(b)
 	if n == 0 {
 		z.buf = nullBuffer
-	} else if b[n-1] != 0 {
+	} else {
 		// Append NULL to buffer, but try to avoid reallocation
 		if cap(b) > n {
 			// Overwrite next byte but restore when done
@@ -154,5 +154,5 @@ func (z *Lexer) Offset() int {
 
 // Bytes returns the underlying buffer.
 func (z *Lexer) Bytes() []byte {
-	return z.buf
+	return z.buf[:len(z.buf)-1]
 }

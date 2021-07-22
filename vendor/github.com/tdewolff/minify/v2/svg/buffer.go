@@ -1,4 +1,4 @@
-package svg // import "github.com/tdewolff/minify/svg"
+package svg
 
 import (
 	"github.com/tdewolff/parse/v2"
@@ -39,7 +39,9 @@ func (z *TokenBuffer) read(t *Token) {
 	if t.TokenType == xml.AttributeToken {
 		t.AttrVal = z.l.AttrVal()
 		if len(t.AttrVal) > 1 && (t.AttrVal[0] == '"' || t.AttrVal[0] == '\'') {
-			t.AttrVal = parse.ReplaceMultipleWhitespace(parse.TrimWhitespace(t.AttrVal[1 : len(t.AttrVal)-1])) // quotes will be readded in attribute loop if necessary
+			t.AttrVal = t.AttrVal[1 : len(t.AttrVal)-1] // quotes will be readded in attribute loop if necessary
+			t.AttrVal = parse.ReplaceMultipleWhitespaceAndEntities(t.AttrVal, xml.EntitiesMap, nil)
+			t.AttrVal = parse.TrimWhitespace(t.AttrVal)
 		}
 		t.Hash = svg.ToHash(t.Text)
 	} else if t.TokenType == xml.StartTagToken || t.TokenType == xml.EndTagToken {
@@ -100,7 +102,7 @@ func (z *TokenBuffer) Shift() *Token {
 
 // Attributes extracts the gives attribute hashes from a tag.
 // It returns in the same order pointers to the requested token data or nil.
-func (z *TokenBuffer) Attributes(hashes ...svg.Hash) ([]*Token, *Token) {
+func (z *TokenBuffer) Attributes(hashes ...svg.Hash) []*Token {
 	n := 0
 	for {
 		if t := z.Peek(n); t.TokenType != xml.AttributeToken {
@@ -116,15 +118,13 @@ func (z *TokenBuffer) Attributes(hashes ...svg.Hash) ([]*Token, *Token) {
 			z.attrBuffer[i] = nil
 		}
 	}
-	var replacee *Token
 	for i := z.pos; i < z.pos+n; i++ {
 		attr := &z.buf[i]
 		for j, hash := range hashes {
 			if hash == attr.Hash {
 				z.attrBuffer[j] = attr
-				replacee = attr
 			}
 		}
 	}
-	return z.attrBuffer, replacee
+	return z.attrBuffer
 }

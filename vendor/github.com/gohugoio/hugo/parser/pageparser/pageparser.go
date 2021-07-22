@@ -1,4 +1,4 @@
-// Copyright 2018 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,10 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package pageparser provides a parser for Hugo content files (Markdown, HTML etc.) in Hugo.
-// This implementation is highly inspired by the great talk given by Rob Pike called "Lexical Scanning in Go"
-// It's on YouTube, Google it!.
-// See slides here: http://cuddle.googlecode.com/hg/talk/lex.html
 package pageparser
 
 import (
@@ -22,6 +18,7 @@ import (
 	"io"
 	"io/ioutil"
 
+	"github.com/gohugoio/hugo/parser/metadecoders"
 	"github.com/pkg/errors"
 )
 
@@ -36,16 +33,83 @@ type Result interface {
 var _ Result = (*pageLexer)(nil)
 
 // Parse parses the page in the given reader according to the given Config.
+// TODO(bep) now that we have improved the "lazy order" init, it *may* be
+// some potential saving in doing a buffered approach where the first pass does
+// the frontmatter only.
 func Parse(r io.Reader, cfg Config) (Result, error) {
+	return parseSection(r, cfg, lexIntroSection)
+}
+
+type ContentFrontMatter struct {
+	Content           []byte
+	FrontMatter       map[string]interface{}
+	FrontMatterFormat metadecoders.Format
+}
+
+// ParseFrontMatterAndContent is a convenience method to extract front matter
+// and content from a content page.
+func ParseFrontMatterAndContent(r io.Reader) (ContentFrontMatter, error) {
+	var cf ContentFrontMatter
+
+	psr, err := Parse(r, Config{})
+	if err != nil {
+		return cf, err
+	}
+
+	var frontMatterSource []byte
+
+	iter := psr.Iterator()
+
+	walkFn := func(item Item) bool {
+		if frontMatterSource != nil {
+			// The rest is content.
+			cf.Content = psr.Input()[item.Pos:]
+			// Done
+			return false
+		} else if item.IsFrontMatter() {
+			cf.FrontMatterFormat = FormatFromFrontMatterType(item.Type)
+			frontMatterSource = item.Val
+		}
+		return true
+
+	}
+
+	iter.PeekWalk(walkFn)
+
+	cf.FrontMatter, err = metadecoders.Default.UnmarshalToMap(frontMatterSource, cf.FrontMatterFormat)
+	return cf, err
+}
+
+func FormatFromFrontMatterType(typ ItemType) metadecoders.Format {
+	switch typ {
+	case TypeFrontMatterJSON:
+		return metadecoders.JSON
+	case TypeFrontMatterORG:
+		return metadecoders.ORG
+	case TypeFrontMatterTOML:
+		return metadecoders.TOML
+	case TypeFrontMatterYAML:
+		return metadecoders.YAML
+	default:
+		return ""
+	}
+}
+
+// ParseMain parses starting with the main section. Used in tests.
+func ParseMain(r io.Reader, cfg Config) (Result, error) {
+	return parseSection(r, cfg, lexMainSection)
+}
+
+func parseSection(r io.Reader, cfg Config, start stateFunc) (Result, error) {
 	b, err := ioutil.ReadAll(r)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to read page content")
 	}
-	return parseBytes(b, cfg)
+	return parseBytes(b, cfg, start)
 }
 
-func parseBytes(b []byte, cfg Config) (Result, error) {
-	lexer := newPageLexer(b, lexIntroSection, cfg)
+func parseBytes(b []byte, cfg Config, start stateFunc) (Result, error) {
+	lexer := newPageLexer(b, start, cfg)
 	lexer.run()
 	return lexer, nil
 }
@@ -60,7 +124,7 @@ type Iterator struct {
 // consumes and returns the next item
 func (t *Iterator) Next() Item {
 	t.lastPos++
-	return t.current()
+	return t.Current()
 }
 
 // Input returns the input source.
@@ -68,9 +132,10 @@ func (t *Iterator) Input() []byte {
 	return t.l.Input()
 }
 
-var errIndexOutOfBounds = Item{tError, 0, []byte("no more tokens")}
+var errIndexOutOfBounds = Item{tError, 0, []byte("no more tokens"), true}
 
-func (t *Iterator) current() Item {
+// Current will repeatably return the current item.
+func (t *Iterator) Current() Item {
 	if t.lastPos >= len(t.l.items) {
 		return errIndexOutOfBounds
 	}
@@ -122,5 +187,5 @@ func (t *Iterator) Consume(cnt int) {
 
 // LineNumber returns the current line number. Used for logging.
 func (t *Iterator) LineNumber() int {
-	return bytes.Count(t.l.input[:t.current().Pos], lf) + 1
+	return bytes.Count(t.l.input[:t.Current().Pos], lf) + 1
 }

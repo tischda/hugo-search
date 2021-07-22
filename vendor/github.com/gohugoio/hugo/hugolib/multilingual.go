@@ -1,4 +1,4 @@
-// Copyright 2016-present The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,17 +16,11 @@ package hugolib
 import (
 	"sync"
 
-	"github.com/gohugoio/hugo/common/maps"
-
-	"sort"
-
 	"errors"
-	"fmt"
 
 	"github.com/gohugoio/hugo/langs"
 
 	"github.com/gohugoio/hugo/config"
-	"github.com/spf13/cast"
 )
 
 // Multilingual manages the all languages used in a multilingual site.
@@ -62,10 +56,10 @@ func newMultiLingualFromSites(cfg config.Provider, sites ...*Site) (*Multilingua
 	languages := make(langs.Languages, len(sites))
 
 	for i, s := range sites {
-		if s.Language == nil {
-			return nil, errors.New("Missing language for site")
+		if s.language == nil {
+			return nil, errors.New("missing language for site")
 		}
-		languages[i] = s.Language
+		languages[i] = s.language
 	}
 
 	defaultLang := cfg.GetString("defaultContentLanguage")
@@ -78,67 +72,13 @@ func newMultiLingualFromSites(cfg config.Provider, sites ...*Site) (*Multilingua
 
 }
 
-func newMultiLingualForLanguage(language *langs.Language) *Multilingual {
-	languages := langs.Languages{language}
-	return &Multilingual{Languages: languages, DefaultLang: language}
-}
 func (ml *Multilingual) enabled() bool {
 	return len(ml.Languages) > 1
 }
 
 func (s *Site) multilingualEnabled() bool {
-	if s.owner == nil {
+	if s.h == nil {
 		return false
 	}
-	return s.owner.multilingual != nil && s.owner.multilingual.enabled()
-}
-
-func toSortedLanguages(cfg config.Provider, l map[string]interface{}) (langs.Languages, error) {
-	languages := make(langs.Languages, len(l))
-	i := 0
-
-	for lang, langConf := range l {
-		langsMap, err := cast.ToStringMapE(langConf)
-
-		if err != nil {
-			return nil, fmt.Errorf("Language config is not a map: %T", langConf)
-		}
-
-		language := langs.NewLanguage(lang, cfg)
-
-		for loki, v := range langsMap {
-			switch loki {
-			case "title":
-				language.Title = cast.ToString(v)
-			case "languagename":
-				language.LanguageName = cast.ToString(v)
-			case "weight":
-				language.Weight = cast.ToInt(v)
-			case "contentdir":
-				language.ContentDir = cast.ToString(v)
-			case "disabled":
-				language.Disabled = cast.ToBool(v)
-			case "params":
-				m := cast.ToStringMap(v)
-				// Needed for case insensitive fetching of params values
-				maps.ToLower(m)
-				for k, vv := range m {
-					language.SetParam(k, vv)
-				}
-			}
-
-			// Put all into the Params map
-			language.SetParam(loki, v)
-
-			// Also set it in the configuration map (for baseURL etc.)
-			language.Set(loki, v)
-		}
-
-		languages[i] = language
-		i++
-	}
-
-	sort.Sort(languages)
-
-	return languages, nil
+	return s.h.multilingual != nil && s.h.multilingual.enabled()
 }

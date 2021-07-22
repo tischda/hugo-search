@@ -1,4 +1,4 @@
-// Copyright 2018 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,6 +26,24 @@ import (
 type Scratch struct {
 	values map[string]interface{}
 	mu     sync.RWMutex
+}
+
+// Scratcher provides a scratching service.
+type Scratcher interface {
+	Scratch() *Scratch
+}
+
+type scratcher struct {
+	s *Scratch
+}
+
+func (s scratcher) Scratch() *Scratch {
+	return s.s
+}
+
+// NewScratcher creates a new Scratcher.
+func NewScratcher() Scratcher {
+	return scratcher{s: NewScratch()}
 }
 
 // Add will, for single values, add (using the + operator) the addend to the existing addend (if found).
@@ -89,6 +107,15 @@ func (c *Scratch) Get(key string) interface{} {
 	return val
 }
 
+// Values returns the raw backing map. Note that you should just use
+// this method on the locally scoped Scratch instances you obtain via newScratch, not
+// .Page.Scratch etc., as that will lead to concurrency issues.
+func (c *Scratch) Values() map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.values
+}
+
 // SetInMap stores a value to a map with the given key in the Node context.
 // This map can later be retrieved with GetSortedMapValues.
 func (c *Scratch) SetInMap(key string, mapKey string, value interface{}) string {
@@ -129,7 +156,7 @@ func (c *Scratch) GetSortedMapValues(key string) interface{} {
 	return sortedArray
 }
 
-// NewScratch returns a new instance Scratch.
+// NewScratch returns a new instance of Scratch.
 func NewScratch() *Scratch {
 	return &Scratch{values: make(map[string]interface{})}
 }

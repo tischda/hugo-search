@@ -11,10 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package pageparser provides a parser for Hugo content files (Markdown, HTML etc.) in Hugo.
-// This implementation is highly inspired by the great talk given by Rob Pike called "Lexical Scanning in Go"
-// It's on YouTube, Google it!.
-// See slides here: http://cuddle.googlecode.com/hg/talk/lex.html
 package pageparser
 
 import (
@@ -117,7 +113,7 @@ var (
 )
 
 func (l *pageLexer) next() rune {
-	if int(l.pos) >= len(l.input) {
+	if l.pos >= len(l.input) {
 		l.width = 0
 		return eof
 	}
@@ -142,7 +138,13 @@ func (l *pageLexer) backup() {
 
 // sends an item back to the client.
 func (l *pageLexer) emit(t ItemType) {
-	l.items = append(l.items, Item{t, l.start, l.input[l.start:l.pos]})
+	l.items = append(l.items, Item{t, l.start, l.input[l.start:l.pos], false})
+	l.start = l.pos
+}
+
+// sends a string item back to the client.
+func (l *pageLexer) emitString(t ItemType) {
+	l.items = append(l.items, Item{t, l.start, l.input[l.start:l.pos], true})
 	l.start = l.pos
 }
 
@@ -151,14 +153,14 @@ func (l *pageLexer) isEOF() bool {
 }
 
 // special case, do not send '\\' back to client
-func (l *pageLexer) ignoreEscapesAndEmit(t ItemType) {
+func (l *pageLexer) ignoreEscapesAndEmit(t ItemType, isString bool) {
 	val := bytes.Map(func(r rune) rune {
 		if r == '\\' {
 			return -1
 		}
 		return r
 	}, l.input[l.start:l.pos])
-	l.items = append(l.items, Item{t, l.start, val})
+	l.items = append(l.items, Item{t, l.start, val, isString})
 	l.start = l.pos
 }
 
@@ -176,7 +178,7 @@ var lf = []byte("\n")
 
 // nil terminates the parser
 func (l *pageLexer) errorf(format string, args ...interface{}) stateFunc {
-	l.items = append(l.items, Item{tError, l.start, []byte(fmt.Sprintf(format, args...))})
+	l.items = append(l.items, Item{tError, l.start, []byte(fmt.Sprintf(format, args...)), true})
 	return nil
 }
 
@@ -196,6 +198,16 @@ func (l *pageLexer) consumeToNextLine() {
 	for {
 		r := l.next()
 		if r == eof || isEndOfLine(r) {
+			return
+		}
+	}
+}
+
+func (l *pageLexer) consumeToSpace() {
+	for {
+		r := l.next()
+		if r == eof || unicode.IsSpace(r) {
+			l.backup()
 			return
 		}
 	}
@@ -442,13 +454,6 @@ func lexMainSection(l *pageLexer) stateFunc {
 
 }
 
-func (l *pageLexer) posFirstNonWhiteSpace() int {
-	f := func(c rune) bool {
-		return !unicode.IsSpace(c)
-	}
-	return bytes.IndexFunc(l.input[l.pos:], f)
-}
-
 func lexDone(l *pageLexer) stateFunc {
 
 	// Done!
@@ -475,14 +480,6 @@ func (l *pageLexer) indexByte(sep byte) int {
 
 func (l *pageLexer) hasPrefix(prefix []byte) bool {
 	return bytes.HasPrefix(l.input[l.pos:], prefix)
-}
-
-func (l *pageLexer) hasPrefixByte(prefix byte) bool {
-	b := l.input[l.pos:]
-	if len(b) == 0 {
-		return false
-	}
-	return b[0] == prefix
 }
 
 // helper functions

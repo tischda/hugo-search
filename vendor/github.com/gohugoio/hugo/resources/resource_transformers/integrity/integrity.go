@@ -19,10 +19,13 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"hash"
 	"html/template"
 	"io"
+
+	"github.com/gohugoio/hugo/resources/internal"
+
+	"github.com/pkg/errors"
 
 	"github.com/gohugoio/hugo/resources"
 	"github.com/gohugoio/hugo/resources/resource"
@@ -45,37 +48,53 @@ type fingerprintTransformation struct {
 	algo string
 }
 
-func (t *fingerprintTransformation) Key() resources.ResourceTransformationKey {
-	return resources.NewResourceTransformationKey("fingerprint", t.algo)
+func (t *fingerprintTransformation) Key() internal.ResourceTransformationKey {
+	return internal.NewResourceTransformationKey("fingerprint", t.algo)
 }
 
 // Transform creates a MD5 hash of the Resource content and inserts that hash before
 // the extension in the filename.
 func (t *fingerprintTransformation) Transform(ctx *resources.ResourceTransformationCtx) error {
-	algo := t.algo
 
-	var h hash.Hash
-
-	switch algo {
-	case "md5":
-		h = md5.New()
-	case "sha256":
-		h = sha256.New()
-	case "sha512":
-		h = sha512.New()
-	default:
-		return fmt.Errorf("unsupported crypto algo: %q, use either md5, sha256 or sha512", algo)
+	h, err := newHash(t.algo)
+	if err != nil {
+		return err
 	}
 
-	io.Copy(io.MultiWriter(h, ctx.To), ctx.From)
+	var w io.Writer
+	if rc, ok := ctx.From.(io.ReadSeeker); ok {
+		// This transformation does not change the content, so try to
+		// avoid writing to To if we can.
+		defer rc.Seek(0, 0)
+		w = h
+	} else {
+		w = io.MultiWriter(h, ctx.To)
+	}
+
+	io.Copy(w, ctx.From)
 	d, err := digest(h)
 	if err != nil {
 		return err
 	}
 
-	ctx.Data["Integrity"] = integrity(algo, d)
+	ctx.Data["Integrity"] = integrity(t.algo, d)
 	ctx.AddOutPathIdentifier("." + hex.EncodeToString(d[:]))
 	return nil
+}
+
+func newHash(algo string) (hash.Hash, error) {
+	switch algo {
+	case "md5":
+		return md5.New(), nil
+	case "sha256":
+		return sha256.New(), nil
+	case "sha384":
+		return sha512.New384(), nil
+	case "sha512":
+		return sha512.New(), nil
+	default:
+		return nil, errors.Errorf("unsupported crypto algo: %q, use either md5, sha256, sha384 or sha512", algo)
+	}
 }
 
 // Fingerprint applies fingerprinting of the given resource and hash algorithm.
@@ -84,15 +103,12 @@ func (t *fingerprintTransformation) Transform(ctx *resources.ResourceTransformat
 // the base64-encoded Subresource Integrity hash, so you will have to stay away from
 // md5 if you plan to use both.
 // See https://developer.mozilla.org/en-US/docs/Web/Security/Subresource_Integrity
-func (c *Client) Fingerprint(res resource.Resource, algo string) (resource.Resource, error) {
+func (c *Client) Fingerprint(res resources.ResourceTransformer, algo string) (resource.Resource, error) {
 	if algo == "" {
 		algo = defaultHashAlgo
 	}
 
-	return c.rs.Transform(
-		res,
-		&fingerprintTransformation{algo: algo},
-	)
+	return res.Transform(&fingerprintTransformation{algo: algo})
 }
 
 func integrity(algo string, sum []byte) template.HTMLAttr {

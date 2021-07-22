@@ -11,10 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package pageparser provides a parser for Hugo content files (Markdown, HTML etc.) in Hugo.
-// This implementation is highly inspired by the great talk given by Rob Pike called "Lexical Scanning in Go"
-// It's on YouTube, Google it!.
-// See slides here: http://cuddle.googlecode.com/hg/talk/lex.html
 package pageparser
 
 type lexerShortcodeState struct {
@@ -85,6 +81,8 @@ func lexShortcodeRightDelim(l *pageLexer) stateFunc {
 // 2. "param" or "param\"
 // 3. param="123" or param="123\"
 // 4. param="Some \"escaped\" text"
+// 5. `param`
+// 6. param=`123`
 func lexShortcodeParam(l *pageLexer, escapedQuoteStart bool) stateFunc {
 
 	first := true
@@ -95,14 +93,20 @@ func lexShortcodeParam(l *pageLexer, escapedQuoteStart bool) stateFunc {
 	for {
 		r = l.next()
 		if first {
-			if r == '"' {
+			if r == '"' || (r == '`' && !escapedQuoteStart) {
 				// a positional param with quotes
 				if l.paramElements == 2 {
 					return l.errorf("got quoted positional parameter. Cannot mix named and positional parameters")
 				}
 				l.paramElements = 1
 				l.backup()
-				return lexShortcodeQuotedParamVal(l, !escapedQuoteStart, tScParam)
+				if r == '"' {
+					return lexShortcodeQuotedParamVal(l, !escapedQuoteStart, tScParam)
+				}
+				return lexShortCodeParamRawStringVal(l, tScParam)
+
+			} else if r == '`' && escapedQuoteStart {
+				return l.errorf("unrecognized escape character")
 			}
 			first = false
 		} else if r == '=' {
@@ -112,7 +116,7 @@ func lexShortcodeParam(l *pageLexer, escapedQuoteStart bool) stateFunc {
 			break
 		}
 
-		if !isAlphaNumericOrHyphen(r) {
+		if !isAlphaNumericOrHyphen(r) && r != '.' { // Floats have period
 			l.backup()
 			break
 		}
@@ -137,6 +141,38 @@ func lexShortcodeParam(l *pageLexer, escapedQuoteStart bool) stateFunc {
 
 }
 
+func lexShortcodeParamVal(l *pageLexer) stateFunc {
+	l.consumeToSpace()
+	l.emit(tScParamVal)
+	return lexInsideShortcode
+}
+
+func lexShortCodeParamRawStringVal(l *pageLexer, typ ItemType) stateFunc {
+	openBacktickFound := false
+
+Loop:
+	for {
+		switch r := l.next(); {
+		case r == '`':
+			if openBacktickFound {
+				l.backup()
+				break Loop
+			} else {
+				openBacktickFound = true
+				l.ignore()
+			}
+		case r == eof:
+			return l.errorf("unterminated raw string in shortcode parameter-argument: '%s'", l.current())
+		}
+	}
+
+	l.emitString(typ)
+	l.next()
+	l.ignore()
+
+	return lexInsideShortcode
+}
+
 func lexShortcodeQuotedParamVal(l *pageLexer, escapedQuotedValuesAllowed bool, typ ItemType) stateFunc {
 	openQuoteFound := false
 	escapedInnerQuoteFound := false
@@ -155,6 +191,8 @@ Loop:
 					escapedInnerQuoteFound = true
 					escapedQuoteState = 1
 				}
+			} else if l.peek() == '`' {
+				return l.errorf("unrecognized escape character")
 			}
 		case r == eof, r == '\n':
 			return l.errorf("unterminated quoted string in shortcode parameter-argument: '%s'", l.current())
@@ -171,14 +209,13 @@ Loop:
 			} else {
 				escapedQuoteState = 0
 			}
-
 		}
 	}
 
 	if escapedInnerQuoteFound {
-		l.ignoreEscapesAndEmit(typ)
+		l.ignoreEscapesAndEmit(typ, true)
 	} else {
-		l.emit(typ)
+		l.emitString(typ)
 	}
 
 	r := l.next()
@@ -273,8 +310,15 @@ func lexInsideShortcode(l *pageLexer) stateFunc {
 	case isSpace(r), isEndOfLine(r):
 		l.ignore()
 	case r == '=':
+		l.consumeSpace()
 		l.ignore()
-		return lexShortcodeQuotedParamVal(l, l.peek() != '\\', tScParamVal)
+		peek := l.peek()
+		if peek == '"' || peek == '\\' {
+			return lexShortcodeQuotedParamVal(l, peek != '\\', tScParamVal)
+		} else if peek == '`' {
+			return lexShortCodeParamRawStringVal(l, tScParamVal)
+		}
+		return lexShortcodeParamVal
 	case r == '/':
 		if l.currShortcodeName == "" {
 			return l.errorf("got closing shortcode, but none is open")
@@ -284,10 +328,10 @@ func lexInsideShortcode(l *pageLexer) stateFunc {
 		l.emit(tScClose)
 	case r == '\\':
 		l.ignore()
-		if l.peek() == '"' {
+		if l.peek() == '"' || l.peek() == '`' {
 			return lexShortcodeParam(l, true)
 		}
-	case l.elementStepNum > 0 && (isAlphaNumericOrHyphen(r) || r == '"'): // positional params can have quotes
+	case l.elementStepNum > 0 && (isAlphaNumericOrHyphen(r) || r == '"' || r == '`'): // positional params can have quotes
 		l.backup()
 		return lexShortcodeParam(l, false)
 	case isAlphaNumeric(r):

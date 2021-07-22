@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package errors contains common Hugo errors and error related utilities.
+// Package herrors contains common Hugo errors and error related utilities.
 package herrors
 
 import (
@@ -173,7 +173,7 @@ func chromaLexerFromType(fileType string) string {
 }
 
 func extNoDelimiter(filename string) string {
-	return strings.TrimPrefix(".", filepath.Ext(filename))
+	return strings.TrimPrefix(filepath.Ext(filename), ".")
 }
 
 func chromaLexerFromFilename(filename string) string {
@@ -206,7 +206,7 @@ func locateError(r io.Reader, le FileError, matches LineMatcherFn) ErrorContext 
 
 	lines := strings.Split(string(b), "\n")
 
-	if le != nil && lepos.ColumnNumber >= 0 {
+	if lepos.ColumnNumber >= 0 {
 		pos.ColumnNumber = lepos.ColumnNumber
 	}
 

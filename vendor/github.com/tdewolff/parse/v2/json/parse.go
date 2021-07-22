@@ -1,5 +1,5 @@
 // Package json is a JSON parser following the specifications at http://json.org/.
-package json // import "github.com/tdewolff/parse/json"
+package json
 
 import (
 	"io"
@@ -110,6 +110,16 @@ func (p *Parser) Restore() {
 	p.r.Restore()
 }
 
+// Offset returns the current position in the input stream.
+func (p *Parser) Offset() int {
+	return p.r.Offset()
+}
+
+// State returns the state the parser is currently in (ie. which token is expected).
+func (p *Parser) State() State {
+	return p.state[len(p.state)-1]
+}
+
 // Next returns the next Grammar. It returns ErrorGrammar when an error was encountered. Using Err() one can retrieve the error message.
 func (p *Parser) Next() (GrammarType, []byte) {
 	p.moveWhitespace()
@@ -117,7 +127,7 @@ func (p *Parser) Next() (GrammarType, []byte) {
 	state := p.state[len(p.state)-1]
 	if c == ',' {
 		if state != ArrayState && state != ObjectKeyState {
-			p.err = parse.NewErrorLexer("unexpected comma character outside an array or object", p.r)
+			p.err = parse.NewErrorLexer(p.r, "JSON parse error: unexpected comma character")
 			return ErrorGrammar, nil
 		}
 		p.r.Move(1)
@@ -128,7 +138,7 @@ func (p *Parser) Next() (GrammarType, []byte) {
 	p.r.Skip()
 
 	if p.needComma && c != '}' && c != ']' && c != 0 {
-		p.err = parse.NewErrorLexer("expected comma character or an array or object ending", p.r)
+		p.err = parse.NewErrorLexer(p.r, "JSON parse error: expected comma character or an array or object ending")
 		return ErrorGrammar, nil
 	} else if c == '{' {
 		p.state = append(p.state, ObjectKeyState)
@@ -136,7 +146,7 @@ func (p *Parser) Next() (GrammarType, []byte) {
 		return StartObjectGrammar, p.r.Shift()
 	} else if c == '}' {
 		if state != ObjectKeyState {
-			p.err = parse.NewErrorLexer("unexpected right brace character", p.r)
+			p.err = parse.NewErrorLexer(p.r, "JSON parse error: unexpected right brace character")
 			return ErrorGrammar, nil
 		}
 		p.needComma = true
@@ -153,7 +163,7 @@ func (p *Parser) Next() (GrammarType, []byte) {
 	} else if c == ']' {
 		p.needComma = true
 		if state != ArrayState {
-			p.err = parse.NewErrorLexer("unexpected right bracket character", p.r)
+			p.err = parse.NewErrorLexer(p.r, "JSON parse error: unexpected right bracket character")
 			return ErrorGrammar, nil
 		}
 		p.state = p.state[:len(p.state)-1]
@@ -164,13 +174,13 @@ func (p *Parser) Next() (GrammarType, []byte) {
 		return EndArrayGrammar, p.r.Shift()
 	} else if state == ObjectKeyState {
 		if c != '"' || !p.consumeStringToken() {
-			p.err = parse.NewErrorLexer("expected object key to be a quoted string", p.r)
+			p.err = parse.NewErrorLexer(p.r, "JSON parse error: expected object key to be a quoted string")
 			return ErrorGrammar, nil
 		}
 		n := p.r.Pos()
 		p.moveWhitespace()
 		if c := p.r.Peek(0); c != ':' {
-			p.err = parse.NewErrorLexer("expected colon character after object key", p.r)
+			p.err = parse.NewErrorLexer(p.r, "JSON parse error: expected colon character after object key")
 			return ErrorGrammar, nil
 		}
 		p.r.Move(1)
@@ -188,13 +198,16 @@ func (p *Parser) Next() (GrammarType, []byte) {
 		} else if p.consumeLiteralToken() {
 			return LiteralGrammar, p.r.Shift()
 		}
+		c := p.r.Peek(0) // pick up movement from consumeStringToken to detect NULL or EOF
+		if c == 0 && p.r.Err() == nil {
+			p.err = parse.NewErrorLexer(p.r, "JSON parse error: unexpected NULL character")
+			return ErrorGrammar, nil
+		} else if c == 0 { // EOF
+			return ErrorGrammar, nil
+		}
 	}
+	p.err = parse.NewErrorLexer(p.r, "JSON parse error: unexpected character '%c'", c)
 	return ErrorGrammar, nil
-}
-
-// State returns the state the parser is currently in (ie. which token is expected).
-func (p *Parser) State() State {
-	return p.state[len(p.state)-1]
 }
 
 ////////////////////////////////////////////////////////////////

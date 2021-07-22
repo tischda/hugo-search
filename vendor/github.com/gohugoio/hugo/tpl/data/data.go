@@ -23,6 +23,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gohugoio/hugo/common/constants"
+	"github.com/gohugoio/hugo/common/loggers"
+
+	"github.com/spf13/cast"
+
 	"github.com/gohugoio/hugo/cache/filecache"
 	"github.com/gohugoio/hugo/deps"
 	_errors "github.com/pkg/errors"
@@ -54,22 +59,22 @@ type Namespace struct {
 // The data separator can be a comma, semi-colon, pipe, etc, but only one character.
 // If you provide multiple parts for the URL they will be joined together to the final URL.
 // GetCSV returns nil or a slice slice to use in a short code.
-func (ns *Namespace) GetCSV(sep string, urlParts ...string) (d [][]string, err error) {
-	url := strings.Join(urlParts, "")
+func (ns *Namespace) GetCSV(sep string, urlParts ...interface{}) (d [][]string, err error) {
+	url := joinURL(urlParts)
 	cache := ns.cacheGetCSV
 
-	unmarshal := func(b []byte) (error, bool) {
+	unmarshal := func(b []byte) (bool, error) {
 		if !bytes.Contains(b, []byte(sep)) {
-			return _errors.Errorf("cannot find separator %s in CSV for %s", sep, url), false
+			return false, _errors.Errorf("cannot find separator %s in CSV for %s", sep, url)
 		}
 
 		if d, err = parseCSV(b, sep); err != nil {
 			err = _errors.Wrapf(err, "failed to parse CSV file %s", url)
 
-			return err, true
+			return true, err
 		}
 
-		return nil, false
+		return false, nil
 	}
 
 	var req *http.Request
@@ -83,7 +88,7 @@ func (ns *Namespace) GetCSV(sep string, urlParts ...string) (d [][]string, err e
 
 	err = ns.getResource(cache, unmarshal, req)
 	if err != nil {
-		ns.deps.Log.ERROR.Printf("Failed to get CSV resource %q: %s", url, err)
+		ns.deps.Log.(loggers.IgnorableLogger).Errorsf(constants.ErrRemoteGetCSV, "Failed to get CSV resource %q: %s", url, err)
 		return nil, nil
 	}
 
@@ -93,9 +98,9 @@ func (ns *Namespace) GetCSV(sep string, urlParts ...string) (d [][]string, err e
 // GetJSON expects one or n-parts of a URL to a resource which can either be a local or a remote one.
 // If you provide multiple parts they will be joined together to the final URL.
 // GetJSON returns nil or parsed JSON to use in a short code.
-func (ns *Namespace) GetJSON(urlParts ...string) (interface{}, error) {
+func (ns *Namespace) GetJSON(urlParts ...interface{}) (interface{}, error) {
 	var v interface{}
-	url := strings.Join(urlParts, "")
+	url := joinURL(urlParts)
 	cache := ns.cacheGetJSON
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -103,23 +108,27 @@ func (ns *Namespace) GetJSON(urlParts ...string) (interface{}, error) {
 		return nil, _errors.Wrapf(err, "Failed to create request for getJSON resource %s", url)
 	}
 
-	unmarshal := func(b []byte) (error, bool) {
+	unmarshal := func(b []byte) (bool, error) {
 		err := json.Unmarshal(b, &v)
 		if err != nil {
-			return err, true
+			return true, err
 		}
-		return nil, false
+		return false, nil
 	}
 
 	req.Header.Add("Accept", "application/json")
 
 	err = ns.getResource(cache, unmarshal, req)
 	if err != nil {
-		ns.deps.Log.ERROR.Printf("Failed to get JSON resource %q: %s", url, err)
+		ns.deps.Log.(loggers.IgnorableLogger).Errorsf(constants.ErrRemoteGetJSON, "Failed to get JSON resource %q: %s", url, err)
 		return nil, nil
 	}
 
 	return v, nil
+}
+
+func joinURL(urlParts []interface{}) string {
+	return strings.Join(cast.ToStringSlice(urlParts), "")
 }
 
 // parseCSV parses bytes of CSV data into a slice slice string or an error

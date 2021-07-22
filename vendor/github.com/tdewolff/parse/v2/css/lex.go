@@ -1,5 +1,5 @@
 // Package css is a CSS3 lexer and parser following the specifications at http://www.w3.org/TR/css-syntax-3/.
-package css // import "github.com/tdewolff/parse/css"
+package css
 
 // TODO: \uFFFD replacement character for NULL bytes in strings for example, or atleast don't end the string early
 
@@ -158,6 +158,11 @@ func (l *Lexer) Restore() {
 	l.r.Restore()
 }
 
+// Offset returns the current position in the input stream.
+func (l *Lexer) Offset() int {
+	return l.r.Offset()
+}
+
 // Next returns the next Token. It returns ErrorToken when an error was encountered. Using Err() one can retrieve the error message.
 func (l *Lexer) Next() (TokenType, []byte) {
 	switch l.r.Peek(0) {
@@ -234,7 +239,7 @@ func (l *Lexer) Next() (TokenType, []byte) {
 			return ColumnToken, l.r.Shift()
 		}
 	case 0:
-		if l.Err() != nil {
+		if l.r.Err() != nil {
 			return ErrorToken, nil
 		}
 	default:
@@ -270,7 +275,7 @@ func (l *Lexer) consumeComment() bool {
 	l.r.Move(2)
 	for {
 		c := l.r.Peek(0)
-		if c == 0 && l.Err() != nil {
+		if c == 0 && l.r.Err() != nil {
 			break
 		} else if c == '*' && l.r.Peek(1) == '/' {
 			l.r.Move(2)
@@ -348,7 +353,8 @@ func (l *Lexer) consumeEscape() bool {
 			l.r.Move(n)
 			return true
 		} else if c == 0 && l.r.Err() != nil {
-			return true
+			l.r.Rewind(mark)
+			return false
 		}
 	}
 	l.r.Move(1)
@@ -628,7 +634,7 @@ func (l *Lexer) consumeString() TokenType {
 	l.r.Move(1)
 	for {
 		c := l.r.Peek(0)
-		if c == 0 && l.Err() != nil {
+		if c == 0 && l.r.Err() != nil {
 			break
 		} else if c == '\n' || c == '\r' || c == '\f' {
 			l.r.Move(1)
@@ -638,6 +644,7 @@ func (l *Lexer) consumeString() TokenType {
 			break
 		} else if c == '\\' {
 			if !l.consumeEscape() {
+				// either newline or EOF after backslash
 				l.r.Move(1)
 				l.consumeNewline()
 			}
@@ -651,7 +658,7 @@ func (l *Lexer) consumeString() TokenType {
 func (l *Lexer) consumeUnquotedURL() bool {
 	for {
 		c := l.r.Peek(0)
-		if c == 0 && l.Err() != nil || c == ')' {
+		if c == 0 && l.r.Err() != nil || c == ')' {
 			break
 		} else if c == '"' || c == '\'' || c == '(' || c == '\\' || c == ' ' || c <= 0x1F || c == 0x7F {
 			if c != '\\' || !l.consumeEscape() {
@@ -667,7 +674,7 @@ func (l *Lexer) consumeUnquotedURL() bool {
 // consumeRemnantsBadUrl consumes bytes of a BadUrlToken so that normal tokenization may continue.
 func (l *Lexer) consumeRemnantsBadURL() {
 	for {
-		if l.consumeByte(')') || l.Err() != nil {
+		if l.consumeByte(')') || l.r.Err() != nil {
 			break
 		} else if !l.consumeEscape() {
 			l.r.Move(1)
@@ -694,13 +701,13 @@ func (l *Lexer) consumeIdentlike() TokenType {
 				l.consumeRemnantsBadURL()
 				return BadURLToken
 			}
-		} else if !l.consumeUnquotedURL() && !l.consumeWhitespace() {
+		} else if !l.consumeUnquotedURL() && !l.consumeWhitespace() { // if unquoted URL fails due to encountering whitespace, continue
 			l.consumeRemnantsBadURL()
 			return BadURLToken
 		}
 		for l.consumeWhitespace() {
 		}
-		if !l.consumeByte(')') && l.Err() != io.EOF {
+		if !l.consumeByte(')') && l.r.Err() != io.EOF {
 			l.consumeRemnantsBadURL()
 			return BadURLToken
 		}

@@ -2,23 +2,26 @@ package deps
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pkg/errors"
 
 	"github.com/gohugoio/hugo/cache/filecache"
-	"github.com/gohugoio/hugo/common/hugo"
 	"github.com/gohugoio/hugo/common/loggers"
 	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/hugofs"
 	"github.com/gohugoio/hugo/langs"
 	"github.com/gohugoio/hugo/media"
+	"github.com/gohugoio/hugo/resources/page"
+
 	"github.com/gohugoio/hugo/metrics"
 	"github.com/gohugoio/hugo/output"
 	"github.com/gohugoio/hugo/resources"
 	"github.com/gohugoio/hugo/source"
 	"github.com/gohugoio/hugo/tpl"
+	"github.com/spf13/cast"
 	jww "github.com/spf13/jwalterweatherman"
 )
 
@@ -28,16 +31,19 @@ import (
 type Deps struct {
 
 	// The logger to use.
-	Log *loggers.Logger `json:"-"`
+	Log loggers.Logger `json:"-"`
 
 	// Used to log errors that may repeat itself many times.
 	DistinctErrorLog *helpers.DistinctLogger
 
-	// The templates to use. This will usually implement the full tpl.TemplateHandler.
-	Tmpl tpl.TemplateFinder `json:"-"`
+	// Used to log warnings that may repeat itself many times.
+	DistinctWarningLog *helpers.DistinctLogger
+
+	// The templates to use. This will usually implement the full tpl.TemplateManager.
+	tmpl tpl.TemplateHandler
 
 	// We use this to parse and execute ad-hoc text templates.
-	TextTmpl tpl.TemplateParseFinder `json:"-"`
+	textTmpl tpl.TemplateParseFinder
 
 	// The file systems to use.
 	Fs *hugofs.Fs `json:"-"`
@@ -61,19 +67,22 @@ type Deps struct {
 	FileCaches filecache.Caches
 
 	// The translation func to use
-	Translate func(translationID string, args ...interface{}) string `json:"-"`
+	Translate func(translationID string, templateData interface{}) string `json:"-"`
 
 	// The language in use. TODO(bep) consolidate with site
 	Language *langs.Language
 
 	// The site building.
-	Site hugo.Site
+	Site page.Site
 
 	// All the output formats available for the current site.
 	OutputFormatsConfig output.Formats
 
 	templateProvider ResourceProvider
-	WithTemplate     func(templ tpl.TemplateHandler) error `json:"-"`
+	WithTemplate     func(templ tpl.TemplateManager) error `json:"-"`
+
+	// Used in tests
+	OverloadedTemplateFuncs map[string]interface{}
 
 	translationProvider ResourceProvider
 
@@ -84,6 +93,13 @@ type Deps struct {
 
 	// BuildStartListeners will be notified before a build starts.
 	BuildStartListeners *Listeners
+
+	// Atomic values set during a build.
+	// This is common/global for all sites.
+	BuildState *BuildState
+
+	// Whether we are in running (server) mode
+	Running bool
 
 	*globalErrHandler
 }
@@ -146,20 +162,31 @@ type ResourceProvider interface {
 	Clone(deps *Deps) error
 }
 
-// TemplateHandler returns the used tpl.TemplateFinder as tpl.TemplateHandler.
-func (d *Deps) TemplateHandler() tpl.TemplateHandler {
-	return d.Tmpl.(tpl.TemplateHandler)
+func (d *Deps) Tmpl() tpl.TemplateHandler {
+	return d.tmpl
+}
+
+func (d *Deps) TextTmpl() tpl.TemplateParseFinder {
+	return d.textTmpl
+}
+
+func (d *Deps) SetTmpl(tmpl tpl.TemplateHandler) {
+	d.tmpl = tmpl
+}
+
+func (d *Deps) SetTextTmpl(tmpl tpl.TemplateParseFinder) {
+	d.textTmpl = tmpl
 }
 
 // LoadResources loads translations and templates.
 func (d *Deps) LoadResources() error {
 	// Note that the translations need to be loaded before the templates.
 	if err := d.translationProvider.Update(d); err != nil {
-		return err
+		return errors.Wrap(err, "loading translations")
 	}
 
 	if err := d.templateProvider.Update(d); err != nil {
-		return err
+		return errors.Wrap(err, "loading templates")
 	}
 
 	return nil
@@ -203,10 +230,10 @@ func New(cfg DepsCfg) (*Deps, error) {
 		cfg.OutputFormats = output.DefaultFormats
 	}
 
-	ps, err := helpers.NewPathSpec(fs, cfg.Language)
+	ps, err := helpers.NewPathSpec(fs, cfg.Language, logger)
 
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err, "create PathSpec")
 	}
 
 	fileCaches, err := filecache.NewCaches(ps)
@@ -214,12 +241,15 @@ func New(cfg DepsCfg) (*Deps, error) {
 		return nil, errors.WithMessage(err, "failed to create file caches from configuration")
 	}
 
-	resourceSpec, err := resources.NewSpec(ps, fileCaches, logger, cfg.OutputFormats, cfg.MediaTypes)
+	errorHandler := &globalErrHandler{}
+	buildState := &BuildState{}
+
+	resourceSpec, err := resources.NewSpec(ps, fileCaches, buildState, logger, errorHandler, cfg.OutputFormats, cfg.MediaTypes)
 	if err != nil {
 		return nil, err
 	}
 
-	contentSpec, err := helpers.NewContentSpec(cfg.Language)
+	contentSpec, err := helpers.NewContentSpec(cfg.Language, logger, ps.BaseFs.Content.Fs)
 	if err != nil {
 		return nil, err
 	}
@@ -231,26 +261,34 @@ func New(cfg DepsCfg) (*Deps, error) {
 		timeoutms = 3000
 	}
 
-	distinctErrorLogger := helpers.NewDistinctLogger(logger.ERROR)
+	ignoreErrors := cast.ToStringSlice(cfg.Cfg.Get("ignoreErrors"))
+	ignorableLogger := loggers.NewIgnorableLogger(logger, ignoreErrors...)
+
+	distinctErrorLogger := helpers.NewDistinctLogger(logger.Error())
+	distinctWarnLogger := helpers.NewDistinctLogger(logger.Warn())
 
 	d := &Deps{
-		Fs:                  fs,
-		Log:                 logger,
-		DistinctErrorLog:    distinctErrorLogger,
-		templateProvider:    cfg.TemplateProvider,
-		translationProvider: cfg.TranslationProvider,
-		WithTemplate:        cfg.WithTemplate,
-		PathSpec:            ps,
-		ContentSpec:         contentSpec,
-		SourceSpec:          sp,
-		ResourceSpec:        resourceSpec,
-		Cfg:                 cfg.Language,
-		Language:            cfg.Language,
-		Site:                cfg.Site,
-		FileCaches:          fileCaches,
-		BuildStartListeners: &Listeners{},
-		Timeout:             time.Duration(timeoutms) * time.Millisecond,
-		globalErrHandler:    &globalErrHandler{},
+		Fs:                      fs,
+		Log:                     ignorableLogger,
+		DistinctErrorLog:        distinctErrorLogger,
+		DistinctWarningLog:      distinctWarnLogger,
+		templateProvider:        cfg.TemplateProvider,
+		translationProvider:     cfg.TranslationProvider,
+		WithTemplate:            cfg.WithTemplate,
+		OverloadedTemplateFuncs: cfg.OverloadedTemplateFuncs,
+		PathSpec:                ps,
+		ContentSpec:             contentSpec,
+		SourceSpec:              sp,
+		ResourceSpec:            resourceSpec,
+		Cfg:                     cfg.Language,
+		Language:                cfg.Language,
+		Site:                    cfg.Site,
+		FileCaches:              fileCaches,
+		BuildStartListeners:     &Listeners{},
+		BuildState:              buildState,
+		Running:                 cfg.Running,
+		Timeout:                 time.Duration(timeoutms) * time.Millisecond,
+		globalErrHandler:        errorHandler,
 	}
 
 	if cfg.Cfg.GetBool("templateMetrics") {
@@ -266,26 +304,28 @@ func (d Deps) ForLanguage(cfg DepsCfg, onCreated func(d *Deps) error) (*Deps, er
 	l := cfg.Language
 	var err error
 
-	d.PathSpec, err = helpers.NewPathSpecWithBaseBaseFsProvided(d.Fs, l, d.BaseFs)
+	d.PathSpec, err = helpers.NewPathSpecWithBaseBaseFsProvided(d.Fs, l, d.Log, d.BaseFs)
 	if err != nil {
 		return nil, err
 	}
 
-	d.ContentSpec, err = helpers.NewContentSpec(l)
+	d.ContentSpec, err = helpers.NewContentSpec(l, d.Log, d.BaseFs.Content.Fs)
 	if err != nil {
 		return nil, err
 	}
 
 	d.Site = cfg.Site
 
-	// The resource cache is global so reuse.
+	// These are common for all sites, so reuse.
 	// TODO(bep) clean up these inits.
 	resourceCache := d.ResourceSpec.ResourceCache
-	d.ResourceSpec, err = resources.NewSpec(d.PathSpec, d.ResourceSpec.FileCaches, d.Log, cfg.OutputFormats, cfg.MediaTypes)
+	postBuildAssets := d.ResourceSpec.PostBuildAssets
+	d.ResourceSpec, err = resources.NewSpec(d.PathSpec, d.ResourceSpec.FileCaches, d.BuildState, d.Log, d.globalErrHandler, cfg.OutputFormats, cfg.MediaTypes)
 	if err != nil {
 		return nil, err
 	}
 	d.ResourceSpec.ResourceCache = resourceCache
+	d.ResourceSpec.PostBuildAssets = postBuildAssets
 
 	d.Cfg = l
 	d.Language = l
@@ -316,7 +356,7 @@ func (d Deps) ForLanguage(cfg DepsCfg, onCreated func(d *Deps) error) (*Deps, er
 type DepsCfg struct {
 
 	// The Logger to use.
-	Logger *loggers.Logger
+	Logger loggers.Logger
 
 	// The file systems to use
 	Fs *hugofs.Fs
@@ -325,7 +365,7 @@ type DepsCfg struct {
 	Language *langs.Language
 
 	// The Site in use
-	Site hugo.Site
+	Site page.Site
 
 	// The configuration to use.
 	Cfg config.Provider
@@ -338,11 +378,26 @@ type DepsCfg struct {
 
 	// Template handling.
 	TemplateProvider ResourceProvider
-	WithTemplate     func(templ tpl.TemplateHandler) error
+	WithTemplate     func(templ tpl.TemplateManager) error
+	// Used in tests
+	OverloadedTemplateFuncs map[string]interface{}
 
 	// i18n handling.
 	TranslationProvider ResourceProvider
 
 	// Whether we are in running (server) mode
 	Running bool
+}
+
+// BuildState are flags that may be turned on during a build.
+type BuildState struct {
+	counter uint64
+}
+
+func (b *BuildState) Incr() int {
+	return int(atomic.AddUint64(&b.counter, uint64(1)))
+}
+
+func NewBuildState() BuildState {
+	return BuildState{}
 }

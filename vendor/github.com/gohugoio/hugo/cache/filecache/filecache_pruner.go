@@ -17,6 +17,8 @@ import (
 	"io"
 	"os"
 
+	"github.com/gohugoio/hugo/hugofs"
+
 	"github.com/pkg/errors"
 	"github.com/spf13/afero"
 )
@@ -28,53 +30,99 @@ import (
 func (c Caches) Prune() (int, error) {
 	counter := 0
 	for k, cache := range c {
-		err := afero.Walk(cache.Fs, "", func(name string, info os.FileInfo, err error) error {
-			if info == nil {
-				return nil
-			}
 
-			name = cleanID(name)
+		count, err := cache.Prune(false)
 
-			if info.IsDir() {
-				f, err := cache.Fs.Open(name)
-				if err != nil {
-					// This cache dir may not exist.
-					return nil
-				}
-				defer f.Close()
-				_, err = f.Readdirnames(1)
-				if err == io.EOF {
-					// Empty dir.
-					return cache.Fs.Remove(name)
-				}
-
-				return nil
-			}
-
-			shouldRemove := cache.isExpired(info.ModTime())
-
-			if !shouldRemove && len(cache.nlocker.seen) > 0 {
-				// Remove it if it's not been touched/used in the last build.
-				_, seen := cache.nlocker.seen[name]
-				shouldRemove = !seen
-			}
-
-			if shouldRemove {
-				err := cache.Fs.Remove(name)
-				if err == nil {
-					counter++
-				}
-				return err
-			}
-
-			return nil
-		})
+		counter += count
 
 		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			return counter, errors.Wrapf(err, "failed to prune cache %q", k)
 		}
 
 	}
 
 	return counter, nil
+}
+
+// Prune removes expired and unused items from this cache.
+// If force is set, everything will be removed not considering expiry time.
+func (c *Cache) Prune(force bool) (int, error) {
+	if c.pruneAllRootDir != "" {
+		return c.pruneRootDir(force)
+	}
+
+	counter := 0
+
+	err := afero.Walk(c.Fs, "", func(name string, info os.FileInfo, err error) error {
+		if info == nil {
+			return nil
+		}
+
+		name = cleanID(name)
+
+		if info.IsDir() {
+			f, err := c.Fs.Open(name)
+			if err != nil {
+				// This cache dir may not exist.
+				return nil
+			}
+			defer f.Close()
+			_, err = f.Readdirnames(1)
+			if err == io.EOF {
+				// Empty dir.
+				err = c.Fs.Remove(name)
+			}
+
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+
+			return nil
+		}
+
+		shouldRemove := force || c.isExpired(info.ModTime())
+
+		if !shouldRemove && len(c.nlocker.seen) > 0 {
+			// Remove it if it's not been touched/used in the last build.
+			_, seen := c.nlocker.seen[name]
+			shouldRemove = !seen
+		}
+
+		if shouldRemove {
+			err := c.Fs.Remove(name)
+			if err == nil {
+				counter++
+			}
+
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+
+		}
+
+		return nil
+	})
+
+	return counter, err
+}
+
+func (c *Cache) pruneRootDir(force bool) (int, error) {
+
+	info, err := c.Fs.Stat(c.pruneAllRootDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+
+	if !force && !c.isExpired(info.ModTime()) {
+		return 0, nil
+	}
+
+	return hugofs.MakeReadableAndRemoveAllModulePkgDir(c.Fs, c.pruneAllRootDir)
+
 }

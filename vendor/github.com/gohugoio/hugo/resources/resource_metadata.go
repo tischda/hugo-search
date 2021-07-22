@@ -17,7 +17,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/gohugoio/hugo/resources/internal"
+	"github.com/gohugoio/hugo/hugofs/glob"
+	"github.com/gohugoio/hugo/media"
 	"github.com/gohugoio/hugo/resources/resource"
 
 	"github.com/pkg/errors"
@@ -29,13 +30,20 @@ import (
 )
 
 var (
-	_ metaAssigner = (*genericResource)(nil)
+	_ metaAssigner         = (*genericResource)(nil)
+	_ metaAssigner         = (*imageResource)(nil)
+	_ metaAssignerProvider = (*resourceAdapter)(nil)
 )
+
+type metaAssignerProvider interface {
+	getMetaAssigner() metaAssigner
+}
 
 // metaAssigner allows updating metadata in resources that supports it.
 type metaAssigner interface {
 	setTitle(title string)
 	setName(name string)
+	setMediaType(mediaType media.Type)
 	updateParams(params map[string]interface{})
 }
 
@@ -47,12 +55,18 @@ const counterPlaceHolder = ":counter"
 // The `name` and `title` metadata field support shell-matched collection it got a match in.
 // See https://golang.org/pkg/path/#Match
 func AssignMetadata(metadata []map[string]interface{}, resources ...resource.Resource) error {
-
 	counters := make(map[string]int)
 
 	for _, r := range resources {
-		if _, ok := r.(metaAssigner); !ok {
-			continue
+		var ma metaAssigner
+		mp, ok := r.(metaAssignerProvider)
+		if ok {
+			ma = mp.getMetaAssigner()
+		} else {
+			ma, ok = r.(metaAssigner)
+			if !ok {
+				continue
+			}
 		}
 
 		var (
@@ -62,7 +76,6 @@ func AssignMetadata(metadata []map[string]interface{}, resources ...resource.Res
 			resourceSrcKey                      = strings.ToLower(r.Name())
 		)
 
-		ma := r.(metaAssigner)
 		for _, meta := range metadata {
 			src, found := meta["src"]
 			if !found {
@@ -71,7 +84,7 @@ func AssignMetadata(metadata []map[string]interface{}, resources ...resource.Res
 
 			srcKey := strings.ToLower(cast.ToString(src))
 
-			glob, err := internal.GetGlob(srcKey)
+			glob, err := glob.GetGlob(srcKey)
 			if err != nil {
 				return errors.Wrap(err, "failed to match resource with metadata")
 			}
@@ -116,7 +129,7 @@ func AssignMetadata(metadata []map[string]interface{}, resources ...resource.Res
 
 				params, found := meta["params"]
 				if found {
-					m := cast.ToStringMap(params)
+					m := maps.ToStringMap(params)
 					// Needed for case insensitive fetching of params values
 					maps.ToLower(m)
 					ma.updateParams(m)

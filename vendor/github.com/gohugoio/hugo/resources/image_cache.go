@@ -14,15 +14,13 @@
 package resources
 
 import (
-	"fmt"
 	"image"
 	"io"
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/gohugoio/hugo/common/hugio"
+	"github.com/gohugoio/hugo/resources/images"
 
 	"github.com/gohugoio/hugo/cache/filecache"
 	"github.com/gohugoio/hugo/helpers"
@@ -34,97 +32,106 @@ type imageCache struct {
 	fileCache *filecache.Cache
 
 	mu    sync.RWMutex
-	store map[string]*Image
+	store map[string]*resourceAdapter
 }
 
-func (c *imageCache) isInCache(key string) bool {
-	c.mu.RLock()
-	_, found := c.store[c.normalizeKey(key)]
-	c.mu.RUnlock()
-	return found
-}
-
-func (c *imageCache) deleteByPrefix(prefix string) {
+func (c *imageCache) deleteIfContains(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	prefix = c.normalizeKey(prefix)
+	s = c.normalizeKeyBase(s)
 	for k := range c.store {
-		if strings.HasPrefix(k, prefix) {
+		if strings.Contains(k, s) {
 			delete(c.store, k)
 		}
 	}
 }
 
+// The cache key is a lowecase path with Unix style slashes and it always starts with
+// a leading slash.
 func (c *imageCache) normalizeKey(key string) string {
-	// It is a path with Unix style slashes and it always starts with a leading slash.
-	key = filepath.ToSlash(key)
-	if !strings.HasPrefix(key, "/") {
-		key = "/" + key
-	}
+	return "/" + c.normalizeKeyBase(key)
+}
 
-	return key
+func (c *imageCache) normalizeKeyBase(key string) string {
+	return strings.Trim(strings.ToLower(filepath.ToSlash(key)), "/")
 }
 
 func (c *imageCache) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.store = make(map[string]*Image)
+	c.store = make(map[string]*resourceAdapter)
 }
 
 func (c *imageCache) getOrCreate(
-	parent *Image, conf imageConfig, createImage func() (*Image, image.Image, error)) (*Image, error) {
-
+	parent *imageResource, conf images.ImageConfig,
+	createImage func() (*imageResource, image.Image, error)) (*resourceAdapter, error) {
 	relTarget := parent.relTargetPathFromConfig(conf)
-	key := parent.relTargetPathForRel(relTarget.path(), false, false, false)
+	memKey := parent.relTargetPathForRel(relTarget.path(), false, false, false)
+	memKey = c.normalizeKey(memKey)
+
+	// For the file cache we want to generate and store it once if possible.
+	fileKeyPath := relTarget
+	if fi := parent.root.getFileInfo(); fi != nil {
+		fileKeyPath.dir = filepath.ToSlash(filepath.Dir(fi.Meta().Path()))
+	}
+	fileKey := fileKeyPath.path()
 
 	// First check the in-memory store, then the disk.
 	c.mu.RLock()
-	img, found := c.store[key]
+	cachedImage, found := c.store[memKey]
 	c.mu.RUnlock()
 
 	if found {
-		return img, nil
+		return cachedImage, nil
 	}
+
+	var img *imageResource
 
 	// These funcs are protected by a named lock.
 	// read clones the parent to its new name and copies
 	// the content to the destinations.
-	read := func(info filecache.ItemInfo, r io.Reader) error {
-		img = parent.clone()
-		img.relTargetDirFile.file = relTarget.file
-		img.sourceFilename = info.Name
+	read := func(info filecache.ItemInfo, r io.ReadSeeker) error {
+		img = parent.clone(nil)
+		rp := img.getResourcePaths()
+		rp.relTargetDirFile.file = relTarget.file
+		img.setSourceFilename(info.Name)
+
+		if err := img.InitConfig(r); err != nil {
+			return err
+		}
+
+		r.Seek(0, 0)
 
 		w, err := img.openDestinationsForWriting()
 		if err != nil {
 			return err
 		}
 
+		if w == nil {
+			// Nothing to write.
+			return nil
+		}
+
 		defer w.Close()
 		_, err = io.Copy(w, r)
+
 		return err
 	}
 
-	// create creates the image and encodes it to w (cache) and to its destinations.
+	// create creates the image and encodes it to the cache (w).
 	create := func(info filecache.ItemInfo, w io.WriteCloser) (err error) {
+		defer w.Close()
+
 		var conv image.Image
 		img, conv, err = createImage()
 		if err != nil {
-			w.Close()
 			return
 		}
-		img.relTargetDirFile.file = relTarget.file
-		img.sourceFilename = info.Name
+		rp := img.getResourcePaths()
+		rp.relTargetDirFile.file = relTarget.file
+		img.setSourceFilename(info.Name)
 
-		destinations, err := img.openDestinationsForWriting()
-		if err != nil {
-			w.Close()
-			return err
-		}
-
-		mw := hugio.NewMultiWriteCloser(w, destinations)
-		defer mw.Close()
-
-		return img.encodeTo(conf, conv, mw)
+		return img.EncodeTo(conf, conv, w)
 	}
 
 	// Now look in the file cache.
@@ -134,31 +141,27 @@ func (c *imageCache) getOrCreate(
 	//  but the count of processed image variations for this site.
 	c.pathSpec.ProcessingStats.Incr(&c.pathSpec.ProcessingStats.ProcessedImages)
 
-	_, err := c.fileCache.ReadOrCreate(key, read, create)
+	_, err := c.fileCache.ReadOrCreate(fileKey, read, create)
 	if err != nil {
 		return nil, err
 	}
 
 	// The file is now stored in this cache.
-	img.overriddenSourceFs = c.fileCache.Fs
+	img.setSourceFs(c.fileCache.Fs)
 
 	c.mu.Lock()
-	if img2, found := c.store[key]; found {
+	if cachedImage, found = c.store[memKey]; found {
 		c.mu.Unlock()
-		return img2, nil
+		return cachedImage, nil
 	}
-	c.store[key] = img
+
+	imgAdapter := newResourceAdapter(parent.getSpec(), true, img)
+	c.store[memKey] = imgAdapter
 	c.mu.Unlock()
 
-	return img, nil
-
+	return imgAdapter, nil
 }
 
 func newImageCache(fileCache *filecache.Cache, ps *helpers.PathSpec) *imageCache {
-	return &imageCache{fileCache: fileCache, pathSpec: ps, store: make(map[string]*Image)}
-}
-
-func timeTrack(start time.Time, name string) {
-	elapsed := time.Since(start)
-	fmt.Printf("%s took %s\n", name, elapsed)
+	return &imageCache{fileCache: fileCache, pathSpec: ps, store: make(map[string]*resourceAdapter)}
 }

@@ -11,10 +11,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package pageparser provides a parser for Hugo content files (Markdown, HTML etc.) in Hugo.
-// This implementation is highly inspired by the great talk given by Rob Pike called "Lexical Scanning in Go"
-// It's on YouTube, Google it!.
-// See slides here: http://cuddle.googlecode.com/hg/talk/lex.html
 package pageparser
 
 func lexIntroSection(l *pageLexer) stateFunc {
@@ -42,21 +38,14 @@ LOOP:
 			if r == '<' {
 				l.backup()
 				if l.hasPrefix(htmlCommentStart) {
-					// This may be commented out front mattter, which should
+					// This may be commented out front matter, which should
 					// still be read.
 					l.consumeToNextLine()
 					l.isInHTMLComment = true
 					l.emit(TypeIgnore)
 					continue LOOP
 				} else {
-					if l.pos > l.start {
-						l.emit(tText)
-					}
-					l.next()
-					// This is the start of a plain HTML document with no
-					// front matter. I still can contain shortcodes, so we
-					// have to keep looking.
-					l.emit(TypeHTMLStart)
+					return l.errorf("plain HTML documents not supported")
 				}
 			}
 			break LOOP

@@ -22,9 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bep/go-tocss/scss"
-	"github.com/bep/go-tocss/scss/libsass"
-	"github.com/bep/go-tocss/tocss"
+	"github.com/bep/golibsass/libsass"
 	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/hugofs"
 	"github.com/gohugoio/hugo/media"
@@ -55,7 +53,11 @@ func (t *toCSSTransformation) Transform(ctx *resources.ResourceTransformationCtx
 
 	// Append any workDir relative include paths
 	for _, ip := range options.from.IncludePaths {
-		options.to.IncludePaths = append(options.to.IncludePaths, t.c.workFs.RealDirs(filepath.Clean(ip))...)
+		info, err := t.c.workFs.Stat(filepath.Clean(ip))
+		if err == nil {
+			filename := info.(hugofs.FileMetaInfo).Meta().Filename()
+			options.to.IncludePaths = append(options.to.IncludePaths, filename)
+		}
 	}
 
 	// To allow for overrides of SCSS files anywhere in the project/theme hierarchy, we need
@@ -70,10 +72,12 @@ func (t *toCSSTransformation) Transform(ctx *resources.ResourceTransformationCtx
 		var basePath string
 		urlDir := filepath.Dir(url)
 		var prevDir string
+
 		if prev == "stdin" {
 			prevDir = baseDir
 		} else {
-			prevDir = t.c.sfs.MakePathRelative(filepath.Dir(prev))
+			prevDir, _ = t.c.sfs.MakePathRelative(filepath.Dir(prev))
+
 			if prevDir == "" {
 				// Not a member of this filesystem. Let LibSASS handle it.
 				return "", "", false
@@ -100,8 +104,8 @@ func (t *toCSSTransformation) Transform(ctx *resources.ResourceTransformationCtx
 			filenameToCheck := filepath.Join(basePath, fmt.Sprintf(namePattern, name))
 			fi, err := t.c.sfs.Fs.Stat(filenameToCheck)
 			if err == nil {
-				if fir, ok := fi.(hugofs.RealFilenameInfo); ok {
-					return fir.RealFilename(), "", true
+				if fim, ok := fi.(hugofs.FileMetaInfo); ok {
+					return fim.Meta().Filename(), "", true
 				}
 			}
 		}
@@ -116,18 +120,18 @@ func (t *toCSSTransformation) Transform(ctx *resources.ResourceTransformationCtx
 
 	if options.from.EnableSourceMap {
 
-		options.to.SourceMapFilename = outName + ".map"
-		options.to.SourceMapRoot = t.c.rs.WorkingDir
+		options.to.SourceMapOptions.Filename = outName + ".map"
+		options.to.SourceMapOptions.Root = t.c.rs.WorkingDir
 
 		// Setting this to the relative input filename will get the source map
 		// more correct for the main entry path (main.scss typically), but
 		// it will mess up the import mappings. As a workaround, we do a replacement
 		// in the source map itself (see below).
 		//options.InputPath = inputPath
-		options.to.OutputPath = outName
-		options.to.SourceMapContents = true
-		options.to.OmitSourceMapURL = false
-		options.to.EnableEmbeddedSourceMap = false
+		options.to.SourceMapOptions.OutputPath = outName
+		options.to.SourceMapOptions.Contents = true
+		options.to.SourceMapOptions.OmitURL = false
+		options.to.SourceMapOptions.EnableEmbedded = false
 	}
 
 	res, err := t.c.toCSS(options.to, ctx.To, ctx.From)
@@ -156,18 +160,35 @@ func (t *toCSSTransformation) Transform(ctx *resources.ResourceTransformationCtx
 	return nil
 }
 
-func (c *Client) toCSS(options scss.Options, dst io.Writer, src io.Reader) (tocss.Result, error) {
-	var res tocss.Result
+func (c *Client) toCSS(options libsass.Options, dst io.Writer, src io.Reader) (libsass.Result, error) {
+	var res libsass.Result
 
 	transpiler, err := libsass.New(options)
 	if err != nil {
 		return res, err
 	}
 
-	res, err = transpiler.Execute(dst, src)
+	in := helpers.ReaderToString(src)
+
+	// See https://github.com/gohugoio/hugo/issues/7059
+	// We need to preserver the regular CSS imports. This is by far
+	// a perfect solution, and only works for the main entry file, but
+	// that should cover many use cases, e.g. using SCSS as a preprocessor
+	// for Tailwind.
+	var importsReplaced bool
+	in, importsReplaced = replaceRegularImportsIn(in)
+
+	res, err = transpiler.Execute(in)
 	if err != nil {
 		return res, errors.Wrap(err, "SCSS processing failed")
 	}
 
-	return res, nil
+	out := res.CSS
+	if importsReplaced {
+		out = replaceRegularImportsOut(out)
+	}
+
+	_, err = io.WriteString(dst, out)
+
+	return res, err
 }

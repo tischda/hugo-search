@@ -64,6 +64,13 @@ func init() {
 			},
 		)
 
+		ns.AddMethodMapping(ctx.Sqrt,
+			nil,
+			[][2]string{
+				{"{{math.Sqrt 81}}", "9"},
+			},
+		)
+
 		ns.AddMethodMapping(ctx.Mod,
 			[]string{"mod"},
 			[][2]string{
@@ -82,6 +89,13 @@ func init() {
 			[]string{"mul"},
 			[][2]string{
 				{"{{mul 2 3}}", "6"},
+			},
+		)
+
+		ns.AddMethodMapping(ctx.Pow,
+			[]string{"pow"},
+			[][2]string{
+				{"{{math.Pow 2 3}}", "8"},
 			},
 		)
 

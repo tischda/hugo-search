@@ -16,6 +16,7 @@ package langs
 import (
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/gohugoio/hugo/common/maps"
 	"github.com/gohugoio/hugo/config"
@@ -35,14 +36,16 @@ var globalOnlySettings = map[string]bool{
 	strings.ToLower("multilingual"):                   true,
 	strings.ToLower("assetDir"):                       true,
 	strings.ToLower("resourceDir"):                    true,
+	strings.ToLower("build"):                          true,
 }
 
 // Language manages specific-language configuration.
 type Language struct {
-	Lang         string
-	LanguageName string
-	Title        string
-	Weight       int
+	Lang              string
+	LanguageName      string
+	LanguageDirection string
+	Title             string
+	Weight            int
 
 	Disabled bool
 
@@ -56,7 +59,9 @@ type Language struct {
 
 	// These are params declared in the [params] section of the language merged with the
 	// site's params, the most specific (language) wins on duplicate keys.
-	params map[string]interface{}
+	params    map[string]interface{}
+	paramsMu  sync.Mutex
+	paramsSet bool
 
 	// These are config values, i.e. the settings declared outside of the [params] section of the language.
 	// This is the map Hugo looks in when looking for configuration values (baseURL etc.).
@@ -78,12 +83,7 @@ func NewLanguage(lang string, cfg config.Provider) *Language {
 	}
 	maps.ToLower(params)
 
-	defaultContentDir := cfg.GetString("contentDir")
-	if defaultContentDir == "" {
-		panic("contentDir not set")
-	}
-
-	l := &Language{Lang: lang, ContentDir: defaultContentDir, Cfg: cfg, params: params, settings: make(map[string]interface{})}
+	l := &Language{Lang: lang, ContentDir: cfg.GetString("contentDir"), Cfg: cfg, params: params, settings: make(map[string]interface{})}
 	return l
 }
 
@@ -113,13 +113,49 @@ func NewLanguages(l ...*Language) Languages {
 	return languages
 }
 
-func (l Languages) Len() int           { return len(l) }
-func (l Languages) Less(i, j int) bool { return l[i].Weight < l[j].Weight }
-func (l Languages) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
+func (l Languages) Len() int { return len(l) }
+func (l Languages) Less(i, j int) bool {
+	wi, wj := l[i].Weight, l[j].Weight
+
+	if wi == wj {
+		return l[i].Lang < l[j].Lang
+	}
+
+	return wj == 0 || wi < wj
+
+}
+
+func (l Languages) Swap(i, j int) { l[i], l[j] = l[j], l[i] }
 
 // Params retunrs language-specific params merged with the global params.
-func (l *Language) Params() map[string]interface{} {
+func (l *Language) Params() maps.Params {
+	// TODO(bep) this construct should not be needed. Create the
+	// language params in one go.
+	l.paramsMu.Lock()
+	defer l.paramsMu.Unlock()
+	if !l.paramsSet {
+		maps.ToLower(l.params)
+		l.paramsSet = true
+	}
 	return l.params
+}
+
+func (l Languages) AsSet() map[string]bool {
+	m := make(map[string]bool)
+	for _, lang := range l {
+		m[lang.Lang] = true
+	}
+
+	return m
+}
+
+func (l Languages) AsOrdinalSet() map[string]int {
+	m := make(map[string]int)
+	for i, lang := range l {
+		m[lang.Lang] = i
+	}
+
+	return m
 }
 
 // IsMultihost returns whether there are more than one language and at least one of
@@ -140,7 +176,12 @@ func (l Languages) IsMultihost() bool {
 // SetParam sets a param with the given key and value.
 // SetParam is case-insensitive.
 func (l *Language) SetParam(k string, v interface{}) {
-	l.params[strings.ToLower(k)] = v
+	l.paramsMu.Lock()
+	defer l.paramsMu.Unlock()
+	if l.paramsSet {
+		panic("params cannot be changed once set")
+	}
+	l.params[k] = v
 }
 
 // GetBool returns the value associated with the key as a boolean.
@@ -154,7 +195,7 @@ func (l *Language) GetInt(key string) int { return cast.ToInt(l.Get(key)) }
 
 // GetStringMap returns the value associated with the key as a map of interfaces.
 func (l *Language) GetStringMap(key string) map[string]interface{} {
-	return cast.ToStringMap(l.Get(key))
+	return maps.ToStringMap(l.Get(key))
 }
 
 // GetStringMapString returns the value associated with the key as a map of strings.

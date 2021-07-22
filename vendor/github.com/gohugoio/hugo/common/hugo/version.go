@@ -15,6 +15,7 @@ package hugo
 
 import (
 	"fmt"
+	"io"
 
 	"runtime"
 	"strings"
@@ -133,7 +134,7 @@ func BuildVersionString() string {
 	if commitHash != "" {
 		version += "-" + strings.ToUpper(commitHash)
 	}
-	if isExtended {
+	if IsExtended {
 		version += "/extended"
 	}
 
@@ -234,4 +235,25 @@ func compareFloatVersions(version float32, v float32) int {
 		return -1
 	}
 	return 1
+}
+
+func GoMinorVersion() int {
+	return goMinorVersion(runtime.Version())
+}
+
+func goMinorVersion(version string) int {
+	if strings.HasPrefix(version, "devel") {
+		return 9999 // magic
+	}
+	var major, minor int
+	var trailing string
+	n, err := fmt.Sscanf(version, "go%d.%d%s", &major, &minor, &trailing)
+	if n == 2 && err == io.EOF {
+		// Means there were no trailing characters (i.e., not an alpha/beta)
+		err = nil
+	}
+	if err != nil {
+		return 0
+	}
+	return minor
 }
