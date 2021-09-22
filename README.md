@@ -1,4 +1,4 @@
-# hugo-search [![Build Status](https://travis-ci.org/tischda/hugo-search.svg?branch=master)](https://travis-ci.org/tischda/hugo-search)
+# hugo-search [![Build Status](https://github.com/tischda/hugo-search/actions/workflows/test.yml/badge.svg)](https://github.com/tischda/hugo-search/actions/workflows/test.yml)
 
 A [Bleve](http://www.blevesearch.com) search server for your [Hugo](http://gohugo.io) site.
 
