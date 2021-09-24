@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gohugoio/hugo/hugolib"
+	"github.com/gohugoio/hugo/resources/page"
 )
 
 var expected *PageEntry
@@ -18,10 +18,10 @@ func setUp() {
 	expected = &PageEntry{
 		Type:         "page",
 		Section:      "",
-		Content:      " Lorem ipsum Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n",
+		Content:      "Lorem ipsum Lorem ipsum dolor sit amet, consectetur adipiscing elit.\n",
 		WordCount:    10,
 		ReadingTime:  1,
-		Keywords:     []string{},
+		Keywords:     []string{"keyword"},
 		Date:         myDate,
 		LastModified: myDate,
 	}
@@ -30,8 +30,8 @@ func setUp() {
 // test single author
 func TestNewPageForIndex(t *testing.T) {
 	setUp()
-	expected.Title = "title-page-1"
-	expected.Author = "author-page-1"
+	expected.Title = "Title-page-1"
+	expected.Author = "Author1Page1"
 	actual := newIndexEntry(findPage(expected.Title))
 	comparePages(t, actual, expected)
 }
@@ -39,8 +39,8 @@ func TestNewPageForIndex(t *testing.T) {
 // test multiple authors
 func TestNewPageForIndex2(t *testing.T) {
 	setUp()
-	expected.Title = "title-page-2"
-	expected.Author = "author-1-page-2, author-2-page-2"
+	expected.Title = "Title-page-2"
+	expected.Author = "Author1Page2, Author2Page2"
 	actual := newIndexEntry(findPage(expected.Title))
 	comparePages(t, actual, expected)
 }
@@ -54,7 +54,7 @@ func comparePages(t *testing.T, actual *PageEntry, expected *PageEntry) {
 }
 
 // find first page with specified title
-func findPage(title string) *hugolib.Page {
+func findPage(title string) page.Page {
 	pages := readSitePages(testHugoPath)
 	for _, page := range pages {
 		if page.Title() == title {

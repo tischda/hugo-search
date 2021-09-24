@@ -1,12 +1,10 @@
 // Package xml is an XML1.0 lexer following the specifications at http://www.w3.org/TR/xml/.
-package xml // import "github.com/tdewolff/parse/xml"
+package xml
 
 import (
-	"io"
 	"strconv"
 
 	"github.com/tdewolff/parse/v2"
-	"github.com/tdewolff/parse/v2/buffer"
 )
 
 // TokenType determines the type of token, eg. a number or a semicolon.
@@ -63,7 +61,7 @@ func (tt TokenType) String() string {
 
 // Lexer is the state for the lexer.
 type Lexer struct {
-	r   *buffer.Lexer
+	r   *parse.Input
 	err error
 
 	inTag bool
@@ -73,9 +71,9 @@ type Lexer struct {
 }
 
 // NewLexer returns a new Lexer for a given io.Reader.
-func NewLexer(r io.Reader) *Lexer {
+func NewLexer(r *parse.Input) *Lexer {
 	return &Lexer{
-		r: buffer.NewLexer(r),
+		r: r,
 	}
 }
 
@@ -87,9 +85,14 @@ func (l *Lexer) Err() error {
 	return l.r.Err()
 }
 
-// Restore restores the NULL byte at the end of the buffer.
-func (l *Lexer) Restore() {
-	l.r.Restore()
+// Text returns the textual representation of a token. This excludes delimiters and additional leading/trailing characters.
+func (l *Lexer) Text() []byte {
+	return l.text
+}
+
+// AttrVal returns the attribute value when an AttributeToken was returned from Next.
+func (l *Lexer) AttrVal() []byte {
+	return l.attrVal
 }
 
 // Next returns the next Token. It returns ErrorToken when an error was encountered. Using Err() one can retrieve the error message.
@@ -107,25 +110,22 @@ func (l *Lexer) Next() (TokenType, []byte) {
 		}
 		if c == 0 {
 			if l.r.Err() == nil {
-				l.err = parse.NewErrorLexer("unexpected null character", l.r)
+				l.err = parse.NewErrorLexer(l.r, "XML parse error: unexpected NULL character")
 			}
 			return ErrorToken, nil
 		} else if c != '>' && (c != '/' && c != '?' || l.r.Peek(1) != '>') {
 			return AttributeToken, l.shiftAttribute()
 		}
-		start := l.r.Pos()
+		l.r.Skip()
 		l.inTag = false
 		if c == '/' {
 			l.r.Move(2)
-			l.text = l.r.Lexeme()[start:]
 			return StartTagCloseVoidToken, l.r.Shift()
 		} else if c == '?' {
 			l.r.Move(2)
-			l.text = l.r.Lexeme()[start:]
 			return StartTagClosePIToken, l.r.Shift()
 		} else {
 			l.r.Move(1)
-			l.text = l.r.Lexeme()[start:]
 			return StartTagCloseToken, l.r.Shift()
 		}
 	}
@@ -134,7 +134,8 @@ func (l *Lexer) Next() (TokenType, []byte) {
 		c = l.r.Peek(0)
 		if c == '<' {
 			if l.r.Pos() > 0 {
-				return TextToken, l.r.Shift()
+				l.text = l.r.Shift()
+				return TextToken, l.text
 			}
 			c = l.r.Peek(1)
 			if c == '/' {
@@ -163,25 +164,16 @@ func (l *Lexer) Next() (TokenType, []byte) {
 			return StartTagToken, l.shiftStartTag()
 		} else if c == 0 {
 			if l.r.Pos() > 0 {
-				return TextToken, l.r.Shift()
+				l.text = l.r.Shift()
+				return TextToken, l.text
 			}
 			if l.r.Err() == nil {
-				l.err = parse.NewErrorLexer("unexpected null character", l.r)
+				l.err = parse.NewErrorLexer(l.r, "XML parse error: unexpected NULL character")
 			}
 			return ErrorToken, nil
 		}
 		l.r.Move(1)
 	}
-}
-
-// Text returns the textual representation of a token. This excludes delimiters and additional leading/trailing characters.
-func (l *Lexer) Text() []byte {
-	return l.text
-}
-
-// AttrVal returns the attribute value when an AttributeToken was returned from Next.
-func (l *Lexer) AttrVal() []byte {
-	return l.attrVal
 }
 
 ////////////////////////////////////////////////////////////////

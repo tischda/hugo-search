@@ -26,7 +26,7 @@ func init() {
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) interface{} { return ctx },
+			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
 		}
 
 		ns.AddMethodMapping(ctx.AbsURL,
@@ -67,7 +67,6 @@ func init() {
 		)
 
 		return ns
-
 	}
 
 	internal.AddTemplateFuncsNamespace(f)

@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 
 	"github.com/gohugoio/hugo/langs"
 	"github.com/spf13/afero"
@@ -73,7 +74,6 @@ func NewSourceSpec(ps *helpers.PathSpec, fs afero.Fs) *SourceSpec {
 	}
 
 	return &SourceSpec{ignoreFilesRe: regexps, PathSpec: ps, SourceFs: fs, Languages: languages, DefaultContentLanguage: defaultLang, DisabledLanguages: disabledLangsSet}
-
 }
 
 // IgnoreFile returns whether a given file should be ignored.
@@ -107,6 +107,18 @@ func (s *SourceSpec) IgnoreFile(filename string) bool {
 		}
 	}
 
+	if runtime.GOOS == "windows" {
+		// Also check the forward slash variant if different.
+		unixFilename := filepath.ToSlash(filename)
+		if unixFilename != filename {
+			for _, re := range s.ignoreFilesRe {
+				if re.MatchString(unixFilename) {
+					return true
+				}
+			}
+		}
+	}
+
 	return false
 }
 
@@ -124,6 +136,10 @@ func (s *SourceSpec) IsRegularSourceFile(filename string) (bool, error) {
 
 	if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
 		link, err := filepath.EvalSymlinks(filename)
+		if err != nil {
+			return false, err
+		}
+
 		fi, err = helpers.LstatIfPossible(s.SourceFs, link)
 		if err != nil {
 			return false, err

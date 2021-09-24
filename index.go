@@ -6,7 +6,7 @@ import (
 	"os"
 
 	"github.com/blevesearch/bleve"
-	"github.com/gohugoio/hugo/hugolib"
+	"github.com/gohugoio/hugo/resources/page"
 )
 
 // builds the search index by passing all pages of hugo site that have a title to the indexer
@@ -15,8 +15,7 @@ func buildIndexFromSite(theHugoPath string, theIndexPath string) {
 	index := createIndex(theIndexPath)
 	defer index.Close()
 	for _, page := range pages {
-		// TODO: home page has no title, are we properly reading the config file ?
-		if pageHasTitle(page) && pageHasValidContent(page) {
+		if pageHasTitle(page) && page.Type() != "search" {
 			addPageToIndex(index, page)
 		}
 	}
@@ -30,22 +29,22 @@ func createIndex(path string) bleve.Index {
 
 	// index_meta.go, line 59: os.Mkdir(path, 0700) fails if parent directory missing
 	err := os.MkdirAll(path, 0700)
-	checkFatal(err)
+	exitOnError(err)
 
 	// always recreate full index (otherwise search returns deleted pages)
 	err = os.RemoveAll(path)
-	checkFatal(err)
+	exitOnError(err)
 
 	index, err := bleve.New(path, bleve.NewIndexMapping())
-	checkFatal(err)
+	exitOnError(err)
 	return index
 }
 
 // adds a hugo page to the bleve search index
-func addPageToIndex(index bleve.Index, page *hugolib.Page) {
-	link := page.RelPermalink()
-	checkFatal(index.Index(link, newIndexEntry(page)))
+func addPageToIndex(index bleve.Index, p page.Page) {
+	link := p.RelPermalink()
+	exitOnError(index.Index(link, newIndexEntry(p)))
 	if *verbose {
-		log.Printf("Indexed: %s [%s]", page.File.Path(), page.Title())
+		log.Printf("Indexed: %s [%s]", p.File().Path(), p.Title())
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright 2018 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 package collections
 
 import (
-	"errors"
 	"fmt"
 	"html/template"
 	"math/rand"
@@ -30,6 +29,7 @@ import (
 	"github.com/gohugoio/hugo/common/types"
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/helpers"
+	"github.com/pkg/errors"
 	"github.com/spf13/cast"
 )
 
@@ -60,8 +60,8 @@ func (ns *Namespace) After(index interface{}, seq interface{}) (interface{}, err
 		return nil, err
 	}
 
-	if indexv < 1 {
-		return nil, errors.New("can't return negative/empty count of items from sequence")
+	if indexv < 0 {
+		return nil, errors.New("sequence bounds out of range [" + cast.ToString(indexv) + ":]")
 	}
 
 	seqv := reflect.ValueOf(seq)
@@ -98,8 +98,9 @@ func (ns *Namespace) Delimit(seq, delimiter interface{}, last ...interface{}) (t
 		dStr, err := cast.ToStringE(l)
 		if err != nil {
 			dLast = nil
+		} else {
+			dLast = &dStr
 		}
-		dLast = &dStr
 	}
 
 	seqv := reflect.ValueOf(seq)
@@ -144,22 +145,41 @@ func (ns *Namespace) Delimit(seq, delimiter interface{}, last ...interface{}) (t
 // Dictionary creates a map[string]interface{} from the given parameters by
 // walking the parameters and treating them as key-value pairs.  The number
 // of parameters must be even.
+// The keys can be string slices, which will create the needed nested structure.
 func (ns *Namespace) Dictionary(values ...interface{}) (map[string]interface{}, error) {
 	if len(values)%2 != 0 {
 		return nil, errors.New("invalid dictionary call")
 	}
 
-	dict := make(map[string]interface{}, len(values)/2)
+	root := make(map[string]interface{})
 
 	for i := 0; i < len(values); i += 2 {
-		key, ok := values[i].(string)
-		if !ok {
-			return nil, errors.New("dictionary keys must be strings")
+		dict := root
+		var key string
+		switch v := values[i].(type) {
+		case string:
+			key = v
+		case []string:
+			for i := 0; i < len(v)-1; i++ {
+				key = v[i]
+				var m map[string]interface{}
+				v, found := dict[key]
+				if found {
+					m = v.(map[string]interface{})
+				} else {
+					m = make(map[string]interface{})
+					dict[key] = m
+				}
+				dict = m
+			}
+			key = v[len(v)-1]
+		default:
+			return nil, errors.New("invalid dictionary key")
 		}
 		dict[key] = values[i+1]
 	}
 
-	return dict, nil
+	return root, nil
 }
 
 // EchoParam returns a given value if it is set; otherwise, it returns an
@@ -218,7 +238,7 @@ func (ns *Namespace) First(limit interface{}, seq interface{}) (interface{}, err
 	}
 
 	if limitv < 0 {
-		return nil, errors.New("can't return negative count of items from sequence")
+		return nil, errors.New("sequence length must be non-negative")
 	}
 
 	seqv := reflect.ValueOf(seq)
@@ -242,43 +262,41 @@ func (ns *Namespace) First(limit interface{}, seq interface{}) (interface{}, err
 }
 
 // In returns whether v is in the set l.  l may be an array or slice.
-func (ns *Namespace) In(l interface{}, v interface{}) bool {
+func (ns *Namespace) In(l interface{}, v interface{}) (bool, error) {
 	if l == nil || v == nil {
-		return false
+		return false, nil
 	}
 
 	lv := reflect.ValueOf(l)
 	vv := reflect.ValueOf(v)
 
+	vvk := normalize(vv)
+
 	switch lv.Kind() {
 	case reflect.Array, reflect.Slice:
 		for i := 0; i < lv.Len(); i++ {
-			lvv := lv.Index(i)
-			lvv, isNil := indirect(lvv)
+			lvv, isNil := indirectInterface(lv.Index(i))
 			if isNil {
 				continue
 			}
-			switch lvv.Kind() {
-			case reflect.String:
-				if vv.Type() == lvv.Type() && vv.String() == lvv.String() {
-					return true
-				}
-			default:
-				if isNumber(vv.Kind()) && isNumber(lvv.Kind()) {
-					f1, err1 := numberToFloat(vv)
-					f2, err2 := numberToFloat(lvv)
-					if err1 == nil && err2 == nil && f1 == f2 {
-						return true
-					}
-				}
+
+			lvvk := normalize(lvv)
+
+			if lvvk == vvk {
+				return true, nil
 			}
 		}
-	case reflect.String:
-		if vv.Type() == lv.Type() && strings.Contains(lv.String(), vv.String()) {
-			return true
-		}
 	}
-	return false
+	ss, err := cast.ToStringE(l)
+	if err != nil {
+		return false, nil
+	}
+
+	su, err := cast.ToStringE(v)
+	if err != nil {
+		return false, nil
+	}
+	return strings.Contains(ss, su), nil
 }
 
 // Intersect returns the common elements in the given sets, l1 and l2.  l1 and
@@ -329,13 +347,17 @@ func (ns *Namespace) Group(key interface{}, items interface{}) (interface{}, err
 		return nil, errors.New("nil is not a valid key to group by")
 	}
 
+	if g, ok := items.(collections.Grouper); ok {
+		return g.Group(key, items)
+	}
+
 	in := newSliceElement(items)
 
 	if g, ok := in.(collections.Grouper); ok {
 		return g.Group(key, items)
 	}
 
-	return nil, fmt.Errorf("grouping not supported for type %T", items)
+	return nil, fmt.Errorf("grouping not supported for type %T %T", items, in)
 }
 
 // IsSet returns whether a given array, channel, slice, or map has a key
@@ -358,7 +380,7 @@ func (ns *Namespace) IsSet(a interface{}, key interface{}) (bool, error) {
 			return av.MapIndex(kv).IsValid(), nil
 		}
 	default:
-		helpers.DistinctFeedbackLog.Printf("WARNING: calling IsSet with unsupported type %q (%T) will always return false.\n", av.Kind(), a)
+		helpers.DistinctErrorLog.Printf("WARNING: calling IsSet with unsupported type %q (%T) will always return false.\n", av.Kind(), a)
 	}
 
 	return false, nil
@@ -375,8 +397,8 @@ func (ns *Namespace) Last(limit interface{}, seq interface{}) (interface{}, erro
 		return nil, err
 	}
 
-	if limitv < 1 {
-		return nil, errors.New("can't return negative/empty count of items from sequence")
+	if limitv < 0 {
+		return nil, errors.New("sequence length must be non-negative")
 	}
 
 	seqv := reflect.ValueOf(seq)
@@ -402,16 +424,65 @@ func (ns *Namespace) Last(limit interface{}, seq interface{}) (interface{}, erro
 // Querify encodes the given parameters in URL-encoded form ("bar=baz&foo=quux") sorted by key.
 func (ns *Namespace) Querify(params ...interface{}) (string, error) {
 	qs := url.Values{}
-	vals, err := ns.Dictionary(params...)
-	if err != nil {
-		return "", errors.New("querify keys must be strings")
+
+	if len(params) == 1 {
+		switch v := params[0].(type) {
+		case []string:
+			if len(v)%2 != 0 {
+				return "", errors.New("invalid query")
+			}
+
+			for i := 0; i < len(v); i += 2 {
+				qs.Add(v[i], v[i+1])
+			}
+
+			return qs.Encode(), nil
+
+		case []interface{}:
+			params = v
+
+		default:
+			return "", errors.New("query keys must be strings")
+		}
 	}
 
-	for name, value := range vals {
-		qs.Add(name, fmt.Sprintf("%v", value))
+	if len(params)%2 != 0 {
+		return "", errors.New("invalid query")
+	}
+
+	for i := 0; i < len(params); i += 2 {
+		switch v := params[i].(type) {
+		case string:
+			qs.Add(v, fmt.Sprintf("%v", params[i+1]))
+		default:
+			return "", errors.New("query keys must be strings")
+		}
 	}
 
 	return qs.Encode(), nil
+}
+
+// Reverse creates a copy of slice and reverses it.
+func (ns *Namespace) Reverse(slice interface{}) (interface{}, error) {
+	if slice == nil {
+		return nil, nil
+	}
+	v := reflect.ValueOf(slice)
+
+	switch v.Kind() {
+	case reflect.Slice:
+	default:
+		return nil, errors.New("argument must be a slice")
+	}
+
+	sliceCopy := reflect.MakeSlice(v.Type(), v.Len(), v.Len())
+
+	for i := v.Len() - 1; i >= 0; i-- {
+		element := sliceCopy.Index(i)
+		element.Set(v.Index(v.Len() - 1 - i))
+	}
+
+	return sliceCopy.Interface(), nil
 }
 
 // Seq creates a sequence of integers.  It's named and used as GNU's seq.
@@ -432,9 +503,9 @@ func (ns *Namespace) Seq(args ...interface{}) ([]int, error) {
 		return nil, errors.New("invalid arguments to Seq")
 	}
 
-	var inc = 1
+	inc := 1
 	var last int
-	var first = intArgs[0]
+	first := intArgs[0]
 
 	if len(intArgs) == 1 {
 		last = first
@@ -534,7 +605,6 @@ type intersector struct {
 }
 
 func (i *intersector) appendIfNotSeen(v reflect.Value) {
-
 	vi := v.Interface()
 	if !i.seen[vi] {
 		i.r = reflect.Append(i.r, v)
@@ -651,40 +721,38 @@ func (ns *Namespace) Union(l1, l2 interface{}) (interface{}, error) {
 
 // Uniq takes in a slice or array and returns a slice with subsequent
 // duplicate elements removed.
-func (ns *Namespace) Uniq(l interface{}) (interface{}, error) {
-	if l == nil {
+func (ns *Namespace) Uniq(seq interface{}) (interface{}, error) {
+	if seq == nil {
 		return make([]interface{}, 0), nil
 	}
 
-	lv := reflect.ValueOf(l)
-	lv, isNil := indirect(lv)
-	if isNil {
-		return nil, errors.New("invalid nil argument to Uniq")
-	}
+	v := reflect.ValueOf(seq)
+	var slice reflect.Value
 
-	var ret reflect.Value
-
-	switch lv.Kind() {
+	switch v.Kind() {
 	case reflect.Slice:
-		ret = reflect.MakeSlice(lv.Type(), 0, 0)
+		slice = reflect.MakeSlice(v.Type(), 0, 0)
+
 	case reflect.Array:
-		ret = reflect.MakeSlice(reflect.SliceOf(lv.Type().Elem()), 0, 0)
+		slice = reflect.MakeSlice(reflect.SliceOf(v.Type().Elem()), 0, 0)
 	default:
-		return nil, errors.New("Can't use Uniq on " + reflect.ValueOf(lv).Type().String())
+		return nil, errors.Errorf("type %T not supported", seq)
 	}
 
-	for i := 0; i != lv.Len(); i++ {
-		lvv := lv.Index(i)
-		lvv, isNil := indirect(lvv)
-		if isNil {
-			continue
-		}
+	seen := make(map[interface{}]bool)
 
-		if !ns.In(ret.Interface(), lvv.Interface()) {
-			ret = reflect.Append(ret, lvv)
+	for i := 0; i < v.Len(); i++ {
+		ev, _ := indirectInterface(v.Index(i))
+
+		key := normalize(ev)
+
+		if _, found := seen[key]; !found {
+			slice = reflect.Append(slice, ev)
+			seen[key] = true
 		}
 	}
-	return ret.Interface(), nil
+
+	return slice.Interface(), nil
 }
 
 // KeyVals creates a key and values wrapper.

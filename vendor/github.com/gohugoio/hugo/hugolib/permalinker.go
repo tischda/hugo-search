@@ -1,4 +1,4 @@
-// Copyright 2017-present The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,10 +13,7 @@
 
 package hugolib
 
-var (
-	_ Permalinker = (*Page)(nil)
-	_ Permalinker = (*OutputFormat)(nil)
-)
+var _ Permalinker = (*pageState)(nil)
 
 // Permalinker provides permalinks of both the relative and absolute kind.
 type Permalinker interface {

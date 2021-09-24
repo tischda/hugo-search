@@ -1,4 +1,4 @@
-// Copyright 2017-present The Hugo Authors. All rights reserved.
+// Copyright 2021 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,14 +14,17 @@
 package source
 
 import (
-	"fmt"
-	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/spf13/afero"
+	"github.com/gohugoio/hugo/common/paths"
+
+	"github.com/gohugoio/hugo/hugofs/files"
+
+	"github.com/pkg/errors"
+
+	"github.com/gohugoio/hugo/common/hugio"
 
 	"github.com/gohugoio/hugo/hugofs"
 
@@ -30,19 +33,38 @@ import (
 
 // fileInfo implements the File interface.
 var (
-	_ File         = (*FileInfo)(nil)
-	_ ReadableFile = (*FileInfo)(nil)
+	_ File = (*FileInfo)(nil)
 )
 
 // File represents a source file.
+// This is a temporary construct until we resolve page.Page conflicts.
+// TODO(bep) remove this construct once we have resolved page deprecations
 type File interface {
+	fileOverlap
+	FileWithoutOverlap
+}
 
-	// Filename gets the full path and filename to the file.
-	Filename() string
-
+// Temporary to solve duplicate/deprecated names in page.Page
+type fileOverlap interface {
 	// Path gets the relative path including file name and extension.
 	// The directory is relative to the content root.
 	Path() string
+
+	// Section is first directory below the content root.
+	// For page bundles in root, the Section will be empty.
+	Section() string
+
+	// Lang is the language code for this page. It will be the
+	// same as the site's language code.
+	Lang() string
+
+	IsZero() bool
+}
+
+type FileWithoutOverlap interface {
+
+	// Filename gets the full path and filename to the file.
+	Filename() string
 
 	// Dir gets the name of the directory that contains this file.
 	// The directory is relative to the content root.
@@ -50,18 +72,12 @@ type File interface {
 
 	// Extension gets the file extension, i.e "myblogpost.md" will return "md".
 	Extension() string
+
 	// Ext is an alias for Extension.
 	Ext() string // Hmm... Deprecate Extension
 
-	// Lang for this page, if `Multilingual` is enabled on your site.
-	Lang() string
-
 	// LogicalName is filename and extension of the file.
 	LogicalName() string
-
-	// Section is first directory below the content root.
-	// For page bundles in root, the Section will be empty.
-	Section() string
 
 	// BaseFileName is a filename without extension.
 	BaseFileName() string
@@ -78,15 +94,7 @@ type File interface {
 	// Hugo content files being one of them, considered to be unique.
 	UniqueID() string
 
-	FileInfo() os.FileInfo
-
-	String() string
-}
-
-// A ReadableFile is a File that is readable.
-type ReadableFile interface {
-	File
-	Open() (io.ReadCloser, error)
+	FileInfo() hugofs.FileMetaInfo
 }
 
 // FileInfo describes a source file.
@@ -97,7 +105,7 @@ type FileInfo struct {
 
 	sp *SourceSpec
 
-	fi os.FileInfo
+	fi hugofs.FileMetaInfo
 
 	// Derived from filename
 	ext  string // Extension without any "."
@@ -146,7 +154,7 @@ func (fi *FileInfo) LogicalName() string { return fi.name }
 func (fi *FileInfo) BaseFileName() string { return fi.baseName }
 
 // TranslationBaseName returns a file's translation base name without the
-// language segement (ie. "page").
+// language segment (ie. "page").
 func (fi *FileInfo) TranslationBaseName() string { return fi.translationBaseName }
 
 // ContentBaseName is a either TranslationBaseName or name of containing folder
@@ -169,14 +177,19 @@ func (fi *FileInfo) UniqueID() string {
 }
 
 // FileInfo returns a file's underlying os.FileInfo.
-func (fi *FileInfo) FileInfo() os.FileInfo { return fi.fi }
+func (fi *FileInfo) FileInfo() hugofs.FileMetaInfo { return fi.fi }
 
 func (fi *FileInfo) String() string { return fi.BaseFileName() }
 
 // Open implements ReadableFile.
-func (fi *FileInfo) Open() (io.ReadCloser, error) {
-	f, err := fi.sp.SourceFs.Open(fi.Filename())
+func (fi *FileInfo) Open() (hugio.ReadSeekCloser, error) {
+	f, err := fi.fi.Meta().Open()
+
 	return f, err
+}
+
+func (fi *FileInfo) IsZero() bool {
+	return fi == nil
 }
 
 // We create a lot of these FileInfo objects, but there are parts of it used only
@@ -201,45 +214,61 @@ func (fi *FileInfo) init() {
 	})
 }
 
-// NewFileInfo returns a new FileInfo structure.
-func (sp *SourceSpec) NewFileInfo(baseDir, filename string, isLeafBundle bool, fi os.FileInfo) *FileInfo {
+// NewTestFile creates a partially filled File used in unit tests.
+// TODO(bep) improve this package
+func NewTestFile(filename string) *FileInfo {
+	base := filepath.Base(filepath.Dir(filename))
+	return &FileInfo{
+		filename:            filename,
+		translationBaseName: base,
+	}
+}
 
-	var lang, translationBaseName, relPath string
-
-	if fp, ok := fi.(hugofs.FilePather); ok {
-		filename = fp.Filename()
-		baseDir = fp.BaseDir()
-		relPath = fp.Path()
+func (sp *SourceSpec) NewFileInfoFrom(path, filename string) (*FileInfo, error) {
+	meta := &hugofs.FileMeta{
+		Filename: filename,
+		Path:     path,
 	}
 
-	if fl, ok := fi.(hugofs.LanguageAnnouncer); ok {
-		lang = fl.Lang()
-		translationBaseName = fl.TranslationBaseName()
+	return sp.NewFileInfo(hugofs.NewFileMetaInfo(nil, meta))
+}
+
+func (sp *SourceSpec) NewFileInfo(fi hugofs.FileMetaInfo) (*FileInfo, error) {
+	m := fi.Meta()
+
+	filename := m.Filename
+	relPath := m.Path
+	isLeafBundle := m.Classifier == files.ContentClassLeaf
+
+	if relPath == "" {
+		return nil, errors.Errorf("no Path provided by %v (%T)", m, m.Fs)
 	}
 
-	dir, name := filepath.Split(filename)
+	if filename == "" {
+		return nil, errors.Errorf("no Filename provided by %v (%T)", m, m.Fs)
+	}
+
+	relDir := filepath.Dir(relPath)
+	if relDir == "." {
+		relDir = ""
+	}
+	if !strings.HasSuffix(relDir, helpers.FilePathSeparator) {
+		relDir = relDir + helpers.FilePathSeparator
+	}
+
+	lang := m.Lang
+	translationBaseName := m.TranslationBaseName
+
+	dir, name := filepath.Split(relPath)
 	if !strings.HasSuffix(dir, helpers.FilePathSeparator) {
 		dir = dir + helpers.FilePathSeparator
 	}
 
-	baseDir = strings.TrimSuffix(baseDir, helpers.FilePathSeparator)
-
-	relDir := ""
-	if dir != baseDir {
-		relDir = strings.TrimPrefix(dir, baseDir)
-	}
-
-	relDir = strings.TrimPrefix(relDir, helpers.FilePathSeparator)
-
-	if relPath == "" {
-		relPath = filepath.Join(relDir, name)
-	}
-
 	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))
-	baseName := helpers.Filename(name)
+	baseName := paths.Filename(name)
 
 	if translationBaseName == "" {
-		// This is usyally provided by the filesystem. But this FileInfo is also
+		// This is usually provided by the filesystem. But this FileInfo is also
 		// created in a standalone context when doing "hugo new". This is
 		// an approximate implementation, which is "good enough" in that case.
 		fileLangExt := filepath.Ext(baseName)
@@ -253,35 +282,13 @@ func (sp *SourceSpec) NewFileInfo(baseDir, filename string, isLeafBundle bool, f
 		lang:                lang,
 		ext:                 ext,
 		dir:                 dir,
-		relDir:              relDir,
-		relPath:             relPath,
+		relDir:              relDir,  // Dir()
+		relPath:             relPath, // Path()
 		name:                name,
-		baseName:            baseName,
+		baseName:            baseName, // BaseFileName()
 		translationBaseName: translationBaseName,
 		isLeafBundle:        isLeafBundle,
 	}
 
-	return f
-
-}
-
-func printFs(fs afero.Fs, path string, w io.Writer) {
-	if fs == nil {
-		return
-	}
-	afero.Walk(fs, path, func(path string, info os.FileInfo, err error) error {
-
-		if info != nil && !info.IsDir() {
-
-			s := path
-			if lang, ok := info.(hugofs.LanguageAnnouncer); ok {
-				s = s + "\t" + lang.Lang()
-			}
-			if fp, ok := info.(hugofs.FilePather); ok {
-				s = s + "\t" + fp.Filename()
-			}
-			fmt.Fprintln(w, "    ", s)
-		}
-		return nil
-	})
+	return f, nil
 }

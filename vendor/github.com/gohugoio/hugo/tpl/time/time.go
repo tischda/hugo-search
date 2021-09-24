@@ -16,28 +16,47 @@ package time
 
 import (
 	"fmt"
+	"time"
 	_time "time"
+
+	"github.com/gohugoio/hugo/common/htime"
+
+	"github.com/gohugoio/locales"
 
 	"github.com/spf13/cast"
 )
 
 // New returns a new instance of the time-namespaced template functions.
-func New() *Namespace {
-	return &Namespace{}
+func New(translator locales.Translator, location *time.Location) *Namespace {
+	return &Namespace{
+		timeFormatter: htime.NewTimeFormatter(translator),
+		location:      location,
+	}
 }
 
 // Namespace provides template functions for the "time" namespace.
-type Namespace struct{}
+type Namespace struct {
+	timeFormatter htime.TimeFormatter
+	location      *time.Location
+}
 
 // AsTime converts the textual representation of the datetime string into
 // a time.Time interface.
-func (ns *Namespace) AsTime(v interface{}) (interface{}, error) {
-	t, err := cast.ToTimeE(v)
-	if err != nil {
-		return nil, err
+func (ns *Namespace) AsTime(v interface{}, args ...interface{}) (interface{}, error) {
+	loc := ns.location
+	if len(args) > 0 {
+		locStr, err := cast.ToStringE(args[0])
+		if err != nil {
+			return nil, err
+		}
+		loc, err = _time.LoadLocation(locStr)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	return t, nil
+	return htime.ToTimeInDefaultLocationE(v, loc)
+
 }
 
 // Format converts the textual representation of the datetime string into
@@ -49,7 +68,7 @@ func (ns *Namespace) Format(layout string, v interface{}) (string, error) {
 		return "", err
 	}
 
-	return t.Format(layout), nil
+	return ns.timeFormatter.Format(t, layout), nil
 }
 
 // Now returns the current local time.

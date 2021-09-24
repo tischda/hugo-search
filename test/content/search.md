@@ -5,4 +5,4 @@ title = "Search Results"
 type = "search"
 +++
 
-<!-- intentionally left blank. Do not remove this file. -->
+<!-- Page intentionally left blank. Do not remove this file. -->

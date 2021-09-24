@@ -45,6 +45,7 @@ type IndexSnapshotTermFieldReader struct {
 	includeTermVectors bool
 	currPosting        segment.Posting
 	currID             index.IndexInternalID
+	recycle            bool
 }
 
 func (i *IndexSnapshotTermFieldReader) Size() int {
@@ -74,7 +75,7 @@ func (i *IndexSnapshotTermFieldReader) Next(preAlloced *index.TermFieldDoc) (*in
 		rv = &index.TermFieldDoc{}
 	}
 	// find the next hit
-	for i.segmentOffset < len(i.postings) {
+	for i.segmentOffset < len(i.iterators) {
 		next, err := i.iterators[i.segmentOffset].Next()
 		if err != nil {
 			return nil, err
@@ -133,6 +134,8 @@ func (i *IndexSnapshotTermFieldReader) Advance(ID index.IndexInternalID, preAllo
 		if err != nil {
 			return nil, err
 		}
+		// close the current term field reader before replacing it with a new one
+		_ = i.Close()
 		*i = *(i2.(*IndexSnapshotTermFieldReader))
 	}
 	num, err := docInternalToNumber(ID)

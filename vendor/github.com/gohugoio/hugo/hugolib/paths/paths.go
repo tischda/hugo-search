@@ -20,6 +20,7 @@ import (
 
 	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/langs"
+	"github.com/gohugoio/hugo/modules"
 	"github.com/pkg/errors"
 
 	"github.com/gohugoio/hugo/hugofs"
@@ -37,9 +38,8 @@ type Paths struct {
 	BasePath string
 
 	// Directories
-	// TODO(bep) when we have trimmed down mos of the dirs usage outside of this package, make
+	// TODO(bep) when we have trimmed down most of the dirs usage outside of this package, make
 	// these into an interface.
-	ContentDir string
 	ThemesDir  string
 	WorkingDir string
 
@@ -62,8 +62,9 @@ type Paths struct {
 	UglyURLs           bool
 	CanonifyURLs       bool
 
-	Language  *langs.Language
-	Languages langs.Languages
+	Language              *langs.Language
+	Languages             langs.Languages
+	LanguagesDefaultFirst langs.Languages
 
 	// The PathSpec looks up its config settings in both the current language
 	// and then in the global Viper config.
@@ -74,14 +75,13 @@ type Paths struct {
 	DefaultContentLanguage         string
 	multilingual                   bool
 
-	themes    []string
-	AllThemes []ThemeConfig
+	AllModules    modules.Modules
+	ModulesClient *modules.Client
 }
 
 func New(fs *hugofs.Fs, cfg config.Provider) (*Paths, error) {
 	baseURLstr := cfg.GetString("baseURL")
 	baseURL, err := newBaseURLFromString(baseURLstr)
-
 	if err != nil {
 		return nil, errors.Wrapf(err, "Failed to create baseURL from %q:", baseURLstr)
 	}
@@ -91,12 +91,6 @@ func New(fs *hugofs.Fs, cfg config.Provider) (*Paths, error) {
 	resourceDir := filepath.Clean(cfg.GetString("resourceDir"))
 	publishDir := filepath.Clean(cfg.GetString("publishDir"))
 
-	if contentDir == "" {
-		return nil, fmt.Errorf("contentDir not set")
-	}
-	if resourceDir == "" {
-		return nil, fmt.Errorf("resourceDir not set")
-	}
 	if publishDir == "" {
 		return nil, fmt.Errorf("publishDir not set")
 	}
@@ -104,18 +98,24 @@ func New(fs *hugofs.Fs, cfg config.Provider) (*Paths, error) {
 	defaultContentLanguage := cfg.GetString("defaultContentLanguage")
 
 	var (
-		language  *langs.Language
-		languages langs.Languages
+		language              *langs.Language
+		languages             langs.Languages
+		languagesDefaultFirst langs.Languages
 	)
 
 	if l, ok := cfg.(*langs.Language); ok {
 		language = l
-
 	}
 
 	if l, ok := cfg.Get("languagesSorted").(langs.Languages); ok {
 		languages = l
 	}
+
+	if l, ok := cfg.Get("languagesSortedDefaultFirst").(langs.Languages); ok {
+		languagesDefaultFirst = l
+	}
+
+	//
 
 	if len(languages) == 0 {
 		// We have some old tests that does not test the entire chain, hence
@@ -156,14 +156,11 @@ func New(fs *hugofs.Fs, cfg config.Provider) (*Paths, error) {
 		UglyURLs:           cfg.GetBool("uglyURLs"),
 		CanonifyURLs:       cfg.GetBool("canonifyURLs"),
 
-		ContentDir: contentDir,
 		ThemesDir:  cfg.GetString("themesDir"),
 		WorkingDir: workingDir,
 
 		AbsResourcesDir: absResourcesDir,
 		AbsPublishDir:   absPublishDir,
-
-		themes: config.GetStringSlicePreserveString(cfg, "theme"),
 
 		multilingual:                   cfg.GetBool("multilingual"),
 		defaultContentLanguageInSubdir: cfg.GetBool("defaultContentLanguageInSubdir"),
@@ -171,18 +168,18 @@ func New(fs *hugofs.Fs, cfg config.Provider) (*Paths, error) {
 
 		Language:                 language,
 		Languages:                languages,
+		LanguagesDefaultFirst:    languagesDefaultFirst,
 		MultihostTargetBasePaths: multihostTargetBasePaths,
 
 		PaginatePath: cfg.GetString("paginatePath"),
 	}
 
-	if !cfg.IsSet("theme") && cfg.IsSet("allThemes") {
-		p.AllThemes = cfg.Get("allThemes").([]ThemeConfig)
-	} else {
-		p.AllThemes, err = collectThemeNames(p)
-		if err != nil {
-			return nil, err
-		}
+	if cfg.IsSet("allModules") {
+		p.AllModules = cfg.Get("allModules").(modules.Modules)
+	}
+
+	if cfg.IsSet("modulesClient") {
+		p.ModulesClient = cfg.Get("modulesClient").(*modules.Client)
 	}
 
 	// TODO(bep) remove this, eventually
@@ -205,15 +202,6 @@ func (p *Paths) Lang() string {
 		return ""
 	}
 	return p.Language.Lang
-}
-
-// ThemeSet checks whether a theme is in use or not.
-func (p *Paths) ThemeSet() bool {
-	return len(p.themes) > 0
-}
-
-func (p *Paths) Themes() []string {
-	return p.themes
 }
 
 func (p *Paths) GetTargetLanguageBasePath() string {
@@ -269,7 +257,18 @@ func (p *Paths) AbsPathify(inPath string) string {
 	return AbsPathify(p.WorkingDir, inPath)
 }
 
-// AbsPathify creates an absolute path if given a working dir and arelative path.
+// RelPathify trims any WorkingDir prefix from the given filename. If
+// the filename is not considered to be absolute, the path is just cleaned.
+func (p *Paths) RelPathify(filename string) string {
+	filename = filepath.Clean(filename)
+	if !filepath.IsAbs(filename) {
+		return filename
+	}
+
+	return strings.TrimPrefix(strings.TrimPrefix(filename, p.WorkingDir), FilePathSeparator)
+}
+
+// AbsPathify creates an absolute path if given a working dir and a relative path.
 // If already absolute, the path is just cleaned.
 func AbsPathify(workingDir, inPath string) string {
 	if filepath.IsAbs(inPath) {

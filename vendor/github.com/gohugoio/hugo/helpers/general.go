@@ -1,4 +1,4 @@
-// Copyright 2015 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,31 +22,31 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/gohugoio/hugo/common/hugo"
+	"github.com/gohugoio/hugo/common/loggers"
+
+	"github.com/mitchellh/hashstructure"
 
 	"github.com/gohugoio/hugo/hugofs"
+
+	"github.com/gohugoio/hugo/common/hugo"
 
 	"github.com/spf13/afero"
 
 	"github.com/jdkato/prose/transform"
 
 	bp "github.com/gohugoio/hugo/bufferpool"
-	jww "github.com/spf13/jwalterweatherman"
 	"github.com/spf13/pflag"
 )
 
 // FilePathSeparator as defined by os.Separator.
 const FilePathSeparator = string(filepath.Separator)
-
-// Strips carriage returns from third-party / external processes (useful for Windows)
-func normalizeExternalHelperLineFeeds(content []byte) []byte {
-	return bytes.Replace(content, []byte("\r"), []byte(""), -1)
-}
 
 // FindAvailablePort returns an available and valid TCP port.
 func FindAvailablePort() (*net.TCPAddr, error) {
@@ -57,7 +57,7 @@ func FindAvailablePort() (*net.TCPAddr, error) {
 		if a, ok := addr.(*net.TCPAddr); ok {
 			return a, nil
 		}
-		return nil, fmt.Errorf("Unable to obtain a valid tcp port. %v", addr)
+		return nil, fmt.Errorf("unable to obtain a valid tcp port: %v", addr)
 	}
 	return nil, err
 }
@@ -73,28 +73,6 @@ func InStringArray(arr []string, el string) bool {
 	return false
 }
 
-// GuessType attempts to guess the type of file from a given string.
-func GuessType(in string) string {
-	switch strings.ToLower(in) {
-	case "md", "markdown", "mdown":
-		return "markdown"
-	case "asciidoc", "adoc", "ad":
-		return "asciidoc"
-	case "mmark":
-		return "mmark"
-	case "rst":
-		return "rst"
-	case "pandoc", "pdc":
-		return "pandoc"
-	case "html", "htm":
-		return "html"
-	case "org":
-		return "org"
-	}
-
-	return "unknown"
-}
-
 // FirstUpper returns a string with the first character as upper case.
 func FirstUpper(s string) string {
 	if s == "" {
@@ -106,7 +84,7 @@ func FirstUpper(s string) string {
 
 // UniqueStrings returns a new slice with any duplicates removed.
 func UniqueStrings(s []string) []string {
-	var unique []string
+	unique := make([]string, 0, len(s))
 	set := map[string]interface{}{}
 	for _, val := range s {
 		if _, ok := set[val]; !ok {
@@ -115,6 +93,40 @@ func UniqueStrings(s []string) []string {
 		}
 	}
 	return unique
+}
+
+// UniqueStringsReuse returns a slice with any duplicates removed.
+// It will modify the input slice.
+func UniqueStringsReuse(s []string) []string {
+	set := map[string]interface{}{}
+	result := s[:0]
+	for _, val := range s {
+		if _, ok := set[val]; !ok {
+			result = append(result, val)
+			set[val] = val
+		}
+	}
+	return result
+}
+
+// UniqueStringsReuse returns a sorted slice with any duplicates removed.
+// It will modify the input slice.
+func UniqueStringsSorted(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	ss := sort.StringSlice(s)
+	ss.Sort()
+	i := 0
+	for j := 1; j < len(s); j++ {
+		if !ss.Less(i, j) {
+			continue
+		}
+		i++
+		s[i] = s[j]
+	}
+
+	return s[:i+1]
 }
 
 // ReaderToBytes takes an io.Reader argument, reads from it
@@ -128,7 +140,7 @@ func ReaderToBytes(lines io.Reader) []byte {
 
 	b.ReadFrom(lines)
 
-	bc := make([]byte, b.Len(), b.Len())
+	bc := make([]byte, b.Len())
 	copy(bc, b.Bytes())
 	return bc
 }
@@ -146,7 +158,6 @@ func ReaderToString(lines io.Reader) string {
 
 // ReaderContains reports whether subslice is within r.
 func ReaderContains(r io.Reader, subslice []byte) bool {
-
 	if r == nil || len(subslice) == 0 {
 		return false
 	}
@@ -243,9 +254,16 @@ type LogPrinter interface {
 
 // DistinctLogger ignores duplicate log statements.
 type DistinctLogger struct {
+	loggers.Logger
 	sync.RWMutex
-	logger LogPrinter
-	m      map[string]bool
+	m map[string]bool
+}
+
+func (l *DistinctLogger) Reset() {
+	l.Lock()
+	defer l.Unlock()
+
+	l.m = make(map[string]bool)
 }
 
 // Println will log the string returned from fmt.Sprintln given the arguments,
@@ -253,52 +271,105 @@ type DistinctLogger struct {
 func (l *DistinctLogger) Println(v ...interface{}) {
 	// fmt.Sprint doesn't add space between string arguments
 	logStatement := strings.TrimSpace(fmt.Sprintln(v...))
-	l.print(logStatement)
+	l.printIfNotPrinted("println", logStatement, func() {
+		l.Logger.Println(logStatement)
+	})
 }
 
 // Printf will log the string returned from fmt.Sprintf given the arguments,
 // but not if it has been logged before.
-// Note: A newline is appended.
 func (l *DistinctLogger) Printf(format string, v ...interface{}) {
 	logStatement := fmt.Sprintf(format, v...)
-	l.print(logStatement)
+	l.printIfNotPrinted("printf", logStatement, func() {
+		l.Logger.Printf(format, v...)
+	})
 }
 
-func (l *DistinctLogger) print(logStatement string) {
+func (l *DistinctLogger) Debugf(format string, v ...interface{}) {
+	logStatement := fmt.Sprintf(format, v...)
+	l.printIfNotPrinted("debugf", logStatement, func() {
+		l.Logger.Debugf(format, v...)
+	})
+}
+
+func (l *DistinctLogger) Debugln(v ...interface{}) {
+	logStatement := fmt.Sprint(v...)
+	l.printIfNotPrinted("debugln", logStatement, func() {
+		l.Logger.Debugln(v...)
+	})
+}
+
+func (l *DistinctLogger) Infof(format string, v ...interface{}) {
+	logStatement := fmt.Sprintf(format, v...)
+	l.printIfNotPrinted("info", logStatement, func() {
+		l.Logger.Infof(format, v...)
+	})
+}
+
+func (l *DistinctLogger) Infoln(v ...interface{}) {
+	logStatement := fmt.Sprint(v...)
+	l.printIfNotPrinted("infoln", logStatement, func() {
+		l.Logger.Infoln(v...)
+	})
+}
+
+func (l *DistinctLogger) Warnf(format string, v ...interface{}) {
+	logStatement := fmt.Sprintf(format, v...)
+	l.printIfNotPrinted("warnf", logStatement, func() {
+		l.Logger.Warnf(format, v...)
+	})
+}
+func (l *DistinctLogger) Warnln(v ...interface{}) {
+	logStatement := fmt.Sprint(v...)
+	l.printIfNotPrinted("warnln", logStatement, func() {
+		l.Logger.Warnln(v...)
+	})
+}
+func (l *DistinctLogger) Errorf(format string, v ...interface{}) {
+	logStatement := fmt.Sprint(v...)
+	l.printIfNotPrinted("errorf", logStatement, func() {
+		l.Logger.Errorf(format, v...)
+	})
+}
+
+func (l *DistinctLogger) Errorln(v ...interface{}) {
+	logStatement := fmt.Sprint(v...)
+	l.printIfNotPrinted("errorln", logStatement, func() {
+		l.Logger.Errorln(v...)
+	})
+}
+
+func (l *DistinctLogger) hasPrinted(key string) bool {
 	l.RLock()
-	if l.m[logStatement] {
-		l.RUnlock()
+	defer l.RUnlock()
+	_, found := l.m[key]
+	return found
+}
+
+func (l *DistinctLogger) printIfNotPrinted(level, logStatement string, print func()) {
+	key := level + logStatement
+	if l.hasPrinted(key) {
 		return
 	}
-	l.RUnlock()
-
 	l.Lock()
-	if !l.m[logStatement] {
-		l.logger.Println(logStatement)
-		l.m[logStatement] = true
-	}
+	print()
+	l.m[key] = true
 	l.Unlock()
 }
 
 // NewDistinctErrorLogger creates a new DistinctLogger that logs ERRORs
-func NewDistinctErrorLogger() *DistinctLogger {
-	return &DistinctLogger{m: make(map[string]bool), logger: jww.ERROR}
+func NewDistinctErrorLogger() loggers.Logger {
+	return &DistinctLogger{m: make(map[string]bool), Logger: loggers.NewErrorLogger()}
 }
 
 // NewDistinctLogger creates a new DistinctLogger that logs to the provided logger.
-func NewDistinctLogger(logger LogPrinter) *DistinctLogger {
-	return &DistinctLogger{m: make(map[string]bool), logger: logger}
+func NewDistinctLogger(logger loggers.Logger) loggers.Logger {
+	return &DistinctLogger{m: make(map[string]bool), Logger: logger}
 }
 
 // NewDistinctWarnLogger creates a new DistinctLogger that logs WARNs
-func NewDistinctWarnLogger() *DistinctLogger {
-	return &DistinctLogger{m: make(map[string]bool), logger: jww.WARN}
-}
-
-// NewDistinctFeedbackLogger creates a new DistinctLogger that can be used
-// to give feedback to the user while not spamming with duplicates.
-func NewDistinctFeedbackLogger() *DistinctLogger {
-	return &DistinctLogger{m: make(map[string]bool), logger: jww.FEEDBACK}
+func NewDistinctWarnLogger() loggers.Logger {
+	return &DistinctLogger{m: make(map[string]bool), Logger: loggers.NewWarningLogger()}
 }
 
 var (
@@ -307,16 +378,13 @@ var (
 
 	// DistinctWarnLog can be used to avoid spamming the logs with warnings.
 	DistinctWarnLog = NewDistinctWarnLogger()
-
-	// DistinctFeedbackLog can be used to avoid spamming the logs with info messages.
-	DistinctFeedbackLog = NewDistinctFeedbackLogger()
 )
 
-// InitLoggers sets up the global distinct loggers.
+// InitLoggers resets the global distinct loggers.
 func InitLoggers() {
-	DistinctErrorLog = NewDistinctErrorLogger()
-	DistinctWarnLog = NewDistinctWarnLogger()
-	DistinctFeedbackLog = NewDistinctFeedbackLogger()
+	DistinctErrorLog.Reset()
+	DistinctWarnLog.Reset()
+
 }
 
 // Deprecated informs about a deprecation, but only once for a given set of arguments' values.
@@ -324,13 +392,11 @@ func InitLoggers() {
 // point at the next Hugo release.
 // The idea is two remove an item in two Hugo releases to give users and theme authors
 // plenty of time to fix their templates.
-func Deprecated(object, item, alternative string, err bool) {
+func Deprecated(item, alternative string, err bool) {
 	if err {
-		DistinctErrorLog.Printf("%s's %s is deprecated and will be removed in Hugo %s. %s", object, item, hugo.CurrentVersion.Next().ReleaseVersion(), alternative)
-
+		DistinctErrorLog.Errorf("%s is deprecated and will be removed in Hugo %s. %s", item, hugo.CurrentVersion.Next().ReleaseVersion(), alternative)
 	} else {
-		// Make sure the users see this while avoiding build breakage. This will not lead to an os.Exit(-1)
-		DistinctFeedbackLog.Printf("WARNING: %s's %s is deprecated and will be removed in a future release. %s", object, item, alternative)
+		DistinctWarnLog.Warnf("%s is deprecated and will be removed in a future release. %s", item, alternative)
 	}
 }
 
@@ -414,42 +480,10 @@ func NormalizeHugoFlags(f *pflag.FlagSet, name string) pflag.NormalizedName {
 	switch name {
 	case "baseUrl":
 		name = "baseURL"
-		break
 	case "uglyUrls":
 		name = "uglyURLs"
-		break
 	}
 	return pflag.NormalizedName(name)
-}
-
-// DiffStringSlices returns the difference between two string slices.
-// Useful in tests.
-// See:
-// http://stackoverflow.com/questions/19374219/how-to-find-the-difference-between-two-slices-of-strings-in-golang
-func DiffStringSlices(slice1 []string, slice2 []string) []string {
-	diffStr := []string{}
-	m := map[string]int{}
-
-	for _, s1Val := range slice1 {
-		m[s1Val] = 1
-	}
-	for _, s2Val := range slice2 {
-		m[s2Val] = m[s2Val] + 1
-	}
-
-	for mKey, mVal := range m {
-		if mVal == 1 {
-			diffStr = append(diffStr, mKey)
-		}
-	}
-
-	return diffStr
-}
-
-// DiffStrings splits the strings into fields and runs it into DiffStringSlices.
-// Useful for tests.
-func DiffStrings(s1, s2 string) []string {
-	return DiffStringSlices(strings.Fields(s1), strings.Fields(s2))
 }
 
 // PrintFs prints the given filesystem to the given writer starting from the given path.
@@ -458,17 +492,32 @@ func PrintFs(fs afero.Fs, path string, w io.Writer) {
 	if fs == nil {
 		return
 	}
+
 	afero.Walk(fs, path, func(path string, info os.FileInfo, err error) error {
-		if info != nil && !info.IsDir() {
-			s := path
-			if lang, ok := info.(hugofs.LanguageAnnouncer); ok {
-				s = s + "\tLANG: " + lang.Lang()
-			}
-			if fp, ok := info.(hugofs.FilePather); ok {
-				s = s + "\tRF: " + fp.Filename() + "\tBP: " + fp.BaseDir()
-			}
-			fmt.Fprintln(w, "    ", s)
+		var filename string
+		var meta interface{}
+		if fim, ok := info.(hugofs.FileMetaInfo); ok {
+			filename = fim.Meta().Filename
+			meta = fim.Meta()
 		}
+		fmt.Fprintf(w, "    %q %q\t\t%v\n", path, filename, meta)
 		return nil
 	})
+}
+
+// HashString returns a hash from the given elements.
+// It will panic if the hash cannot be calculated.
+func HashString(elements ...interface{}) string {
+	var o interface{}
+	if len(elements) == 1 {
+		o = elements[0]
+	} else {
+		o = elements
+	}
+
+	hash, err := hashstructure.Hash(o, nil)
+	if err != nil {
+		panic(err)
+	}
+	return strconv.FormatUint(hash, 10)
 }

@@ -1,4 +1,4 @@
-// Copyright 2017 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,9 +15,10 @@ package hugolib
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"html/template"
 	"io"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -26,88 +27,66 @@ import (
 
 	"github.com/gohugoio/hugo/output"
 	"github.com/gohugoio/hugo/publisher"
+	"github.com/gohugoio/hugo/resources/page"
 	"github.com/gohugoio/hugo/tpl"
-
-	"github.com/gohugoio/hugo/helpers"
 )
-
-const (
-	alias      = "<!DOCTYPE html><html><head><title>{{ .Permalink }}</title><link rel=\"canonical\" href=\"{{ .Permalink }}\"/><meta name=\"robots\" content=\"noindex\"><meta charset=\"utf-8\" /><meta http-equiv=\"refresh\" content=\"0; url={{ .Permalink }}\" /></head></html>"
-	aliasXHtml = "<!DOCTYPE html><html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title>{{ .Permalink }}</title><link rel=\"canonical\" href=\"{{ .Permalink }}\"/><meta name=\"robots\" content=\"noindex\"><meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\" /><meta http-equiv=\"refresh\" content=\"0; url={{ .Permalink }}\" /></head></html>"
-)
-
-var defaultAliasTemplates *template.Template
-
-func init() {
-	//TODO(bep) consolidate
-	defaultAliasTemplates = template.New("")
-	template.Must(defaultAliasTemplates.New("alias").Parse(alias))
-	template.Must(defaultAliasTemplates.New("alias-xhtml").Parse(aliasXHtml))
-}
 
 type aliasHandler struct {
-	t         tpl.TemplateFinder
-	log       *loggers.Logger
+	t         tpl.TemplateHandler
+	log       loggers.Logger
 	allowRoot bool
 }
 
-func newAliasHandler(t tpl.TemplateFinder, l *loggers.Logger, allowRoot bool) aliasHandler {
+func newAliasHandler(t tpl.TemplateHandler, l loggers.Logger, allowRoot bool) aliasHandler {
 	return aliasHandler{t, l, allowRoot}
 }
 
-func (a aliasHandler) renderAlias(isXHTML bool, permalink string, page *Page) (io.Reader, error) {
-	t := "alias"
-	if isXHTML {
-		t = "alias-xhtml"
-	}
+type aliasPage struct {
+	Permalink string
+	page.Page
+}
 
+func (a aliasHandler) renderAlias(permalink string, p page.Page) (io.Reader, error) {
 	var templ tpl.Template
 	var found bool
 
-	if a.t != nil {
-		templ, found = a.t.Lookup("alias.html")
-	}
-
+	templ, found = a.t.Lookup("alias.html")
 	if !found {
-		def := defaultAliasTemplates.Lookup(t)
-		if def != nil {
-			templ = &tpl.TemplateAdapter{Template: def}
+		// TODO(bep) consolidate
+		templ, found = a.t.Lookup("_internal/alias.html")
+		if !found {
+			return nil, errors.New("no alias template found")
 		}
-
 	}
-	data := struct {
-		Permalink string
-		Page      *Page
-	}{
+
+	data := aliasPage{
 		permalink,
-		page,
+		p,
 	}
 
 	buffer := new(bytes.Buffer)
-	err := templ.Execute(buffer, data)
+	err := a.t.Execute(templ, buffer, data)
 	if err != nil {
 		return nil, err
 	}
 	return buffer, nil
 }
 
-func (s *Site) writeDestAlias(path, permalink string, outputFormat output.Format, p *Page) (err error) {
+func (s *Site) writeDestAlias(path, permalink string, outputFormat output.Format, p page.Page) (err error) {
 	return s.publishDestAlias(false, path, permalink, outputFormat, p)
 }
 
-func (s *Site) publishDestAlias(allowRoot bool, path, permalink string, outputFormat output.Format, p *Page) (err error) {
-	handler := newAliasHandler(s.Tmpl, s.Log, allowRoot)
+func (s *Site) publishDestAlias(allowRoot bool, path, permalink string, outputFormat output.Format, p page.Page) (err error) {
+	handler := newAliasHandler(s.Tmpl(), s.Log, allowRoot)
 
-	isXHTML := strings.HasSuffix(path, ".xhtml")
-
-	s.Log.DEBUG.Println("creating alias:", path, "redirecting to", permalink)
+	s.Log.Debugln("creating alias:", path, "redirecting to", permalink)
 
 	targetPath, err := handler.targetPathAlias(path)
 	if err != nil {
 		return err
 	}
 
-	aliasContent, err := handler.renderAlias(isXHTML, permalink, p)
+	aliasContent, err := handler.renderAlias(permalink, p)
 	if err != nil {
 		return err
 	}
@@ -119,26 +98,30 @@ func (s *Site) publishDestAlias(allowRoot bool, path, permalink string, outputFo
 		OutputFormat: outputFormat,
 	}
 
-	return s.publisher.Publish(pd)
+	if s.Info.relativeURLs || s.Info.canonifyURLs {
+		pd.AbsURLPath = s.absURLPath(targetPath)
+	}
 
+	return s.publisher.Publish(pd)
 }
 
 func (a aliasHandler) targetPathAlias(src string) (string, error) {
 	originalAlias := src
 	if len(src) <= 0 {
-		return "", fmt.Errorf("Alias \"\" is an empty string")
+		return "", fmt.Errorf("alias \"\" is an empty string")
 	}
 
-	alias := filepath.Clean(src)
-	components := strings.Split(alias, helpers.FilePathSeparator)
+	alias := path.Clean(filepath.ToSlash(src))
 
-	if !a.allowRoot && alias == helpers.FilePathSeparator {
-		return "", fmt.Errorf("Alias \"%s\" resolves to website root directory", originalAlias)
+	if !a.allowRoot && alias == "/" {
+		return "", fmt.Errorf("alias \"%s\" resolves to website root directory", originalAlias)
 	}
+
+	components := strings.Split(alias, "/")
 
 	// Validate against directory traversal
 	if components[0] == ".." {
-		return "", fmt.Errorf("Alias \"%s\" traverses outside the website root directory", originalAlias)
+		return "", fmt.Errorf("alias \"%s\" traverses outside the website root directory", originalAlias)
 	}
 
 	// Handle Windows file and directory naming restrictions
@@ -169,25 +152,22 @@ func (a aliasHandler) targetPathAlias(src string) (string, error) {
 	if len(msgs) > 0 {
 		if runtime.GOOS == "windows" {
 			for _, m := range msgs {
-				a.log.ERROR.Println(m)
+				a.log.Errorln(m)
 			}
-			return "", fmt.Errorf("Cannot create \"%s\": Windows filename restriction", originalAlias)
+			return "", fmt.Errorf("cannot create \"%s\": Windows filename restriction", originalAlias)
 		}
 		for _, m := range msgs {
-			a.log.INFO.Println(m)
+			a.log.Infoln(m)
 		}
 	}
 
 	// Add the final touch
-	alias = strings.TrimPrefix(alias, helpers.FilePathSeparator)
-	if strings.HasSuffix(alias, helpers.FilePathSeparator) {
+	alias = strings.TrimPrefix(alias, "/")
+	if strings.HasSuffix(alias, "/") {
 		alias = alias + "index.html"
 	} else if !strings.HasSuffix(alias, ".html") {
-		alias = alias + helpers.FilePathSeparator + "index.html"
-	}
-	if originalAlias != alias {
-		a.log.INFO.Printf("Alias \"%s\" translated to \"%s\"\n", originalAlias, alias)
+		alias = alias + "/" + "index.html"
 	}
 
-	return alias, nil
+	return filepath.FromSlash(alias), nil
 }

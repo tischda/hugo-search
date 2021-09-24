@@ -22,11 +22,11 @@ const name = "compare"
 
 func init() {
 	f := func(d *deps.Deps) *internal.TemplateFuncsNamespace {
-		ctx := New()
+		ctx := New(false)
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) interface{} { return ctx },
+			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
 		}
 
 		ns.AddMethodMapping(ctx.Default,
@@ -79,7 +79,6 @@ func init() {
 		)
 
 		return ns
-
 	}
 
 	internal.AddTemplateFuncsNamespace(f)

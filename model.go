@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gohugoio/hugo/hugolib"
+	"github.com/gohugoio/hugo/resources/page"
 )
 
 // PageEntry maps the hugo internal page structure to a JSON structure
@@ -22,26 +22,26 @@ type PageEntry struct {
 	Author       string    `json:"author"`
 }
 
-func newIndexEntry(page *hugolib.Page) *PageEntry {
+func newIndexEntry(p page.Page) *PageEntry {
 	var author string
 
-	// BUG: page.Author() and page.Authors() return empty values
-	switch str := page.Params()["author"].(type) {
+	switch str := p.Params()["author"].(type) {
 	case string:
 		author = str
 	case []string:
 		author = strings.Join(str, ", ")
 	}
+
 	return &PageEntry{
-		Title:        page.Title(),
-		Type:         page.Type(),
-		Section:      page.Section(),
-		Content:      page.Plain(),
-		WordCount:    float64(page.WordCount()),
-		ReadingTime:  float64(page.ReadingTime()),
-		Keywords:     page.Keywords,
-		Date:         page.Date,
-		LastModified: page.Lastmod,
+		Title:        p.Title(),
+		Type:         p.Type(),
+		Section:      p.Section(),
+		Content:      p.Plain(),
+		WordCount:    float64(p.WordCount()),
+		ReadingTime:  float64(p.ReadingTime()),
+		Keywords:     p.Keywords(),
+		Date:         p.Date(),
+		LastModified: p.Lastmod(),
 		Author:       author,
 	}
 }

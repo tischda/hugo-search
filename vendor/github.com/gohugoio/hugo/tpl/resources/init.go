@@ -30,7 +30,7 @@ func init() {
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) interface{} { return ctx },
+			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
 		}
 
 		ns.AddMethodMapping(ctx.Get,
@@ -60,8 +60,12 @@ func init() {
 			[][2]string{},
 		)
 
-		return ns
+		ns.AddMethodMapping(ctx.Babel,
+			[]string{"babel"},
+			[][2]string{},
+		)
 
+		return ns
 	}
 
 	internal.AddTemplateFuncsNamespace(f)

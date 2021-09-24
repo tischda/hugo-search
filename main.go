@@ -18,8 +18,6 @@ func main() {
 		indexPath   = flag.String("indexPath", "indexes/search.bleve", "path of the bleve index")
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
-	// hugo imports the "testing" package so calling flag.PrintDefaults()
-	// would display a whole bunch of test.* flags
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "\nUsage: %s [OPTIONS]\n\nOPTIONS:\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  -addr <string>\thttp listen address (default \"%s\")\n"+
@@ -43,7 +41,7 @@ func main() {
 	startSearchServer(*bindAddr, *indexPath)
 }
 
-func checkFatal(e error) {
+func exitOnError(e error) {
 	if e != nil {
 		log.Fatalln(e)
 	}

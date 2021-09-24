@@ -37,25 +37,42 @@ type absurllexer struct {
 	quotes [][]byte
 }
 
-type stateFunc func(*absurllexer) stateFunc
-
 type prefix struct {
 	disabled bool
 	b        []byte
 	f        func(l *absurllexer)
+
+	nextPos int
+}
+
+func (p *prefix) find(bs []byte, start int) bool {
+	if p.disabled {
+		return false
+	}
+
+	if p.nextPos == -1 {
+		idx := bytes.Index(bs[start:], p.b)
+
+		if idx == -1 {
+			p.disabled = true
+			// Find the closest match
+			return false
+		}
+
+		p.nextPos = start + idx + len(p.b)
+	}
+
+	return true
 }
 
 func newPrefixState() []*prefix {
 	return []*prefix{
 		{b: []byte("src="), f: checkCandidateBase},
 		{b: []byte("href="), f: checkCandidateBase},
+		{b: []byte("url="), f: checkCandidateBase},
+		{b: []byte("action="), f: checkCandidateBase},
 		{b: []byte("srcset="), f: checkCandidateSrcset},
 	}
-}
-
-type absURLMatcher struct {
-	match []byte
-	quote []byte
 }
 
 func (l *absurllexer) emit() {
@@ -114,7 +131,6 @@ func (l *absurllexer) posAfterURL(q []byte) int {
 	return bytes.IndexFunc(l.content[l.pos:], func(r rune) bool {
 		return r == '>' || unicode.IsSpace(r)
 	})
-
 }
 
 // handle URLs in srcset.
@@ -171,7 +187,6 @@ func checkCandidateSrcset(l *absurllexer) {
 
 	l.pos += len(section)
 	l.start = l.pos
-
 }
 
 // main loop
@@ -185,35 +200,28 @@ func (l *absurllexer) replace() {
 			break
 		}
 
-		nextPos := -1
-
 		var match *prefix
 
 		for _, p := range prefixes {
-			if p.disabled {
+			if !p.find(l.content, l.pos) {
 				continue
 			}
-			idx := bytes.Index(l.content[l.pos:], p.b)
 
-			if idx == -1 {
-				p.disabled = true
-				// Find the closest match
-			} else if nextPos == -1 || idx < nextPos {
-				nextPos = idx
+			if match == nil || p.nextPos < match.nextPos {
 				match = p
 			}
 		}
 
-		if nextPos == -1 {
+		if match == nil {
 			// Done!
 			l.pos = contentLength
 			break
 		} else {
-			l.pos += nextPos + len(match.b)
+			l.pos = match.nextPos
+			match.nextPos = -1
 			match.f(l)
 		}
 	}
-
 	// Done!
 	if l.pos > l.start {
 		l.emit()
@@ -221,12 +229,12 @@ func (l *absurllexer) replace() {
 }
 
 func doReplace(path string, ct transform.FromTo, quotes [][]byte) {
-
 	lexer := &absurllexer{
 		content: ct.From().Bytes(),
 		w:       ct.To(),
 		path:    []byte(path),
-		quotes:  quotes}
+		quotes:  quotes,
+	}
 
 	lexer.replace()
 }
@@ -239,7 +247,8 @@ type absURLReplacer struct {
 func newAbsURLReplacer() *absURLReplacer {
 	return &absURLReplacer{
 		htmlQuotes: [][]byte{[]byte("\""), []byte("'")},
-		xmlQuotes:  [][]byte{[]byte("&#34;"), []byte("&#39;")}}
+		xmlQuotes:  [][]byte{[]byte("&#34;"), []byte("&#39;")},
+	}
 }
 
 func (au *absURLReplacer) replaceInHTML(path string, ct transform.FromTo) {

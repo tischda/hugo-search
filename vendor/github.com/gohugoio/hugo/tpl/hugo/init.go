@@ -11,7 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package site
+// Package hugo provides template functions for accessing the Site Hugo object.
+package hugo
 
 import (
 	"github.com/gohugoio/hugo/deps"
@@ -22,18 +23,16 @@ const name = "hugo"
 
 func init() {
 	f := func(d *deps.Deps) *internal.TemplateFuncsNamespace {
-
 		h := d.Site.Hugo()
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) interface{} { return h },
+			Context: func(args ...interface{}) (interface{}, error) { return h, nil },
 		}
 
 		// We just add the Hugo struct as the namespace here. No method mappings.
 
 		return ns
-
 	}
 
 	internal.AddTemplateFuncsNamespace(f)

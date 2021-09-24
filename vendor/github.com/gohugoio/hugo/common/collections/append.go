@@ -1,4 +1,4 @@
-// Copyright 2018 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -51,7 +51,6 @@ func Append(to interface{}, from ...interface{}) (interface{}, error) {
 				} else if !fromt.AssignableTo(tot) {
 					// Fall back to a []interface{} slice.
 					return appendToInterfaceSliceFromValues(tov, fromv)
-
 				}
 			}
 		}
@@ -65,6 +64,7 @@ func Append(to interface{}, from ...interface{}) (interface{}, error) {
 		fv := reflect.ValueOf(f)
 		if !fv.Type().AssignableTo(tot) {
 			// Fall back to a []interface{} slice.
+			tov, _ := indirect(reflect.ValueOf(to))
 			return appendToInterfaceSlice(tov, from...)
 		}
 		tov = reflect.Append(tov, fv)
@@ -92,9 +92,7 @@ func appendToInterfaceSlice(tov reflect.Value, from ...interface{}) ([]interface
 		tos = append(tos, tov.Index(i).Interface())
 	}
 
-	for _, v := range from {
-		tos = append(tos, v)
-	}
+	tos = append(tos, from...)
 
 	return tos, nil
 }

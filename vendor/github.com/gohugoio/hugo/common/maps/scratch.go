@@ -1,4 +1,4 @@
-// Copyright 2018 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,12 +28,29 @@ type Scratch struct {
 	mu     sync.RWMutex
 }
 
+// Scratcher provides a scratching service.
+type Scratcher interface {
+	Scratch() *Scratch
+}
+
+type scratcher struct {
+	s *Scratch
+}
+
+func (s scratcher) Scratch() *Scratch {
+	return s.s
+}
+
+// NewScratcher creates a new Scratcher.
+func NewScratcher() Scratcher {
+	return scratcher{s: NewScratch()}
+}
+
 // Add will, for single values, add (using the + operator) the addend to the existing addend (if found).
 // Supports numeric values and strings.
 //
 // If the first add for a key is an array or slice, then the next value(s) will be appended.
 func (c *Scratch) Add(key string, newAddend interface{}) (string, error) {
-
 	var newVal interface{}
 	c.mu.RLock()
 	existingAddend, found := c.values[key]
@@ -89,6 +106,15 @@ func (c *Scratch) Get(key string) interface{} {
 	return val
 }
 
+// Values returns the raw backing map. Note that you should just use
+// this method on the locally scoped Scratch instances you obtain via newScratch, not
+// .Page.Scratch etc., as that will lead to concurrency issues.
+func (c *Scratch) Values() map[string]interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.values
+}
+
 // SetInMap stores a value to a map with the given key in the Node context.
 // This map can later be retrieved with GetSortedMapValues.
 func (c *Scratch) SetInMap(key string, mapKey string, value interface{}) string {
@@ -99,6 +125,17 @@ func (c *Scratch) SetInMap(key string, mapKey string, value interface{}) string 
 	}
 
 	c.values[key].(map[string]interface{})[mapKey] = value
+	c.mu.Unlock()
+	return ""
+}
+
+// DeleteInMap deletes a value to a map with the given key in the Node context.
+func (c *Scratch) DeleteInMap(key string, mapKey string) string {
+	c.mu.Lock()
+	_, found := c.values[key]
+	if found {
+		delete(c.values[key].(map[string]interface{}), mapKey)
+	}
 	c.mu.Unlock()
 	return ""
 }
@@ -129,7 +166,7 @@ func (c *Scratch) GetSortedMapValues(key string) interface{} {
 	return sortedArray
 }
 
-// NewScratch returns a new instance Scratch.
+// NewScratch returns a new instance of Scratch.
 func NewScratch() *Scratch {
 	return &Scratch{values: make(map[string]interface{})}
 }

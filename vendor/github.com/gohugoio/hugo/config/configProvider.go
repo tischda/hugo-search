@@ -1,4 +1,4 @@
-// Copyright 2017-present The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,7 +14,8 @@
 package config
 
 import (
-	"github.com/spf13/cast"
+	"github.com/gohugoio/hugo/common/maps"
+	"github.com/gohugoio/hugo/common/types"
 )
 
 // Provider provides the configuration settings for Hugo.
@@ -22,11 +23,16 @@ type Provider interface {
 	GetString(key string) string
 	GetInt(key string) int
 	GetBool(key string) bool
+	GetParams(key string) maps.Params
 	GetStringMap(key string) map[string]interface{}
 	GetStringMapString(key string) map[string]string
 	GetStringSlice(key string) []string
 	Get(key string) interface{}
 	Set(key string, value interface{})
+	Merge(key string, value interface{})
+	SetDefaults(params maps.Params)
+	SetDefaultMergeStrategy()
+	WalkParams(walkFn func(params ...KeyParams) bool)
 	IsSet(key string) bool
 }
 
@@ -35,8 +41,17 @@ type Provider interface {
 // we do not attempt to split it into fields.
 func GetStringSlicePreserveString(cfg Provider, key string) []string {
 	sd := cfg.Get(key)
-	if sds, ok := sd.(string); ok {
-		return []string{sds}
-	}
-	return cast.ToStringSlice(sd)
+	return types.ToStringSlicePreserveString(sd)
+}
+
+// SetBaseTestDefaults provides some common config defaults used in tests.
+func SetBaseTestDefaults(cfg Provider) {
+	cfg.Set("resourceDir", "resources")
+	cfg.Set("contentDir", "content")
+	cfg.Set("dataDir", "data")
+	cfg.Set("i18nDir", "i18n")
+	cfg.Set("layoutDir", "layouts")
+	cfg.Set("assetDir", "assets")
+	cfg.Set("archetypeDir", "archetypes")
+	cfg.Set("publishDir", "public")
 }

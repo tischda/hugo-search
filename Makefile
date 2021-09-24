@@ -35,19 +35,17 @@ snapshot:
 release: 
 	goreleaser release --rm-dist
 
-dist: clean build
-	upx -9 *.exe
-
 clean:
 	go clean
 	rm -rf test/indexes
 	rm -rf test/public
 
 start: clean build
-	echo $(BASH_COMMAND)
-	./test/hugo -s test server --port=$(HUGO_PORT) &
 	./hugo-search --addr=:$(BLEVE_PORT) --hugoPath=test --indexPath=test/indexes/search.bleve --verbose &
-	cmd /c "explorer http://localhost:$(HUGO_PORT)/"
+	@echo .
+	@echo .
+	@echo .
+	./test/hugo -s test server --port=$(HUGO_PORT) &
 
 stop:
 	taskkill /F /IM hugo-search.exe

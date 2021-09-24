@@ -1,5 +1,11 @@
 ## Changelog
 
+##### hugo-search 2.0.0 - (xx September 2021)
+
+    * Update hugo to 0.88.1, fixes #1
+    * Freshen-up build and release system
+    * Minor improvements
+
 ##### hugo-search 1.4.0 - (21 January 2019)
 
     * Use go modules instead of govendor
