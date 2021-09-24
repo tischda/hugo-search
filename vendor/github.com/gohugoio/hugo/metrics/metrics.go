@@ -18,11 +18,18 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gohugoio/hugo/helpers"
+
+	"github.com/gohugoio/hugo/common/types"
+
+	"github.com/gohugoio/hugo/compare"
 )
 
 // The Provider interface defines an interface for measuring metrics.
@@ -35,27 +42,29 @@ type Provider interface {
 	WriteMetrics(w io.Writer)
 
 	// TrackValue tracks the value for diff calculations etc.
-	TrackValue(key, value string)
+	TrackValue(key string, value interface{})
 
 	// Reset clears the metric store.
 	Reset()
 }
 
 type diff struct {
-	baseline string
+	baseline interface{}
 	count    int
 	simSum   int
 }
 
-func (d *diff) add(v string) *diff {
-	if d.baseline == "" {
+var counter = 0
+
+func (d *diff) add(v interface{}) *diff {
+	if types.IsNil(d.baseline) {
 		d.baseline = v
 		d.count = 1
 		d.simSum = 100 // If we get only one it is very cache friendly.
 		return d
 	}
-
-	d.simSum += howSimilar(v, d.baseline)
+	adder := howSimilar(v, d.baseline)
+	d.simSum += adder
 	d.count++
 
 	return d
@@ -90,7 +99,7 @@ func (s *Store) Reset() {
 }
 
 // TrackValue tracks the value for diff calculations etc.
-func (s *Store) TrackValue(key, value string) {
+func (s *Store) TrackValue(key string, value interface{}) {
 	if !s.calculateHints {
 		return
 	}
@@ -109,6 +118,7 @@ func (s *Store) TrackValue(key, value string) {
 	}
 
 	d.add(value)
+
 	s.diffmu.Unlock()
 }
 
@@ -131,6 +141,7 @@ func (s *Store) WriteMetrics(w io.Writer) {
 		var max time.Duration
 
 		diff, found := s.diffs[k]
+
 		cacheFactor := 0
 		if found {
 			cacheFactor = int(math.Floor(float64(diff.simSum) / float64(diff.count)))
@@ -170,7 +181,6 @@ func (s *Store) WriteMetrics(w io.Writer) {
 			fmt.Fprintf(w, "  %13s  %12s  %12s  %5d  %s\n", v.sum, v.avg, v.max, v.count, v.key)
 		}
 	}
-
 }
 
 // A result represents the calculated results for a given metric.
@@ -191,9 +201,52 @@ func (b bySum) Less(i, j int) bool { return b[i].sum > b[j].sum }
 
 // howSimilar is a naive diff implementation that returns
 // a number between 0-100 indicating how similar a and b are.
-// 100 is when all words in a also exists in b.
-func howSimilar(a, b string) int {
+func howSimilar(a, b interface{}) int {
+	t1, t2 := reflect.TypeOf(a), reflect.TypeOf(b)
+	if t1 != t2 {
+		return 0
+	}
 
+	if t1.Comparable() && t2.Comparable() {
+		if a == b {
+			return 100
+		}
+	}
+
+	as, ok1 := types.TypeToString(a)
+	bs, ok2 := types.TypeToString(b)
+
+	if ok1 && ok2 {
+		return howSimilarStrings(as, bs)
+	}
+
+	if ok1 != ok2 {
+		return 0
+	}
+
+	e1, ok1 := a.(compare.Eqer)
+	e2, ok2 := b.(compare.Eqer)
+	if ok1 && ok2 && e1.Eq(e2) {
+		return 100
+	}
+
+	pe1, pok1 := a.(compare.ProbablyEqer)
+	pe2, pok2 := b.(compare.ProbablyEqer)
+	if pok1 && pok2 && pe1.ProbablyEq(pe2) {
+		return 90
+	}
+
+	h1, h2 := helpers.HashString(a), helpers.HashString(b)
+	if h1 == h2 {
+		return 100
+	}
+	return 0
+}
+
+// howSimilar is a naive diff implementation that returns
+// a number between 0-100 indicating how similar a and b are.
+// 100 is when all words in a also exists in b.
+func howSimilarStrings(a, b string) int {
 	if a == b {
 		return 100
 	}

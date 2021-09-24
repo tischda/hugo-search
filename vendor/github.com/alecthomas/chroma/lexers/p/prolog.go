@@ -6,16 +6,19 @@ import (
 )
 
 // Prolog lexer.
-var Prolog = internal.Register(MustNewLexer(
+var Prolog = internal.Register(MustNewLazyLexer(
 	&Config{
 		Name:      "Prolog",
 		Aliases:   []string{"prolog"},
 		Filenames: []string{"*.ecl", "*.prolog", "*.pro", "*.pl"},
 		MimeTypes: []string{"text/x-prolog"},
 	},
-	Rules{
+	prologRules,
+))
+
+func prologRules() Rules {
+	return Rules{
 		"root": {
-			{`^#.*`, CommentSingle, nil},
 			{`/\*`, CommentMultiline, Push("nested-comment")},
 			{`%.*`, CommentSingle, nil},
 			{`0\'.`, LiteralStringChar, nil},
@@ -47,5 +50,5 @@ var Prolog = internal.Register(MustNewLexer(
 			{`[^*/]+`, CommentMultiline, nil},
 			{`[*/]`, CommentMultiline, nil},
 		},
-	},
-))
+	}
+}

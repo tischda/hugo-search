@@ -6,15 +6,19 @@ import (
 )
 
 // Forth lexer.
-var Forth = internal.Register(MustNewLexer(
+var Forth = internal.Register(MustNewLazyLexer(
 	&Config{
 		Name:            "Forth",
 		Aliases:         []string{"forth"},
-		Filenames:       []string{"*.frt", "*.fs"},
+		Filenames:       []string{"*.frt", "*.fth", "*.fs"},
 		MimeTypes:       []string{"application/x-forth"},
 		CaseInsensitive: true,
 	},
-	Rules{
+	forthRules,
+))
+
+func forthRules() Rules {
+	return Rules{
 		"root": {
 			{`\s+`, Text, nil},
 			{`\\.*?\n`, CommentSingle, nil},
@@ -36,5 +40,5 @@ var Forth = internal.Register(MustNewLexer(
 		"stringdef": {
 			{`[^"]+`, LiteralString, Pop(1)},
 		},
-	},
-))
+	}
+}

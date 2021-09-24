@@ -1,4 +1,4 @@
-// Copyright 2017-present The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +21,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gohugoio/hugo/common/maps"
 
 	"github.com/gohugoio/hugo/common/types"
 	"github.com/mitchellh/mapstructure"
@@ -106,11 +108,15 @@ type IndexConfig struct {
 
 // Document is the interface an indexable document in Hugo must fulfill.
 type Document interface {
-	// SearchKeywords returns a list of keywords for the given index config.
-	SearchKeywords(cfg IndexConfig) ([]Keyword, error)
+	// RelatedKeywords returns a list of keywords for the given index config.
+	RelatedKeywords(cfg IndexConfig) ([]Keyword, error)
 
 	// When this document was or will be published.
-	PubDate() time.Time
+	PublishDate() time.Time
+
+	// Name is used as an tiebreaker if both Weight and PublishDate are
+	// the same.
+	Name() string
 }
 
 // InvertedIndex holds an inverted index, also sometimes named posting list, which
@@ -164,7 +170,7 @@ func (idx *InvertedIndex) Add(docs ...Document) error {
 
 		for _, doc := range docs {
 			var words []Keyword
-			words, err = doc.SearchKeywords(config)
+			words, err = doc.RelatedKeywords(config)
 			if err != nil {
 				continue
 			}
@@ -176,7 +182,6 @@ func (idx *InvertedIndex) Add(docs ...Document) error {
 	}
 
 	return err
-
 }
 
 // queryElement holds the index name and keywords that can be used to compose a
@@ -211,7 +216,10 @@ func (r ranks) Len() int      { return len(r) }
 func (r ranks) Swap(i, j int) { r[i], r[j] = r[j], r[i] }
 func (r ranks) Less(i, j int) bool {
 	if r[i].Weight == r[j].Weight {
-		return r[i].Doc.PubDate().After(r[j].Doc.PubDate())
+		if r[i].Doc.PublishDate() == r[j].Doc.PublishDate() {
+			return r[i].Doc.Name() < r[j].Doc.Name()
+		}
+		return r[i].Doc.PublishDate().After(r[j].Doc.PublishDate())
 	}
 	return r[i].Weight > r[j].Weight
 }
@@ -241,7 +249,7 @@ func (idx *InvertedIndex) SearchDoc(doc Document, indices ...string) ([]Document
 	}
 
 	for _, cfg := range configs {
-		keywords, err := doc.SearchKeywords(cfg)
+		keywords, err := doc.RelatedKeywords(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -250,7 +258,7 @@ func (idx *InvertedIndex) SearchDoc(doc Document, indices ...string) ([]Document
 
 	}
 
-	return idx.searchDate(doc.PubDate(), q...)
+	return idx.searchDate(doc.PublishDate(), q...)
 }
 
 // ToKeywords returns a Keyword slice of the given input.
@@ -267,9 +275,12 @@ func (cfg IndexConfig) ToKeywords(v interface{}) ([]Keyword, error) {
 		keywords = append(keywords, StringKeyword(vv))
 	case []string:
 		if toLower {
-			for i := 0; i < len(vv); i++ {
-				vv[i] = strings.ToLower(vv[i])
+			vc := make([]string, len(vv))
+			copy(vc, vv)
+			for i := 0; i < len(vc); i++ {
+				vc[i] = strings.ToLower(vc[i])
 			}
+			vv = vc
 		}
 		keywords = append(keywords, StringsToKeywords(vv...)...)
 	case time.Time:
@@ -344,7 +355,7 @@ func (idx *InvertedIndex) searchDate(upperDate time.Time, query ...queryElement)
 				for _, doc := range docs {
 					if applyDateFilter {
 						// Exclude newer than the limit given
-						if doc.PubDate().After(upperDate) {
+						if doc.PublishDate().After(upperDate) {
 							continue
 						}
 					}
@@ -395,14 +406,9 @@ func norm(num, min, max int) int {
 }
 
 // DecodeConfig decodes a slice of map into Config.
-func DecodeConfig(in interface{}) (Config, error) {
-	if in == nil {
+func DecodeConfig(m maps.Params) (Config, error) {
+	if m == nil {
 		return Config{}, errors.New("no related config provided")
-	}
-
-	m, ok := in.(map[string]interface{})
-	if !ok {
-		return Config{}, fmt.Errorf("expected map[string]interface {} got %T", in)
 	}
 
 	if len(m) == 0 {

@@ -17,14 +17,12 @@ package urls
 import (
 	"errors"
 	"fmt"
-
 	"html/template"
 	"net/url"
 
 	"github.com/gohugoio/hugo/common/urls"
 	"github.com/gohugoio/hugo/deps"
 	_errors "github.com/pkg/errors"
-	"github.com/russross/blackfriday"
 	"github.com/spf13/cast"
 )
 
@@ -89,7 +87,7 @@ func (ns *Namespace) Anchorize(a interface{}) (string, error) {
 	if err != nil {
 		return "", nil
 	}
-	return blackfriday.SanitizedAnchorName(s), nil
+	return ns.deps.ContentSpec.SanitizeAnchorName(s), nil
 }
 
 // Ref returns the absolute URL path to a given content item.
@@ -126,7 +124,13 @@ func (ns *Namespace) refArgsToMap(args interface{}) (map[string]interface{}, err
 		s  string
 		of string
 	)
-	switch v := args.(type) {
+
+	v := args
+	if _, ok := v.([]interface{}); ok {
+		v = cast.ToStringSlice(v)
+	}
+
+	switch v := v.(type) {
 	case map[string]interface{}:
 		return v, nil
 	case map[string]string:
@@ -137,7 +141,7 @@ func (ns *Namespace) refArgsToMap(args interface{}) (map[string]interface{}, err
 		return m, nil
 	case []string:
 		if len(v) == 0 || len(v) > 2 {
-			return nil, fmt.Errorf("invalid numer of arguments to ref")
+			return nil, fmt.Errorf("invalid number of arguments to ref")
 		}
 		// These where the options before we introduced the map type:
 		s = v[0]
@@ -152,6 +156,7 @@ func (ns *Namespace) refArgsToMap(args interface{}) (map[string]interface{}, err
 		}
 
 	}
+
 	return map[string]interface{}{
 		"path":         s,
 		"outputFormat": of,

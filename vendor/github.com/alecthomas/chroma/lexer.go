@@ -2,11 +2,13 @@ package chroma
 
 import (
 	"fmt"
+	"strings"
 )
 
 var (
 	defaultOptions = &TokeniseOptions{
-		State: "root",
+		State:    "root",
+		EnsureLF: true,
 	}
 )
 
@@ -66,17 +68,24 @@ type Token struct {
 func (t *Token) String() string   { return t.Value }
 func (t *Token) GoString() string { return fmt.Sprintf("&Token{%s, %q}", t.Type, t.Value) }
 
+// Clone returns a clone of the Token.
 func (t *Token) Clone() Token {
 	return *t
 }
 
+// EOF is returned by lexers at the end of input.
 var EOF Token
 
+// TokeniseOptions contains options for tokenisers.
 type TokeniseOptions struct {
 	// State to start tokenisation in. Defaults to "root".
 	State string
 	// Nested tokenisation.
 	Nested bool
+
+	// If true, all EOLs are converted into LF
+	// by replacing CRLF and CR
+	EnsureLF bool
 }
 
 // A Lexer for tokenising source code.
@@ -90,9 +99,11 @@ type Lexer interface {
 // Lexers is a slice of lexers sortable by name.
 type Lexers []Lexer
 
-func (l Lexers) Len() int           { return len(l) }
-func (l Lexers) Swap(i, j int)      { l[i], l[j] = l[j], l[i] }
-func (l Lexers) Less(i, j int) bool { return l[i].Config().Name < l[j].Config().Name }
+func (l Lexers) Len() int      { return len(l) }
+func (l Lexers) Swap(i, j int) { l[i], l[j] = l[j], l[i] }
+func (l Lexers) Less(i, j int) bool {
+	return strings.ToLower(l[i].Config().Name) < strings.ToLower(l[j].Config().Name)
+}
 
 // PrioritisedLexers is a slice of lexers sortable by priority.
 type PrioritisedLexers []Lexer

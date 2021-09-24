@@ -1,4 +1,4 @@
-// Copyright 2018 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,9 +22,7 @@ import (
 	"github.com/spf13/afero"
 )
 
-var (
-	_ afero.Fs = (*md5HashingFs)(nil)
-)
+var _ afero.Fs = (*md5HashingFs)(nil)
 
 // FileHashReceiver will receive the filename an the content's MD5 sum on file close.
 type FileHashReceiver interface {
@@ -65,10 +63,6 @@ func (fs *md5HashingFs) OpenFile(name string, flag int, perm os.FileMode) (afero
 
 func (fs *md5HashingFs) wrapFile(f afero.File) afero.File {
 	return &hashingFile{File: f, h: md5.New(), hashReceiver: fs.hashReceiver}
-}
-
-func isWrite(flag int) bool {
-	return flag&os.O_RDWR != 0 || flag&os.O_WRONLY != 0
 }
 
 func (fs *md5HashingFs) Name() string {

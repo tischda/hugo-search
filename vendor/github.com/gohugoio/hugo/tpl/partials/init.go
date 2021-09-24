@@ -26,7 +26,7 @@ func init() {
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) interface{} { return ctx },
+			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
 		}
 
 		ns.AddMethodMapping(ctx.Include,
@@ -36,13 +36,19 @@ func init() {
 			},
 		)
 
+		// TODO(bep) we need the return to be a valid identifier, but
+		// should consider another way of adding it.
+		ns.AddMethodMapping(func() string { return "" },
+			[]string{"return"},
+			[][2]string{},
+		)
+
 		ns.AddMethodMapping(ctx.IncludeCached,
 			[]string{"partialCached"},
 			[][2]string{},
 		)
 
 		return ns
-
 	}
 
 	internal.AddTemplateFuncsNamespace(f)

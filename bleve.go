@@ -11,6 +11,7 @@ import (
 	"github.com/rs/cors"
 )
 
+// start the web server for the search API
 func startSearchServer(addr string, indexPath string) {
 	indexName := path.Base(indexPath)
 	index := registerIndex(indexPath, indexName)
@@ -27,7 +28,7 @@ func registerIndex(indexPath string, indexName string) bleve.Index {
 		log.Printf("Registering index: %s", indexPath)
 	}
 	index, err := bleve.OpenUsing(indexPath, map[string]interface{}{"read_only": true})
-	checkFatal(err)
+	exitOnError(err)
 	bleveHttp.RegisterIndexName(indexName, index)
 	return index
 }
@@ -38,7 +39,7 @@ func unregisterIndex(index bleve.Index, indexName string) {
 	index.Close()
 }
 
-//  Cross Origin Resource Sharing (https://www.w3.org/TR/cors/)
+// Cross Origin Resource Sharing (https://www.w3.org/TR/cors/)
 func getCorsHandler(indexName string) http.Handler {
 
 	// list of indexes

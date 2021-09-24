@@ -1,4 +1,4 @@
-// Copyright 2017-present The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,10 +16,11 @@ package output
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
-	"reflect"
+	"github.com/pkg/errors"
 
 	"github.com/mitchellh/mapstructure"
 
@@ -32,7 +33,7 @@ type Format struct {
 	// can be overridden by providing a new definition for those types.
 	Name string `json:"name"`
 
-	MediaType media.Type `json:"mediaType"`
+	MediaType media.Type `json:"-"`
 
 	// Must be set to a value when there are two or more conflicting mediatype for the same resource.
 	Path string `json:"path"`
@@ -69,17 +70,30 @@ type Format struct {
 	// Note that we use the term "alternative" and not "alternate" here, as it
 	// does not necessarily replace the other format, it is an alternative representation.
 	NotAlternative bool `json:"notAlternative"`
+
+	// Setting this will make this output format control the value of
+	// .Permalink and .RelPermalink for a rendered Page.
+	// If not set, these values will point to the main (first) output format
+	// configured. That is probably the behaviour you want in most situations,
+	// as you probably don't want to link back to the RSS version of a page, as an
+	// example. AMP would, however, be a good example of an output format where this
+	// behaviour is wanted.
+	Permalinkable bool `json:"permalinkable"`
+
+	// Setting this to a non-zero value will be used as the first sort criteria.
+	Weight int `json:"weight"`
 }
 
 // An ordered list of built-in output formats.
 var (
 	AMPFormat = Format{
-		Name:      "AMP",
-		MediaType: media.HTMLType,
-		BaseName:  "index",
-		Path:      "amp",
-		Rel:       "amphtml",
-		IsHTML:    true,
+		Name:          "AMP",
+		MediaType:     media.HTMLType,
+		BaseName:      "index",
+		Path:          "amp",
+		Rel:           "amphtml",
+		IsHTML:        true,
+		Permalinkable: true,
 		// See https://www.ampproject.org/learn/overview/
 	}
 
@@ -109,11 +123,16 @@ var (
 	}
 
 	HTMLFormat = Format{
-		Name:      "HTML",
-		MediaType: media.HTMLType,
-		BaseName:  "index",
-		Rel:       "canonical",
-		IsHTML:    true,
+		Name:          "HTML",
+		MediaType:     media.HTMLType,
+		BaseName:      "index",
+		Rel:           "canonical",
+		IsHTML:        true,
+		Permalinkable: true,
+
+		// Weight will be used as first sort criteria. HTML will, by default,
+		// be rendered first, but set it to 10 so it's easy to put one above it.
+		Weight: 10,
 	}
 
 	JSONFormat = Format{
@@ -122,6 +141,15 @@ var (
 		BaseName:    "index",
 		IsPlainText: true,
 		Rel:         "alternate",
+	}
+
+	WebAppManifestFormat = Format{
+		Name:           "WebAppManifest",
+		MediaType:      media.WebAppManifestType,
+		BaseName:       "manifest",
+		IsPlainText:    true,
+		NotAlternative: true,
+		Rel:            "manifest",
 	}
 
 	RobotsTxtFormat = Format{
@@ -157,6 +185,7 @@ var DefaultFormats = Formats{
 	CSVFormat,
 	HTMLFormat,
 	JSONFormat,
+	WebAppManifestFormat,
 	RobotsTxtFormat,
 	RSSFormat,
 	SitemapFormat,
@@ -169,9 +198,20 @@ func init() {
 // Formats is a slice of Format.
 type Formats []Format
 
-func (formats Formats) Len() int           { return len(formats) }
-func (formats Formats) Swap(i, j int)      { formats[i], formats[j] = formats[j], formats[i] }
-func (formats Formats) Less(i, j int) bool { return formats[i].Name < formats[j].Name }
+func (formats Formats) Len() int      { return len(formats) }
+func (formats Formats) Swap(i, j int) { formats[i], formats[j] = formats[j], formats[i] }
+func (formats Formats) Less(i, j int) bool {
+	fi, fj := formats[i], formats[j]
+	if fi.Weight == fj.Weight {
+		return fi.Name < fj.Name
+	}
+
+	if fj.Weight == 0 {
+		return true
+	}
+
+	return fi.Weight > 0 && fi.Weight < fj.Weight
+}
 
 // GetBySuffix gets a output format given as suffix, e.g. "html".
 // It will return false if no format could be found, or if the suffix given
@@ -179,14 +219,16 @@ func (formats Formats) Less(i, j int) bool { return formats[i].Name < formats[j]
 // The lookup is case insensitive.
 func (formats Formats) GetBySuffix(suffix string) (f Format, found bool) {
 	for _, ff := range formats {
-		if strings.EqualFold(suffix, ff.MediaType.Suffix()) {
-			if found {
-				// ambiguous
-				found = false
-				return
+		for _, suffix2 := range ff.MediaType.Suffixes() {
+			if strings.EqualFold(suffix, suffix2) {
+				if found {
+					// ambiguous
+					found = false
+					return
+				}
+				f = ff
+				found = true
 			}
-			f = ff
-			found = true
 		}
 	}
 	return
@@ -282,6 +324,7 @@ func DecodeFormats(mediaTypes media.Types, maps ...map[string]interface{}) (Form
 				}
 
 				f = append(f, newOutFormat)
+
 			}
 		}
 	}
@@ -291,7 +334,7 @@ func DecodeFormats(mediaTypes media.Types, maps ...map[string]interface{}) (Form
 	return f, nil
 }
 
-func decode(mediaTypes media.Types, input, output interface{}) error {
+func decode(mediaTypes media.Types, input interface{}, output *Format) error {
 	config := &mapstructure.DecoderConfig{
 		Metadata:         nil,
 		Result:           output,
@@ -309,12 +352,19 @@ func decode(mediaTypes media.Types, input, output interface{}) error {
 						// If mediaType is a string, look it up and replace it
 						// in the map.
 						vv := dataVal.MapIndex(key)
-						if mediaTypeStr, ok := vv.Interface().(string); ok {
-							mediaType, found := mediaTypes.GetByType(mediaTypeStr)
+						vvi := vv.Interface()
+
+						switch vviv := vvi.(type) {
+						case media.Type:
+						// OK
+						case string:
+							mediaType, found := mediaTypes.GetByType(vviv)
 							if !found {
-								return c, fmt.Errorf("media type %q not found", mediaTypeStr)
+								return c, fmt.Errorf("media type %q not found", vviv)
 							}
 							dataVal.SetMapIndex(key, reflect.ValueOf(mediaType))
+						default:
+							return nil, errors.Errorf("invalid output format configuration; wrong type for media type, expected string (e.g. text/html), got %T", vvi)
 						}
 					}
 				}
@@ -328,20 +378,25 @@ func decode(mediaTypes media.Types, input, output interface{}) error {
 		return err
 	}
 
-	return decoder.Decode(input)
+	if err = decoder.Decode(input); err != nil {
+		return errors.Wrap(err, "failed to decode output format configuration")
+	}
+
+	return nil
+
 }
 
 // BaseFilename returns the base filename of f including an extension (ie.
 // "index.xml").
 func (f Format) BaseFilename() string {
-	return f.BaseName + f.MediaType.FullSuffix()
+	return f.BaseName + f.MediaType.FirstSuffix.FullSuffix
 }
 
 // MarshalJSON returns the JSON encoding of f.
 func (f Format) MarshalJSON() ([]byte, error) {
 	type Alias Format
 	return json.Marshal(&struct {
-		MediaType string
+		MediaType string `json:"mediaType"`
 		Alias
 	}{
 		MediaType: f.MediaType.String(),

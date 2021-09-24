@@ -1,4 +1,4 @@
-// Copyright 2017-present The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,6 +18,12 @@ package compare
 // in the Hugo templates.
 type Eqer interface {
 	Eq(other interface{}) bool
+}
+
+// ProbablyEqer is an equal check that may return false positives, but never
+// a false negative.
+type ProbablyEqer interface {
+	ProbablyEq(other interface{}) bool
 }
 
 // Comparer can be used to compare two values.

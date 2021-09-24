@@ -121,6 +121,10 @@ type IndexReaderOnly interface {
 	FieldDictOnly(field string, onlyTerms [][]byte, includeCount bool) (FieldDict, error)
 }
 
+type IndexReaderContains interface {
+	FieldDictContains(field string) (FieldDictContains, error)
+}
+
 // FieldTerms contains the terms used by a document, keyed by field
 type FieldTerms map[string][]string
 
@@ -228,6 +232,10 @@ type DictEntry struct {
 type FieldDict interface {
 	Next() (*DictEntry, error)
 	Close() error
+}
+
+type FieldDictContains interface {
+	Contains(key []byte) (bool, error)
 }
 
 // DocIDReader is the interface exposing enumeration of documents identifiers.
@@ -341,13 +349,28 @@ type Optimizable interface {
 	Optimize(kind string, octx OptimizableContext) (OptimizableContext, error)
 }
 
+// Represents a result of optimization -- see the Finish() method.
+type Optimized interface{}
+
 type OptimizableContext interface {
 	// Once all the optimzable resources have been provided the same
 	// OptimizableContext instance, the optimization preparations are
 	// finished or completed via the Finish() method.
-	Finish() error
+	//
+	// Depending on the optimization being performed, the Finish()
+	// method might return a non-nil Optimized instance.  For example,
+	// the Optimized instance might represent an optimized
+	// TermFieldReader instance.
+	Finish() (Optimized, error)
 }
 
 type DocValueReader interface {
 	VisitDocValues(id IndexInternalID, visitor DocumentFieldTermVisitor) error
+}
+
+// IndexBuilder is an interface supported by some index schemes
+// to allow direct write-only index building
+type IndexBuilder interface {
+	Index(doc *document.Document) error
+	Close() error
 }

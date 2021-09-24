@@ -4,7 +4,7 @@ import "strings"
 
 // An Iterator across tokens.
 //
-// nil will be returned at the end of the Token stream.
+// EOF will be returned at the end of the Token stream.
 //
 // If an error occurs within an Iterator, it may propagate this in a panic. Formatters should recover.
 type Iterator func() Token
@@ -44,8 +44,9 @@ func Literator(tokens ...Token) Iterator {
 	}
 }
 
+// SplitTokensIntoLines splits tokens containing newlines in two.
 func SplitTokensIntoLines(tokens []Token) (out [][]Token) {
-	var line []Token
+	var line []Token // nolint: prealloc
 	for _, token := range tokens {
 		for strings.Contains(token.Value, "\n") {
 			parts := strings.SplitAfterN(token.Value, "\n", 2)

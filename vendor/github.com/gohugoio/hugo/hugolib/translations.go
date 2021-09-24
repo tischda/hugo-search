@@ -1,4 +1,4 @@
-// Copyright 2016 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -13,47 +13,45 @@
 
 package hugolib
 
-// Translations represent the other translations for a given page. The
-// string here is the language code, as affected by the `post.LANG.md`
-// filename.
-type Translations map[string]*Page
+import (
+	"github.com/gohugoio/hugo/resources/page"
+)
 
-func pagesToTranslationsMap(pages []*Page) map[string]Translations {
-	out := make(map[string]Translations)
+func pagesToTranslationsMap(sites []*Site) map[string]page.Pages {
+	out := make(map[string]page.Pages)
 
-	for _, page := range pages {
-		base := page.TranslationKey()
+	for _, s := range sites {
+		s.pageMap.pageTrees.Walk(func(ss string, n *contentNode) bool {
+			p := n.p
+			// TranslationKey is implemented for all page types.
+			base := p.TranslationKey()
 
-		pageTranslation, present := out[base]
-		if !present {
-			pageTranslation = make(Translations)
-		}
+			pageTranslations, found := out[base]
+			if !found {
+				pageTranslations = make(page.Pages, 0)
+			}
 
-		pageLang := page.Lang()
-		if pageLang == "" {
-			continue
-		}
+			pageTranslations = append(pageTranslations, p)
+			out[base] = pageTranslations
 
-		pageTranslation[pageLang] = page
-		out[base] = pageTranslation
+			return false
+		})
 	}
 
 	return out
 }
 
-func assignTranslationsToPages(allTranslations map[string]Translations, pages []*Page) {
-	for _, page := range pages {
-		page.translations = page.translations[:0]
-		base := page.TranslationKey()
-		trans, exist := allTranslations[base]
-		if !exist {
-			continue
-		}
-
-		for _, translatedPage := range trans {
-			page.translations = append(page.translations, translatedPage)
-		}
-
-		pageBy(languagePageSort).Sort(page.translations)
+func assignTranslationsToPages(allTranslations map[string]page.Pages, sites []*Site) {
+	for _, s := range sites {
+		s.pageMap.pageTrees.Walk(func(ss string, n *contentNode) bool {
+			p := n.p
+			base := p.TranslationKey()
+			translations, found := allTranslations[base]
+			if !found {
+				return false
+			}
+			p.setTranslations(translations)
+			return false
+		})
 	}
 }

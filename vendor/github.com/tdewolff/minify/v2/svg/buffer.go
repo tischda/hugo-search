@@ -1,22 +1,24 @@
-package svg // import "github.com/tdewolff/minify/svg"
+package svg
 
 import (
 	"github.com/tdewolff/parse/v2"
-	"github.com/tdewolff/parse/v2/svg"
 	"github.com/tdewolff/parse/v2/xml"
+	minifyXML "github.com/tdewolff/minify/v2/xml"
 )
 
 // Token is a single token unit with an attribute value (if given) and hash of the data.
 type Token struct {
 	xml.TokenType
-	Hash    svg.Hash
+	Hash    Hash
 	Data    []byte
 	Text    []byte
 	AttrVal []byte
+	Offset  int
 }
 
 // TokenBuffer is a buffer that allows for token look-ahead.
 type TokenBuffer struct {
+	r *parse.Input
 	l *xml.Lexer
 
 	buf []Token
@@ -26,25 +28,31 @@ type TokenBuffer struct {
 }
 
 // NewTokenBuffer returns a new TokenBuffer.
-func NewTokenBuffer(l *xml.Lexer) *TokenBuffer {
+func NewTokenBuffer(r *parse.Input, l *xml.Lexer) *TokenBuffer {
 	return &TokenBuffer{
+		r:   r,
 		l:   l,
 		buf: make([]Token, 0, 8),
 	}
 }
 
 func (z *TokenBuffer) read(t *Token) {
+	t.Offset = z.r.Offset()
 	t.TokenType, t.Data = z.l.Next()
 	t.Text = z.l.Text()
 	if t.TokenType == xml.AttributeToken {
+		t.Offset += 1 + len(t.Text) + 1
 		t.AttrVal = z.l.AttrVal()
 		if len(t.AttrVal) > 1 && (t.AttrVal[0] == '"' || t.AttrVal[0] == '\'') {
-			t.AttrVal = parse.ReplaceMultipleWhitespace(parse.TrimWhitespace(t.AttrVal[1 : len(t.AttrVal)-1])) // quotes will be readded in attribute loop if necessary
+			t.Offset++
+			t.AttrVal = t.AttrVal[1 : len(t.AttrVal)-1] // quotes will be readded in attribute loop if necessary
+			t.AttrVal = parse.ReplaceMultipleWhitespaceAndEntities(t.AttrVal, minifyXML.EntitiesMap, nil)
+			t.AttrVal = parse.TrimWhitespace(t.AttrVal)
 		}
-		t.Hash = svg.ToHash(t.Text)
+		t.Hash = ToHash(t.Text)
 	} else if t.TokenType == xml.StartTagToken || t.TokenType == xml.EndTagToken {
 		t.AttrVal = nil
-		t.Hash = svg.ToHash(t.Text)
+		t.Hash = ToHash(t.Text)
 	} else {
 		t.AttrVal = nil
 		t.Hash = 0
@@ -100,7 +108,7 @@ func (z *TokenBuffer) Shift() *Token {
 
 // Attributes extracts the gives attribute hashes from a tag.
 // It returns in the same order pointers to the requested token data or nil.
-func (z *TokenBuffer) Attributes(hashes ...svg.Hash) ([]*Token, *Token) {
+func (z *TokenBuffer) Attributes(hashes ...Hash) []*Token {
 	n := 0
 	for {
 		if t := z.Peek(n); t.TokenType != xml.AttributeToken {
@@ -116,15 +124,13 @@ func (z *TokenBuffer) Attributes(hashes ...svg.Hash) ([]*Token, *Token) {
 			z.attrBuffer[i] = nil
 		}
 	}
-	var replacee *Token
 	for i := z.pos; i < z.pos+n; i++ {
 		attr := &z.buf[i]
 		for j, hash := range hashes {
 			if hash == attr.Hash {
 				z.attrBuffer[j] = attr
-				replacee = attr
 			}
 		}
 	}
-	return z.attrBuffer, replacee
+	return z.attrBuffer
 }

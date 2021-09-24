@@ -1,11 +1,12 @@
-package css // import "github.com/tdewolff/parse/css"
+package css
 
 import (
 	"bytes"
-	"io"
+	"fmt"
 	"strconv"
 
 	"github.com/tdewolff/parse/v2"
+	"github.com/tdewolff/parse/v2/buffer"
 )
 
 var wsBytes = []byte(" ")
@@ -76,22 +77,24 @@ func (t Token) String() string {
 
 // Parser is the state for the parser.
 type Parser struct {
-	l     *Lexer
-	state []State
-	err   error
+	l      *Lexer
+	state  []State
+	err    string
+	errPos int
 
 	buf   []Token
 	level int
 
-	tt          TokenType
 	data        []byte
+	tt          TokenType
+	keepWS      bool
 	prevWS      bool
 	prevEnd     bool
 	prevComment bool
 }
 
 // NewParser returns a new CSS parser from an io.Reader. isInline specifies whether this is an inline style attribute.
-func NewParser(r io.Reader, isInline bool) *Parser {
+func NewParser(r *parse.Input, isInline bool) *Parser {
 	l := NewLexer(r)
 	p := &Parser{
 		l:     l,
@@ -106,22 +109,23 @@ func NewParser(r io.Reader, isInline bool) *Parser {
 	return p
 }
 
+// HasParseError returns true if there is a parse error (and not a read error).
+func (p *Parser) HasParseError() bool {
+	return p.err != ""
+}
+
 // Err returns the error encountered during parsing, this is often io.EOF but also other errors can be returned.
 func (p *Parser) Err() error {
-	if p.err != nil {
-		return p.err
+	if p.err != "" {
+		r := buffer.NewReader(p.l.r.Bytes())
+		return parse.NewError(r, p.errPos, p.err)
 	}
 	return p.l.Err()
 }
 
-// Restore restores the NULL byte at the end of the buffer.
-func (p *Parser) Restore() {
-	p.l.Restore()
-}
-
 // Next returns the next Grammar. It returns ErrorGrammar when an error was encountered. Using Err() one can retrieve the error message.
 func (p *Parser) Next() (GrammarType, TokenType, []byte) {
-	p.err = nil
+	p.err = ""
 
 	if p.prevEnd {
 		p.tt, p.data = RightBraceToken, endBytes
@@ -142,7 +146,7 @@ func (p *Parser) popToken(allowComment bool) (TokenType, []byte) {
 	p.prevWS = false
 	p.prevComment = false
 	tt, data := p.l.Next()
-	for tt == WhitespaceToken || tt == CommentToken {
+	for !p.keepWS && tt == WhitespaceToken || tt == CommentToken {
 		if tt == WhitespaceToken {
 			p.prevWS = true
 		} else {
@@ -206,8 +210,17 @@ func (p *Parser) parseDeclarationList() GrammarType {
 
 	// parse error
 	p.initBuf()
-	p.err = parse.NewErrorLexer("unexpected token in declaration", p.l.r)
-	return p.parseDeclarationError(p.tt, p.data, true)
+	p.l.r.Move(-len(p.data))
+	p.err, p.errPos = fmt.Sprintf("CSS parse error: unexpected token '%s' in declaration", string(p.data)), p.l.r.Offset()
+	p.l.r.Move(len(p.data))
+
+	if p.tt == RightBraceToken {
+		// right brace token will occur when we've had a decl error that ended in a right brace token
+		// as these are not handled by decl error, we handle it here explicitly. Normally its used to end eg. the qual rule.
+		p.pushBuf(p.tt, p.data)
+		return ErrorGrammar
+	}
+	return p.parseDeclarationError(p.tt, p.data)
 }
 
 ////////////////////////////////////////////////////////////////
@@ -287,8 +300,10 @@ func (p *Parser) parseAtRuleDeclarationList() GrammarType {
 }
 
 func (p *Parser) parseAtRuleUnknown() GrammarType {
+	p.keepWS = true
 	if p.tt == RightBraceToken && p.level == 0 || p.tt == ErrorToken {
 		p.state = p.state[:len(p.state)-1]
+		p.keepWS = false
 		return EndAtRuleGrammar
 	}
 	if p.tt == LeftParenthesisToken || p.tt == LeftBraceToken || p.tt == LeftBracketToken || p.tt == FunctionToken {
@@ -319,7 +334,7 @@ func (p *Parser) parseQualifiedRule() GrammarType {
 			p.state = append(p.state, (*Parser).parseQualifiedRuleDeclarationList)
 			return BeginRulesetGrammar
 		} else if tt == ErrorToken {
-			p.err = parse.NewErrorLexer("unexpected ending in qualified rule, expected left brace token", p.l.r)
+			p.err, p.errPos = "CSS parse error: unexpected ending in qualified rule", p.l.r.Offset()
 			return ErrorGrammar
 		} else if tt == LeftParenthesisToken || tt == LeftBraceToken || tt == LeftBracketToken || tt == FunctionToken {
 			p.level++
@@ -360,10 +375,14 @@ func (p *Parser) parseDeclaration() GrammarType {
 	p.initBuf()
 	parse.ToLower(p.data)
 
+	ttName, dataName := p.tt, p.data
 	tt, data := p.popToken(false)
 	if tt != ColonToken {
-		p.err = parse.NewErrorLexer("unexpected token in declaration", p.l.r)
-		return p.parseDeclarationError(tt, data, false)
+		p.l.r.Move(-len(data))
+		p.err, p.errPos = "CSS parse error: expected colon in declaration", p.l.r.Offset()
+		p.l.r.Move(len(data))
+		p.pushBuf(ttName, dataName)
+		return p.parseDeclarationError(tt, data)
 	}
 
 	skipWS := true
@@ -388,14 +407,10 @@ func (p *Parser) parseDeclaration() GrammarType {
 	}
 }
 
-func (p *Parser) parseDeclarationError(tt TokenType, data []byte, skipFirstPush bool) GrammarType {
-	first := true
+func (p *Parser) parseDeclarationError(tt TokenType, data []byte) GrammarType {
+	// we're on the offending (tt,data), keep popping tokens till we reach ;, }, or EOF
+	p.tt, p.data = tt, data
 	for {
-		if first {
-			first = false
-		} else {
-			tt, data = p.popToken(false)
-		}
 		if (tt == SemicolonToken || tt == RightBraceToken) && p.level == 0 || tt == ErrorToken {
 			p.prevEnd = (tt == RightBraceToken)
 			if tt == SemicolonToken {
@@ -407,21 +422,22 @@ func (p *Parser) parseDeclarationError(tt TokenType, data []byte, skipFirstPush 
 		} else if tt == RightParenthesisToken || tt == RightBraceToken || tt == RightBracketToken {
 			p.level--
 		}
-		if skipFirstPush {
-			skipFirstPush = false
-		} else {
-			if p.prevWS {
-				p.pushBuf(WhitespaceToken, wsBytes)
-			}
-			p.pushBuf(tt, data)
+
+		if p.prevWS {
+			p.pushBuf(WhitespaceToken, wsBytes)
 		}
+		p.pushBuf(tt, data)
+
+		tt, data = p.popToken(false)
 	}
 }
 
 func (p *Parser) parseCustomProperty() GrammarType {
 	p.initBuf()
-	if tt, _ := p.popToken(false); tt != ColonToken {
-		p.err = parse.NewErrorLexer("unexpected token in declaration", p.l.r)
+	if tt, data := p.popToken(false); tt != ColonToken {
+		p.l.r.Move(-len(data))
+		p.err, p.errPos = "CSS parse error: expected colon in custom property", p.l.r.Offset()
+		p.l.r.Move(len(data))
 		return ErrorGrammar
 	}
 	val := []byte{}

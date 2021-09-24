@@ -20,9 +20,9 @@ import (
 
 	"github.com/gohugoio/hugo/parser/metadecoders"
 
-	"github.com/BurntSushi/toml"
+	toml "github.com/pelletier/go-toml/v2"
 
-	"gopkg.in/yaml.v2"
+	yaml "gopkg.in/yaml.v2"
 )
 
 const (
@@ -46,7 +46,9 @@ func InterfaceToConfig(in interface{}, format metadecoders.Format, w io.Writer) 
 		return err
 
 	case metadecoders.TOML:
-		return toml.NewEncoder(w).Encode(in)
+		enc := toml.NewEncoder(w)
+		enc.SetIndentTables(true)
+		return enc.Encode(in)
 	case metadecoders.JSON:
 		b, err := json.MarshalIndent(in, "", "   ")
 		if err != nil {
@@ -62,7 +64,7 @@ func InterfaceToConfig(in interface{}, format metadecoders.Format, w io.Writer) 
 		return err
 
 	default:
-		return errors.New("Unsupported Format provided")
+		return errors.New("unsupported Format provided")
 	}
 }
 

@@ -11,6 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package reflect provides template functions for run-time object reflection.
 package reflect
 
 import (
@@ -26,7 +27,7 @@ func init() {
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) interface{} { return ctx },
+			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
 		}
 
 		ns.AddMethodMapping(ctx.IsMap,

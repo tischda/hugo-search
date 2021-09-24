@@ -1,4 +1,4 @@
-package html // import "github.com/tdewolff/minify/html"
+package html
 
 import (
 	"github.com/tdewolff/parse/v2"
@@ -8,15 +8,17 @@ import (
 // Token is a single token unit with an attribute value (if given) and hash of the data.
 type Token struct {
 	html.TokenType
-	Hash    html.Hash
+	Hash    Hash
 	Data    []byte
 	Text    []byte
 	AttrVal []byte
 	Traits  traits
+	Offset  int
 }
 
 // TokenBuffer is a buffer that allows for token look-ahead.
 type TokenBuffer struct {
+	r *parse.Input
 	l *html.Lexer
 
 	buf []Token
@@ -26,27 +28,31 @@ type TokenBuffer struct {
 }
 
 // NewTokenBuffer returns a new TokenBuffer.
-func NewTokenBuffer(l *html.Lexer) *TokenBuffer {
+func NewTokenBuffer(r *parse.Input, l *html.Lexer) *TokenBuffer {
 	return &TokenBuffer{
+		r:   r,
 		l:   l,
 		buf: make([]Token, 0, 8),
 	}
 }
 
 func (z *TokenBuffer) read(t *Token) {
+	t.Offset = z.r.Offset()
 	t.TokenType, t.Data = z.l.Next()
 	t.Text = z.l.Text()
 	if t.TokenType == html.AttributeToken {
+		t.Offset += 1 + len(t.Text) + 1
 		t.AttrVal = z.l.AttrVal()
 		if len(t.AttrVal) > 1 && (t.AttrVal[0] == '"' || t.AttrVal[0] == '\'') {
-			t.AttrVal = parse.TrimWhitespace(t.AttrVal[1 : len(t.AttrVal)-1]) // quotes will be readded in attribute loop if necessary
+			t.Offset++
+			t.AttrVal = t.AttrVal[1 : len(t.AttrVal)-1] // quotes will be readded in attribute loop if necessary
 		}
-		t.Hash = html.ToHash(t.Text)
+		t.Hash = ToHash(t.Text)
 		t.Traits = attrMap[t.Hash]
 	} else if t.TokenType == html.StartTagToken || t.TokenType == html.EndTagToken {
 		t.AttrVal = nil
-		t.Hash = html.ToHash(t.Text)
-		t.Traits = tagMap[t.Hash]
+		t.Hash = ToHash(t.Text)
+		t.Traits = tagMap[t.Hash] // zero if not exist
 	} else {
 		t.AttrVal = nil
 		t.Hash = 0
@@ -103,7 +109,7 @@ func (z *TokenBuffer) Shift() *Token {
 
 // Attributes extracts the gives attribute hashes from a tag.
 // It returns in the same order pointers to the requested token data or nil.
-func (z *TokenBuffer) Attributes(hashes ...html.Hash) []*Token {
+func (z *TokenBuffer) Attributes(hashes ...Hash) []*Token {
 	n := 0
 	for {
 		if t := z.Peek(n); t.TokenType != html.AttributeToken {

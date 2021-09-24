@@ -15,46 +15,127 @@
 package lang
 
 import (
-	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
+
+	translators "github.com/gohugoio/localescompressed"
+	"github.com/gohugoio/locales"
+	"github.com/pkg/errors"
 
 	"github.com/gohugoio/hugo/deps"
 	"github.com/spf13/cast"
 )
 
 // New returns a new instance of the lang-namespaced template functions.
-func New(deps *deps.Deps) *Namespace {
+func New(deps *deps.Deps, translator locales.Translator) *Namespace {
 	return &Namespace{
-		deps: deps,
+		translator: translator,
+		deps:       deps,
 	}
 }
 
 // Namespace provides template functions for the "lang" namespace.
 type Namespace struct {
-	deps *deps.Deps
+	translator locales.Translator
+	deps       *deps.Deps
 }
 
 // Translate returns a translated string for id.
 func (ns *Namespace) Translate(id interface{}, args ...interface{}) (string, error) {
+	var templateData interface{}
+
+	if len(args) > 0 {
+		if len(args) > 1 {
+			return "", errors.Errorf("wrong number of arguments, expecting at most 2, got %d", len(args)+1)
+		}
+		templateData = args[0]
+	}
+
 	sid, err := cast.ToStringE(id)
 	if err != nil {
 		return "", nil
 	}
 
-	return ns.deps.Translate(sid, args...), nil
+	return ns.deps.Translate(sid, templateData), nil
 }
 
-// NumFmt formats a number with the given precision using the
+// FormatNumber formats number with the given precision for the current language.
+func (ns *Namespace) FormatNumber(precision, number interface{}) (string, error) {
+	p, n, err := ns.castPrecisionNumber(precision, number)
+	if err != nil {
+		return "", err
+	}
+	return ns.translator.FmtNumber(n, p), nil
+}
+
+// FormatPercent formats number with the given precision for the current language.
+// Note that the number is assumed to be a percentage.
+func (ns *Namespace) FormatPercent(precision, number interface{}) (string, error) {
+	p, n, err := ns.castPrecisionNumber(precision, number)
+	if err != nil {
+		return "", err
+	}
+	return ns.translator.FmtPercent(n, p), nil
+}
+
+// FormatCurrency returns the currency reprecentation of number for the given currency and precision
+// for the current language.
+func (ns *Namespace) FormatCurrency(precision, currency, number interface{}) (string, error) {
+	p, n, err := ns.castPrecisionNumber(precision, number)
+	if err != nil {
+		return "", err
+	}
+	c := translators.GetCurrency(cast.ToString(currency))
+	if c < 0 {
+		return "", fmt.Errorf("unknown currency code: %q", currency)
+	}
+	return ns.translator.FmtCurrency(n, p, c), nil
+}
+
+// FormatAccounting returns the currency reprecentation of number for the given currency and precision
+// for the current language in accounting notation.
+func (ns *Namespace) FormatAccounting(precision, currency, number interface{}) (string, error) {
+	p, n, err := ns.castPrecisionNumber(precision, number)
+	if err != nil {
+		return "", err
+	}
+	c := translators.GetCurrency(cast.ToString(currency))
+	if c < 0 {
+		return "", fmt.Errorf("unknown currency code: %q", currency)
+	}
+	return ns.translator.FmtAccounting(n, p, c), nil
+}
+
+func (ns *Namespace) castPrecisionNumber(precision, number interface{}) (uint64, float64, error) {
+	p, err := cast.ToUint64E(precision)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// Sanity check.
+	if p > 20 {
+		return 0, 0, fmt.Errorf("invalid precision: %d", precision)
+	}
+
+	n, err := cast.ToFloat64E(number)
+	if err != nil {
+		return 0, 0, err
+	}
+	return p, n, nil
+}
+
+// FormatNumberCustom formats a number with the given precision using the
 // negative, decimal, and grouping options.  The `options`
 // parameter is a string consisting of `<negative> <decimal> <grouping>`.  The
 // default `options` value is `- . ,`.
 //
 // Note that numbers are rounded up at 5 or greater.
 // So, with precision set to 0, 1.5 becomes `2`, and 1.4 becomes `1`.
-func (ns *Namespace) NumFmt(precision, number interface{}, options ...interface{}) (string, error) {
+//
+// For a simpler function that adapts to the current language, see FormatNumberCustom.
+func (ns *Namespace) FormatNumberCustom(precision, number interface{}, options ...interface{}) (string, error) {
 	prec, err := cast.ToIntE(precision)
 	if err != nil {
 		return "", err
@@ -102,10 +183,13 @@ func (ns *Namespace) NumFmt(precision, number interface{}, options ...interface{
 		}
 	}
 
-	// Logic from MIT Licensed github.com/go-playground/locales/
+	exp := math.Pow(10.0, float64(prec))
+	r := math.Round(n*exp) / exp
+
+	// Logic from MIT Licensed github.com/gohugoio/locales/
 	// Original Copyright (c) 2016 Go Playground
 
-	s := strconv.FormatFloat(math.Abs(n), 'f', prec, 64)
+	s := strconv.FormatFloat(math.Abs(r), 'f', prec, 64)
 	L := len(s) + 2 + len(s[:len(s)-1-prec])/3
 
 	var count int
@@ -147,6 +231,13 @@ func (ns *Namespace) NumFmt(precision, number interface{}, options ...interface{
 	}
 
 	return string(b), nil
+}
+
+// NumFmt is deprecated, use FormatNumberCustom.
+// We renamed this in Hugo 0.87.
+// Deprecated: Use FormatNumberCustom
+func (ns *Namespace) NumFmt(precision, number interface{}, options ...interface{}) (string, error) {
+	return ns.FormatNumberCustom(precision, number, options...)
 }
 
 type pagesLanguageMerger interface {

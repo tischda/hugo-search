@@ -1,4 +1,4 @@
-// Copyright 2018 The Hugo Authors. All rights reserved.
+// Copyright 2019 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ const (
 
 	disqusShortnameKey = "disqusshortname"
 	googleAnalyticsKey = "googleanalytics"
+	rssLimitKey        = "rssLimit"
 )
 
 // Config is a privacy configuration for all the relevant services in Hugo.
@@ -31,6 +32,7 @@ type Config struct {
 	GoogleAnalytics GoogleAnalytics
 	Instagram       Instagram
 	Twitter         Twitter
+	RSS             RSS
 }
 
 // Disqus holds the functional configuration settings related to the Disqus template.
@@ -51,6 +53,11 @@ type Instagram struct {
 	// This means that if you use Bootstrap 4 or want to provide your own CSS, you want
 	// to disable the inline CSS provided by Hugo.
 	DisableInlineCSS bool
+
+	// App or Client Access Token.
+	// If you are using a Client Access Token, remember that you must combine it with your App ID
+	// using a pipe symbol (<APPID>|<CLIENTTOKEN>) otherwise the request will fail.
+	AccessToken string
 }
 
 // Twitter holds the functional configuration settings related to the Twitter shortcodes.
@@ -59,6 +66,12 @@ type Twitter struct {
 	// This means that if you want to provide your own CSS, you want
 	// to disable the inline CSS provided by Hugo.
 	DisableInlineCSS bool
+}
+
+// RSS holds the functional configuration settings related to the RSS feeds.
+type RSS struct {
+	// Limit the number of pages.
+	Limit int
 }
 
 // DecodeConfig creates a services Config from a given Hugo configuration.
@@ -74,6 +87,10 @@ func DecodeConfig(cfg config.Provider) (c Config, err error) {
 	}
 	if c.Disqus.Shortname == "" {
 		c.Disqus.Shortname = cfg.GetString(disqusShortnameKey)
+	}
+
+	if c.RSS.Limit == 0 {
+		c.RSS.Limit = cfg.GetInt(rssLimitKey)
 	}
 
 	return
