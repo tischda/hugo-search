@@ -1,6 +1,6 @@
 language: go
 go:
-    - 1.14.7
+    - 1.17.1
 
 script:
     - rm -rf test/indexes
