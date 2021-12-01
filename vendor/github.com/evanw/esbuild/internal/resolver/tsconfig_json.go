@@ -40,6 +40,7 @@ type TSConfigJSON struct {
 	TSTarget                       *config.TSTarget
 	UseDefineForClassFields        config.MaybeBool
 	PreserveImportsNotUsedAsValues bool
+	PreserveValueImports           bool
 }
 
 func ParseTSConfigJSON(
@@ -126,7 +127,7 @@ func ParseTSConfigJSON(
 					constraints[compat.ES] = []int{5}
 				case "es6", "es2015":
 					constraints[compat.ES] = []int{2015}
-				case "es7", "es2016":
+				case "es2016":
 					constraints[compat.ES] = []int{2016}
 				case "es2017":
 					constraints[compat.ES] = []int{2017}
@@ -143,7 +144,7 @@ func ParseTSConfigJSON(
 				default:
 					ok = false
 					if !helpers.IsInsideNodeModules(source.KeyPath.Text) {
-						log.AddRangeWarning(&tracker, r,
+						log.Add(logger.Warning, &tracker, r,
 							fmt.Sprintf("Unrecognized target environment %q", value))
 					}
 				}
@@ -168,9 +169,16 @@ func ParseTSConfigJSON(
 					result.PreserveImportsNotUsedAsValues = true
 				case "remove":
 				default:
-					log.AddRangeWarning(&tracker, source.RangeOfString(valueJSON.Loc),
+					log.Add(logger.Warning, &tracker, source.RangeOfString(valueJSON.Loc),
 						fmt.Sprintf("Invalid value %q for \"importsNotUsedAsValues\"", value))
 				}
+			}
+		}
+
+		// Parse "preserveValueImports"
+		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "preserveValueImports"); ok {
+			if value, ok := getBool(valueJSON); ok {
+				result.PreserveValueImports = value
 			}
 		}
 
@@ -221,7 +229,7 @@ func ParseTSConfigJSON(
 								}
 							}
 						} else {
-							log.AddRangeWarning(&tracker, source.RangeOfString(prop.ValueOrNil.Loc), fmt.Sprintf(
+							log.Add(logger.Warning, &tracker, source.RangeOfString(prop.ValueOrNil.Loc), fmt.Sprintf(
 								"Substitutions for pattern %q should be an array", key))
 						}
 					}
@@ -241,7 +249,7 @@ func parseMemberExpressionForJSX(log logger.Log, source *logger.Source, tracker 
 	for _, part := range parts {
 		if !js_lexer.IsIdentifier(part) {
 			warnRange := source.RangeOfString(loc)
-			log.AddRangeWarning(tracker, warnRange, fmt.Sprintf("Invalid JSX member expression: %q", text))
+			log.Add(logger.Warning, tracker, warnRange, fmt.Sprintf("Invalid JSX member expression: %q", text))
 			return nil
 		}
 	}
@@ -254,7 +262,7 @@ func isValidTSConfigPathPattern(text string, log logger.Log, source *logger.Sour
 		if text[i] == '*' {
 			if foundAsterisk {
 				r := source.RangeOfString(loc)
-				log.AddRangeWarning(tracker, r, fmt.Sprintf(
+				log.Add(logger.Warning, tracker, r, fmt.Sprintf(
 					"Invalid pattern %q, must have at most one \"*\" character", text))
 				return false
 			}
@@ -305,7 +313,7 @@ func isValidTSConfigPathNoBaseURLPattern(text string, log logger.Log, source *lo
 	}
 
 	r := source.RangeOfString(loc)
-	log.AddRangeWarning(tracker, r, fmt.Sprintf(
+	log.Add(logger.Warning, tracker, r, fmt.Sprintf(
 		"Non-relative path %q is not allowed when \"baseUrl\" is not set (did you forget a leading \"./\"?)", text))
 	return false
 }

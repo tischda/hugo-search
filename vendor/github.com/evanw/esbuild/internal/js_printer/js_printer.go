@@ -11,6 +11,7 @@ import (
 	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
+	"github.com/evanw/esbuild/internal/helpers"
 	"github.com/evanw/esbuild/internal/js_ast"
 	"github.com/evanw/esbuild/internal/js_lexer"
 	"github.com/evanw/esbuild/internal/logger"
@@ -510,19 +511,19 @@ func (p *printer) printClauseAlias(alias string) {
 // JavaScript language target that we support.
 
 func CanEscapeIdentifier(name string, unsupportedJSFeatures compat.JSFeature, asciiOnly bool) bool {
-	return js_lexer.IsIdentifierES5(name) && (!asciiOnly ||
+	return js_lexer.IsIdentifierES5AndESNext(name) && (!asciiOnly ||
 		!unsupportedJSFeatures.Has(compat.UnicodeEscapes) ||
 		!js_lexer.ContainsNonBMPCodePoint(name))
 }
 
 func (p *printer) canPrintIdentifier(name string) bool {
-	return js_lexer.IsIdentifierES5(name) && (!p.options.ASCIIOnly ||
+	return js_lexer.IsIdentifierES5AndESNext(name) && (!p.options.ASCIIOnly ||
 		!p.options.UnsupportedFeatures.Has(compat.UnicodeEscapes) ||
 		!js_lexer.ContainsNonBMPCodePoint(name))
 }
 
 func (p *printer) canPrintIdentifierUTF16(name []uint16) bool {
-	return js_lexer.IsIdentifierES5UTF16(name) && (!p.options.ASCIIOnly ||
+	return js_lexer.IsIdentifierES5AndESNextUTF16(name) && (!p.options.ASCIIOnly ||
 		!p.options.UnsupportedFeatures.Has(compat.UnicodeEscapes) ||
 		!js_lexer.ContainsNonBMPCodePointUTF16(name))
 }
@@ -818,6 +819,15 @@ func (p *printer) printClass(class js_ast.Class) {
 	for _, item := range class.Properties {
 		p.printSemicolonIfNeeded()
 		p.printIndent()
+
+		if item.Kind == js_ast.PropertyClassStaticBlock {
+			p.print("static")
+			p.printSpace()
+			p.printBlock(item.ClassStaticBlock.Loc, item.ClassStaticBlock.Stmts)
+			p.printNewline()
+			continue
+		}
+
 		p.printProperty(item)
 
 		// Need semicolons after class fields
@@ -1805,6 +1815,15 @@ func (p *printer) printExpr(expr js_ast.Expr, level js_ast.L, flags printExprFla
 		// Need a space before the next identifier to avoid it turning into flags
 		p.prevRegExpEnd = len(p.js)
 
+	case *js_ast.EInlinedEnum:
+		p.printExpr(e.Value, level, flags)
+
+		if !p.options.RemoveWhitespace {
+			p.print(" /* ")
+			p.print(e.Comment)
+			p.print(" */")
+		}
+
 	case *js_ast.EBigInt:
 		p.printSpaceBeforeIdentifier()
 		p.print(e.Value)
@@ -2420,30 +2439,9 @@ func (p *printer) printIf(s *js_ast.SIf) {
 	}
 }
 
-func escapeClosingScriptTag(text string) string {
-	i := strings.Index(text, "</")
-	if i < 0 {
-		return text
-	}
-	var b strings.Builder
-	for {
-		b.WriteString(text[:i+1])
-		text = text[i+1:]
-		if len(text) >= 7 && strings.EqualFold(text[:7], "/script") {
-			b.WriteByte('\\')
-		}
-		i = strings.Index(text, "</")
-		if i < 0 {
-			break
-		}
-	}
-	b.WriteString(text)
-	return b.String()
-}
-
 func (p *printer) printIndentedComment(text string) {
 	// Avoid generating a comment containing the character sequence "</script"
-	text = escapeClosingScriptTag(text)
+	text = helpers.EscapeClosingTag(text, "/script")
 
 	if strings.HasPrefix(text, "/*") {
 		// Re-indent multi-line comments

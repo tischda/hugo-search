@@ -15,6 +15,7 @@ package modules
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -379,6 +380,16 @@ type Mount struct {
 
 	Lang string // any language code associated with this mount.
 
+	// Include only files matching the given Glob patterns (string or slice).
+	IncludeFiles interface{}
+
+	// Exclude all files matching the given Glob patterns (string or slice).
+	ExcludeFiles interface{}
+}
+
+// Used as key to remove duplicates.
+func (m Mount) key() string {
+	return path.Join(m.Lang, m.Source, m.Target)
 }
 
 func (m Mount) Component() string {

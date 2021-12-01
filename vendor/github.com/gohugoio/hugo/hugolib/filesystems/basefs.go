@@ -24,7 +24,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gohugoio/hugo/htesting"
+	"github.com/gohugoio/hugo/hugofs/glob"
+
+	"github.com/gohugoio/hugo/common/types"
+
 	"github.com/gohugoio/hugo/common/loggers"
+	"github.com/rogpeppe/go-internal/lockedfile"
 
 	"github.com/gohugoio/hugo/hugofs/files"
 
@@ -36,6 +42,13 @@ import (
 
 	"github.com/gohugoio/hugo/hugolib/paths"
 	"github.com/spf13/afero"
+)
+
+const (
+	// Used to control concurrency between multiple Hugo instances, e.g.
+	// a running server and building new content with 'hugo new'.
+	// It's placed in the project root.
+	lockFileBuild = ".hugo_build.lock"
 )
 
 var filePathSeparator = string(filepath.Separator)
@@ -56,6 +69,21 @@ type BaseFs struct {
 	PublishFs afero.Fs
 
 	theBigFs *filesystemsCollector
+
+	// Locks.
+	buildMu      *lockedfile.Mutex // <project>/.hugo_build.lock
+	buildMuTests sync.Mutex        // Used in tests.
+}
+
+// Tries to acquire a build lock.
+func (fs *BaseFs) LockBuild() (unlock func(), err error) {
+	if htesting.IsTest {
+		fs.buildMuTests.Lock()
+		return func() {
+			fs.buildMuTests.Unlock()
+		}, nil
+	}
+	return fs.buildMu.Lock()
 }
 
 // TODO(bep) we can get regular files in here and that is fine, but
@@ -100,6 +128,46 @@ func (b *BaseFs) RelContentDir(filename string) string {
 	}
 	// Either not a content dir or already relative.
 	return filename
+}
+
+// AbsProjectContentDir tries to construct a filename below the most
+// relevant content directory.
+func (b *BaseFs) AbsProjectContentDir(filename string) (string, string, error) {
+	isAbs := filepath.IsAbs(filename)
+	for _, dir := range b.SourceFilesystems.Content.Dirs {
+		meta := dir.Meta()
+		if !meta.IsProject {
+			continue
+		}
+		if isAbs {
+			if strings.HasPrefix(filename, meta.Filename) {
+				return strings.TrimPrefix(filename, meta.Filename), filename, nil
+			}
+		} else {
+			contentDir := strings.TrimPrefix(strings.TrimPrefix(meta.Filename, meta.BaseDir), filePathSeparator)
+			if strings.HasPrefix(filename, contentDir) {
+				relFilename := strings.TrimPrefix(filename, contentDir)
+				absFilename := filepath.Join(meta.Filename, relFilename)
+				return relFilename, absFilename, nil
+			}
+		}
+
+	}
+
+	if !isAbs {
+		// A filename on the form "posts/mypage.md", put it inside
+		// the first content folder, usually <workDir>/content.
+		// Pick the last project dir (which is probably the most important one).
+		contentDirs := b.SourceFilesystems.Content.Dirs
+		for i := len(contentDirs) - 1; i >= 0; i-- {
+			meta := contentDirs[i].Meta()
+			if meta.IsProject {
+				return filename, filepath.Join(meta.Filename, filename), nil
+			}
+		}
+	}
+
+	return "", "", errors.Errorf("could not determine content directory for %q", filename)
 }
 
 // ResolveJSConfigFile resolves the JS-related config file to a absolute
@@ -366,6 +434,7 @@ func NewBase(p *paths.Paths, logger loggers.Logger, options ...func(*BaseFs) err
 	b := &BaseFs{
 		SourceFs:  sourceFs,
 		PublishFs: publishFs,
+		buildMu:   lockedfile.MutexAt(filepath.Join(p.WorkingDir, lockFileBuild)),
 	}
 
 	for _, opt := range options {
@@ -561,6 +630,14 @@ func (b *sourceFilesystemsBuilder) createModFs(
 			mountWeight++
 		}
 
+		inclusionFilter, err := glob.NewFilenameFilter(
+			types.ToStringSlicePreserveString(mount.IncludeFiles),
+			types.ToStringSlicePreserveString(mount.ExcludeFiles),
+		)
+		if err != nil {
+			return err
+		}
+
 		base, filename := absPathify(mount.Source)
 
 		rm := hugofs.RootMapping{
@@ -568,10 +645,12 @@ func (b *sourceFilesystemsBuilder) createModFs(
 			To:        filename,
 			ToBasedir: base,
 			Module:    md.Module.Path(),
+			IsProject: md.isMainProject,
 			Meta: &hugofs.FileMeta{
-				Watch:      md.Watch(),
-				Weight:     mountWeight,
-				Classifier: files.ContentClassContent,
+				Watch:           md.Watch(),
+				Weight:          mountWeight,
+				Classifier:      files.ContentClassContent,
+				InclusionFilter: inclusionFilter,
 			},
 		}
 

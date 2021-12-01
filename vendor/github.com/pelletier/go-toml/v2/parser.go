@@ -2,6 +2,7 @@ package toml
 
 import (
 	"bytes"
+	"unicode"
 
 	"github.com/pelletier/go-toml/v2/internal/ast"
 	"github.com/pelletier/go-toml/v2/internal/danger"
@@ -106,9 +107,8 @@ func (p *parser) parseExpression(b []byte) (ast.Reference, []byte, error) {
 	}
 
 	if b[0] == '#' {
-		_, rest := scanComment(b)
-
-		return ref, rest, nil
+		_, rest, err := scanComment(b)
+		return ref, rest, err
 	}
 
 	if b[0] == '\n' || b[0] == '\r' {
@@ -129,9 +129,8 @@ func (p *parser) parseExpression(b []byte) (ast.Reference, []byte, error) {
 	b = p.parseWhitespace(b)
 
 	if len(b) > 0 && b[0] == '#' {
-		_, rest := scanComment(b)
-
-		return ref, rest, nil
+		_, rest, err := scanComment(b)
+		return ref, rest, err
 	}
 
 	return ref, b, nil
@@ -353,7 +352,13 @@ func (p *parser) parseInlineTable(b []byte) (ast.Reference, []byte, error) {
 	var err error
 
 	for len(b) > 0 {
+		previousB := b
 		b = p.parseWhitespace(b)
+
+		if len(b) == 0 {
+			return parent, nil, newDecodeError(previousB[:1], "inline table is incomplete")
+		}
+
 		if b[0] == '}' {
 			break
 		}
@@ -397,6 +402,7 @@ func (p *parser) parseValArray(b []byte) (ast.Reference, []byte, error) {
 	// array-values =/ ws-comment-newline val ws-comment-newline [ array-sep ]
 	// array-sep = %x2C  ; , Comma
 	// ws-comment-newline = *( wschar / [ comment ] newline )
+	arrayStart := b
 	b = b[1:]
 
 	parent := p.builder.Push(ast.Node{
@@ -415,7 +421,7 @@ func (p *parser) parseValArray(b []byte) (ast.Reference, []byte, error) {
 		}
 
 		if len(b) == 0 {
-			return parent, nil, newDecodeError(b, "array is incomplete")
+			return parent, nil, newDecodeError(arrayStart[:1], "array is incomplete")
 		}
 
 		if b[0] == ']' {
@@ -432,6 +438,8 @@ func (p *parser) parseValArray(b []byte) (ast.Reference, []byte, error) {
 			if err != nil {
 				return parent, nil, err
 			}
+		} else if !first {
+			return parent, nil, newDecodeError(b[0:1], "array elements must be separated by commas")
 		}
 
 		// TOML allows trailing commas in arrays.
@@ -440,7 +448,6 @@ func (p *parser) parseValArray(b []byte) (ast.Reference, []byte, error) {
 		}
 
 		var valueRef ast.Reference
-
 		valueRef, b, err = p.parseVal(b)
 		if err != nil {
 			return parent, nil, err
@@ -471,7 +478,10 @@ func (p *parser) parseOptionalWhitespaceCommentNewline(b []byte) ([]byte, error)
 		b = p.parseWhitespace(b)
 
 		if len(b) > 0 && b[0] == '#' {
-			_, b = scanComment(b)
+			_, b, err = scanComment(b)
+			if err != nil {
+				return nil, err
+			}
 		}
 
 		if len(b) == 0 {
@@ -521,7 +531,7 @@ func (p *parser) parseMultilineBasicString(b []byte) ([]byte, []byte, []byte, er
 	// mlb-quotes = 1*2quotation-mark
 	// mlb-unescaped = wschar / %x21 / %x23-5B / %x5D-7E / non-ascii
 	// mlb-escaped-nl = escape ws newline *( wschar / newline )
-	token, rest, err := scanMultilineBasicString(b)
+	token, escaped, rest, err := scanMultilineBasicString(b)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -538,21 +548,21 @@ func (p *parser) parseMultilineBasicString(b []byte) ([]byte, []byte, []byte, er
 	// fast path
 	startIdx := i
 	endIdx := len(token) - len(`"""`)
-	for ; i < endIdx; i++ {
-		if token[i] == '\\' {
-			break
+
+	if escaped < 0 {
+		str := token[startIdx:endIdx]
+		verr := utf8TomlValidAlreadyEscaped(str)
+		if verr.Zero() {
+			return token, str, rest, nil
 		}
-	}
-	if i == endIdx {
-		return token, token[startIdx:endIdx], rest, nil
+		return nil, nil, nil, newDecodeError(str[verr.Index:verr.Index+verr.Size], "invalid UTF-8")
 	}
 
 	var builder bytes.Buffer
-	builder.Write(token[startIdx:i])
 
 	// The scanner ensures that the token starts and ends with quotes and that
 	// escapes are balanced.
-	for ; i < len(token)-3; i++ {
+	for i < len(token)-3 {
 		c := token[i]
 
 		//nolint:nestif
@@ -560,17 +570,29 @@ func (p *parser) parseMultilineBasicString(b []byte) ([]byte, []byte, []byte, er
 			// When the last non-whitespace character on a line is an unescaped \,
 			// it will be trimmed along with all whitespace (including newlines) up
 			// to the next non-whitespace character or closing delimiter.
-			if token[i+1] == '\n' || (token[i+1] == '\r' && token[i+2] == '\n') {
-				i++ // skip the \
+
+			isLastNonWhitespaceOnLine := false
+			j := 1
+		findEOLLoop:
+			for ; j < len(token)-3-i; j++ {
+				switch token[i+j] {
+				case ' ', '\t':
+					continue
+				case '\n':
+					isLastNonWhitespaceOnLine = true
+				}
+				break findEOLLoop
+			}
+			if isLastNonWhitespaceOnLine {
+				i += j
 				for ; i < len(token)-3; i++ {
 					c := token[i]
 					if !(c == '\n' || c == '\r' || c == ' ' || c == '\t') {
 						i--
-
 						break
 					}
 				}
-
+				i++
 				continue
 			}
 
@@ -609,8 +631,14 @@ func (p *parser) parseMultilineBasicString(b []byte) ([]byte, []byte, []byte, er
 			default:
 				return nil, nil, nil, newDecodeError(token[i:i+1], "invalid escaped character %#U", c)
 			}
+			i++
 		} else {
-			builder.WriteByte(c)
+			size := utf8ValidNext(token[i:])
+			if size == 0 {
+				return nil, nil, nil, newDecodeError(token[i:i+1], "invalid character %#U", c)
+			}
+			builder.Write(token[i : i+size])
+			i += size
 		}
 	}
 
@@ -697,30 +725,33 @@ func (p *parser) parseBasicString(b []byte) ([]byte, []byte, []byte, error) {
 	// escape-seq-char =/ %x74         ; t    tab             U+0009
 	// escape-seq-char =/ %x75 4HEXDIG ; uXXXX                U+XXXX
 	// escape-seq-char =/ %x55 8HEXDIG ; UXXXXXXXX            U+XXXXXXXX
-	token, rest, err := scanBasicString(b)
+	token, escaped, rest, err := scanBasicString(b)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	// fast path
-	i := len(`"`)
-	startIdx := i
+	startIdx := len(`"`)
 	endIdx := len(token) - len(`"`)
-	for ; i < endIdx; i++ {
-		if token[i] == '\\' {
-			break
+
+	// Fast path. If there is no escape sequence, the string should just be
+	// an UTF-8 encoded string, which is the same as Go. In that case,
+	// validate the string and return a direct reference to the buffer.
+	if escaped < 0 {
+		str := token[startIdx:endIdx]
+		verr := utf8TomlValidAlreadyEscaped(str)
+		if verr.Zero() {
+			return token, str, rest, nil
 		}
-	}
-	if i == endIdx {
-		return token, token[startIdx:endIdx], rest, nil
+		return nil, nil, nil, newDecodeError(str[verr.Index:verr.Index+verr.Size], "invalid UTF-8")
 	}
 
+	i := startIdx
+
 	var builder bytes.Buffer
-	builder.Write(token[startIdx:i])
 
 	// The scanner ensures that the token starts and ends with quotes and that
 	// escapes are balanced.
-	for ; i < len(token)-1; i++ {
+	for i < len(token)-1 {
 		c := token[i]
 		if c == '\\' {
 			i++
@@ -758,8 +789,14 @@ func (p *parser) parseBasicString(b []byte) ([]byte, []byte, []byte, error) {
 			default:
 				return nil, nil, nil, newDecodeError(token[i:i+1], "invalid escaped character %#U", c)
 			}
+			i++
 		} else {
-			builder.WriteByte(c)
+			size := utf8ValidNext(token[i:])
+			if size == 0 {
+				return nil, nil, nil, newDecodeError(token[i:i+1], "invalid character %#U", c)
+			}
+			builder.Write(token[i : i+size])
+			i += size
 		}
 	}
 
@@ -772,22 +809,27 @@ func hexToRune(b []byte, length int) (rune, error) {
 	}
 	b = b[:length]
 
-	var r rune
+	var r uint32
 	for i, c := range b {
+		d := uint32(0)
 		switch {
 		case '0' <= c && c <= '9':
-			c = c - '0'
+			d = uint32(c - '0')
 		case 'a' <= c && c <= 'f':
-			c = c - 'a' + 10
+			d = uint32(c - 'a' + 10)
 		case 'A' <= c && c <= 'F':
-			c = c - 'A' + 10
+			d = uint32(c - 'A' + 10)
 		default:
 			return -1, newDecodeError(b[i:i+1], "non-hex character")
 		}
-		r = r*16 + rune(c)
+		r = r*16 + d
 	}
 
-	return r, nil
+	if r > unicode.MaxRune || 0xD800 <= r && r < 0xE000 {
+		return -1, newDecodeError(b, "escape sequence is invalid Unicode code point")
+	}
+
+	return rune(r), nil
 }
 
 func (p *parser) parseWhitespace(b []byte) []byte {
@@ -880,13 +922,18 @@ byteLoop:
 			if i >= minOffsetOfTz {
 				hasTz = true
 			}
-		case c == 'T' || c == ':' || c == '.':
+		case c == 'T' || c == 't' || c == ':' || c == '.':
 			hasTime = true
-		case c == '+' || c == '-' || c == 'Z':
+		case c == '+' || c == '-' || c == 'Z' || c == 'z':
 			hasTz = true
 		case c == ' ':
 			if !seenSpace && i+1 < len(b) && isDigit(b[i+1]) {
 				i += 2
+				// Avoid reaching past the end of the document in case the time
+				// is malformed. See TestIssue585.
+				if i >= len(b) {
+					i--
+				}
 				seenSpace = true
 				hasTime = true
 			} else {
@@ -923,7 +970,7 @@ byteLoop:
 func (p *parser) scanIntOrFloat(b []byte) (ast.Reference, []byte, error) {
 	i := 0
 
-	if len(b) > 2 && b[0] == '0' && b[1] != '.' {
+	if len(b) > 2 && b[0] == '0' && b[1] != '.' && b[1] != 'e' {
 		var isValidRune validRuneFn
 
 		switch b[1] {
@@ -1030,8 +1077,12 @@ func isValidBinaryRune(r byte) bool {
 }
 
 func expect(x byte, b []byte) ([]byte, error) {
+	if len(b) == 0 {
+		return nil, newDecodeError(b, "expected character %c but the document ended here", x)
+	}
+
 	if b[0] != x {
-		return nil, newDecodeError(b[0:1], "expected character %U", x)
+		return nil, newDecodeError(b[0:1], "expected character %c", x)
 	}
 
 	return b[1:], nil

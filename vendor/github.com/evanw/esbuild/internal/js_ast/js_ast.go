@@ -260,11 +260,20 @@ const (
 	PropertyGet
 	PropertySet
 	PropertySpread
+	PropertyDeclare
+	PropertyClassStaticBlock
 )
 
+type ClassStaticBlock struct {
+	Loc   logger.Loc
+	Stmts []Stmt
+}
+
 type Property struct {
-	TSDecorators []Expr
-	Key          Expr
+	TSDecorators     []Expr
+	ClassStaticBlock *ClassStaticBlock
+
+	Key Expr
 
 	// This is omitted for class fields
 	ValueOrNil Expr
@@ -350,6 +359,11 @@ type Binding struct {
 // Go's type system.
 type B interface{ isBinding() }
 
+func (*BMissing) isBinding()    {}
+func (*BIdentifier) isBinding() {}
+func (*BArray) isBinding()      {}
+func (*BObject) isBinding()     {}
+
 type BMissing struct{}
 
 type BIdentifier struct{ Ref Ref }
@@ -365,11 +379,6 @@ type BObject struct {
 	IsSingleLine bool
 }
 
-func (*BMissing) isBinding()    {}
-func (*BIdentifier) isBinding() {}
-func (*BArray) isBinding()      {}
-func (*BObject) isBinding()     {}
-
 type Expr struct {
 	Loc  logger.Loc
 	Data E
@@ -378,6 +387,44 @@ type Expr struct {
 // This interface is never called. Its purpose is to encode a variant type in
 // Go's type system.
 type E interface{ isExpr() }
+
+func (*EArray) isExpr()                {}
+func (*EUnary) isExpr()                {}
+func (*EBinary) isExpr()               {}
+func (*EBoolean) isExpr()              {}
+func (*ESuper) isExpr()                {}
+func (*ENull) isExpr()                 {}
+func (*EUndefined) isExpr()            {}
+func (*EThis) isExpr()                 {}
+func (*ENew) isExpr()                  {}
+func (*ENewTarget) isExpr()            {}
+func (*EImportMeta) isExpr()           {}
+func (*ECall) isExpr()                 {}
+func (*EDot) isExpr()                  {}
+func (*EIndex) isExpr()                {}
+func (*EArrow) isExpr()                {}
+func (*EFunction) isExpr()             {}
+func (*EClass) isExpr()                {}
+func (*EIdentifier) isExpr()           {}
+func (*EImportIdentifier) isExpr()     {}
+func (*EPrivateIdentifier) isExpr()    {}
+func (*EJSXElement) isExpr()           {}
+func (*EMissing) isExpr()              {}
+func (*ENumber) isExpr()               {}
+func (*EBigInt) isExpr()               {}
+func (*EObject) isExpr()               {}
+func (*ESpread) isExpr()               {}
+func (*EString) isExpr()               {}
+func (*ETemplate) isExpr()             {}
+func (*ERegExp) isExpr()               {}
+func (*EInlinedEnum) isExpr()          {}
+func (*EAwait) isExpr()                {}
+func (*EYield) isExpr()                {}
+func (*EIf) isExpr()                   {}
+func (*ERequireString) isExpr()        {}
+func (*ERequireResolveString) isExpr() {}
+func (*EImportString) isExpr()         {}
+func (*EImportCall) isExpr()           {}
 
 type EArray struct {
 	Items            []Expr
@@ -617,6 +664,11 @@ type ETemplate struct {
 
 type ERegExp struct{ Value string }
 
+type EInlinedEnum struct {
+	Value   Expr
+	Comment string
+}
+
 type EAwait struct {
 	Value Expr
 }
@@ -661,43 +713,6 @@ type EImportCall struct {
 	LeadingInteriorComments []Comment
 }
 
-func (*EArray) isExpr()                {}
-func (*EUnary) isExpr()                {}
-func (*EBinary) isExpr()               {}
-func (*EBoolean) isExpr()              {}
-func (*ESuper) isExpr()                {}
-func (*ENull) isExpr()                 {}
-func (*EUndefined) isExpr()            {}
-func (*EThis) isExpr()                 {}
-func (*ENew) isExpr()                  {}
-func (*ENewTarget) isExpr()            {}
-func (*EImportMeta) isExpr()           {}
-func (*ECall) isExpr()                 {}
-func (*EDot) isExpr()                  {}
-func (*EIndex) isExpr()                {}
-func (*EArrow) isExpr()                {}
-func (*EFunction) isExpr()             {}
-func (*EClass) isExpr()                {}
-func (*EIdentifier) isExpr()           {}
-func (*EImportIdentifier) isExpr()     {}
-func (*EPrivateIdentifier) isExpr()    {}
-func (*EJSXElement) isExpr()           {}
-func (*EMissing) isExpr()              {}
-func (*ENumber) isExpr()               {}
-func (*EBigInt) isExpr()               {}
-func (*EObject) isExpr()               {}
-func (*ESpread) isExpr()               {}
-func (*EString) isExpr()               {}
-func (*ETemplate) isExpr()             {}
-func (*ERegExp) isExpr()               {}
-func (*EAwait) isExpr()                {}
-func (*EYield) isExpr()                {}
-func (*EIf) isExpr()                   {}
-func (*ERequireString) isExpr()        {}
-func (*ERequireResolveString) isExpr() {}
-func (*EImportString) isExpr()         {}
-func (*EImportCall) isExpr()           {}
-
 func IsOptionalChain(value Expr) bool {
 	switch e := value.Data.(type) {
 	case *EDot:
@@ -736,6 +751,11 @@ func Not(expr Expr) Expr {
 // that is undesired.
 func MaybeSimplifyNot(expr Expr) (Expr, bool) {
 	switch e := expr.Data.(type) {
+	case *EInlinedEnum:
+		if value, ok := MaybeSimplifyNot(e.Value); ok {
+			return value, true
+		}
+
 	case *ENull, *EUndefined:
 		return Expr{Loc: expr.Loc, Data: &EBoolean{Value: true}}, true
 
@@ -797,6 +817,9 @@ func MaybeSimplifyNot(expr Expr) (Expr, bool) {
 
 func IsBooleanValue(a Expr) bool {
 	switch e := a.Data.(type) {
+	case *EInlinedEnum:
+		return IsBooleanValue(e.Value)
+
 	case *EBoolean:
 		return true
 
@@ -826,6 +849,9 @@ func IsBooleanValue(a Expr) bool {
 
 func IsNumericValue(a Expr) bool {
 	switch e := a.Data.(type) {
+	case *EInlinedEnum:
+		return IsNumericValue(e.Value)
+
 	case *ENumber:
 		return true
 
@@ -843,14 +869,18 @@ func IsNumericValue(a Expr) bool {
 		case BinOpAdd:
 			return IsNumericValue(e.Left) && IsNumericValue(e.Right)
 
-		case BinOpSub, BinOpMul, BinOpDiv, BinOpRem,
-			BinOpBitwiseAnd, BinOpBitwiseOr, BinOpBitwiseXor,
-			BinOpShl, BinOpShr, BinOpUShr:
+		case
+			BinOpSub, BinOpSubAssign,
+			BinOpMul, BinOpMulAssign,
+			BinOpDiv, BinOpDivAssign,
+			BinOpRem, BinOpRemAssign,
+			BinOpBitwiseAnd, BinOpBitwiseAndAssign,
+			BinOpBitwiseOr, BinOpBitwiseOrAssign,
+			BinOpBitwiseXor, BinOpBitwiseXorAssign,
+			BinOpShl, BinOpShlAssign,
+			BinOpShr, BinOpShrAssign,
+			BinOpUShr, BinOpUShrAssign:
 			return true
-
-		case BinOpSubAssign, BinOpMulAssign, BinOpDivAssign, BinOpRemAssign,
-			BinOpBitwiseAndAssign, BinOpBitwiseOrAssign, BinOpBitwiseXorAssign,
-			BinOpShlAssign, BinOpShrAssign, BinOpUShrAssign:
 
 		case BinOpAssign, BinOpComma:
 			return IsNumericValue(e.Right)
@@ -862,6 +892,9 @@ func IsNumericValue(a Expr) bool {
 
 func IsStringValue(a Expr) bool {
 	switch e := a.Data.(type) {
+	case *EInlinedEnum:
+		return IsStringValue(e.Value)
+
 	case *EString:
 		return true
 
@@ -940,6 +973,40 @@ type Stmt struct {
 // This interface is never called. Its purpose is to encode a variant type in
 // Go's type system.
 type S interface{ isStmt() }
+
+func (*SBlock) isStmt()         {}
+func (*SComment) isStmt()       {}
+func (*SDebugger) isStmt()      {}
+func (*SDirective) isStmt()     {}
+func (*SEmpty) isStmt()         {}
+func (*STypeScript) isStmt()    {}
+func (*SExportClause) isStmt()  {}
+func (*SExportFrom) isStmt()    {}
+func (*SExportDefault) isStmt() {}
+func (*SExportStar) isStmt()    {}
+func (*SExportEquals) isStmt()  {}
+func (*SLazyExport) isStmt()    {}
+func (*SExpr) isStmt()          {}
+func (*SEnum) isStmt()          {}
+func (*SNamespace) isStmt()     {}
+func (*SFunction) isStmt()      {}
+func (*SClass) isStmt()         {}
+func (*SLabel) isStmt()         {}
+func (*SIf) isStmt()            {}
+func (*SFor) isStmt()           {}
+func (*SForIn) isStmt()         {}
+func (*SForOf) isStmt()         {}
+func (*SDoWhile) isStmt()       {}
+func (*SWhile) isStmt()         {}
+func (*SWith) isStmt()          {}
+func (*STry) isStmt()           {}
+func (*SSwitch) isStmt()        {}
+func (*SImport) isStmt()        {}
+func (*SReturn) isStmt()        {}
+func (*SThrow) isStmt()         {}
+func (*SLocal) isStmt()         {}
+func (*SBreak) isStmt()         {}
+func (*SContinue) isStmt()      {}
 
 type SBlock struct {
 	Stmts []Stmt
@@ -1180,40 +1247,6 @@ type SBreak struct {
 type SContinue struct {
 	Label *LocRef
 }
-
-func (*SBlock) isStmt()         {}
-func (*SComment) isStmt()       {}
-func (*SDebugger) isStmt()      {}
-func (*SDirective) isStmt()     {}
-func (*SEmpty) isStmt()         {}
-func (*STypeScript) isStmt()    {}
-func (*SExportClause) isStmt()  {}
-func (*SExportFrom) isStmt()    {}
-func (*SExportDefault) isStmt() {}
-func (*SExportStar) isStmt()    {}
-func (*SExportEquals) isStmt()  {}
-func (*SLazyExport) isStmt()    {}
-func (*SExpr) isStmt()          {}
-func (*SEnum) isStmt()          {}
-func (*SNamespace) isStmt()     {}
-func (*SFunction) isStmt()      {}
-func (*SClass) isStmt()         {}
-func (*SLabel) isStmt()         {}
-func (*SIf) isStmt()            {}
-func (*SFor) isStmt()           {}
-func (*SForIn) isStmt()         {}
-func (*SForOf) isStmt()         {}
-func (*SDoWhile) isStmt()       {}
-func (*SWhile) isStmt()         {}
-func (*SWith) isStmt()          {}
-func (*STry) isStmt()           {}
-func (*SSwitch) isStmt()        {}
-func (*SImport) isStmt()        {}
-func (*SReturn) isStmt()        {}
-func (*SThrow) isStmt()         {}
-func (*SLocal) isStmt()         {}
-func (*SBreak) isStmt()         {}
-func (*SContinue) isStmt()      {}
 
 func IsSuperCall(stmt Stmt) bool {
 	if expr, ok := stmt.Data.(*SExpr); ok {
@@ -1598,6 +1631,7 @@ const (
 	ScopeEntry // This is a module, TypeScript enum, or TypeScript namespace
 	ScopeFunctionArgs
 	ScopeFunctionBody
+	ScopeClassStaticInit
 )
 
 func (kind ScopeKind) StopsHoisting() bool {
@@ -1615,6 +1649,9 @@ type Scope struct {
 	Children  []*Scope
 	Members   map[string]ScopeMember
 	Generated []Ref
+
+	// This will be non-nil if this is a TypeScript "namespace" or "enum"
+	TSNamespace *TSNamespaceScope
 
 	// The location of the "use strict" directive for ExplicitStrictMode
 	UseStrictLoc logger.Loc
@@ -1652,6 +1689,143 @@ func (s *Scope) RecursiveSetStrictMode(kind StrictModeKind) {
 			child.RecursiveSetStrictMode(kind)
 		}
 	}
+}
+
+// This is for TypeScript "enum" and "namespace" blocks. Each block can
+// potentially be instantiated multiple times. The exported members of each
+// block are merged into a single namespace while the non-exported code is
+// still scoped to just within that block:
+//
+//   let x = 1;
+//   namespace Foo {
+//     let x = 2;
+//     export let y = 3;
+//   }
+//   namespace Foo {
+//     console.log(x); // 1
+//     console.log(y); // 3
+//   }
+//
+// Doing this also works inside an enum:
+//
+//   enum Foo {
+//     A = 3,
+//     B = A + 1,
+//   }
+//   enum Foo {
+//     C = A + 2,
+//   }
+//   console.log(Foo.B) // 4
+//   console.log(Foo.C) // 5
+//
+// This is a form of identifier lookup that works differently than the
+// hierarchical scope-based identifier lookup in JavaScript. Lookup now needs
+// to search sibling scopes in addition to parent scopes. This is accomplished
+// by sharing the map of exported members between all matching sibling scopes.
+type TSNamespaceScope struct {
+	// This is shared between all sibling namespace blocks
+	ExportedMembers TSNamespaceMembers
+
+	// This is specific to this namespace block. It's the argument of the
+	// immediately-invoked function expression that the namespace block is
+	// compiled into:
+	//
+	//   var ns;
+	//   (function (ns2) {
+	//     ns2.x = 123;
+	//   })(ns || (ns = {}));
+	//
+	// This variable is "ns2" in the above example. It's the symbol to use when
+	// generating property accesses off of this namespace when it's in scope.
+	ArgRef Ref
+
+	// This is a lazily-generated map of identifiers that actually represent
+	// property accesses to this namespace's properties. For example:
+	//
+	//   namespace x {
+	//     export let y = 123
+	//   }
+	//   namespace x {
+	//     export let z = y
+	//   }
+	//
+	// This should be compiled into the following code:
+	//
+	//   var x;
+	//   (function(x2) {
+	//     x2.y = 123;
+	//   })(x || (x = {}));
+	//   (function(x3) {
+	//     x3.z = x3.y;
+	//   })(x || (x = {}));
+	//
+	// When we try to find the symbol "y", we instead return one of these lazily
+	// generated proxy symbols that represent the property access "x3.y". This
+	// map is unique per namespace block because "x3" is the argument symbol that
+	// is specific to that particular namespace block.
+	LazilyGeneratedProperyAccesses map[string]Ref
+
+	// Even though enums are like namespaces and both enums and namespaces allow
+	// implicit references to properties of sibling scopes, they behave like
+	// separate, er, namespaces. Implicit references only work namespace-to-
+	// namespace and enum-to-enum. They do not work enum-to-namespace. And I'm
+	// not sure what's supposed to happen for the namespace-to-enum case because
+	// the compiler crashes: https://github.com/microsoft/TypeScript/issues/46891.
+	// So basically these both work:
+	//
+	//   enum a { b = 1 }
+	//   enum a { c = b }
+	//
+	//   namespace x { export let y = 1 }
+	//   namespace x { export let z = y }
+	//
+	// This doesn't work:
+	//
+	//   enum a { b = 1 }
+	//   namespace a { export let c = b }
+	//
+	// And this crashes the TypeScript compiler:
+	//
+	//   namespace a { export let b = 1 }
+	//   enum a { c = b }
+	//
+	// Therefore we only allow enum/enum and namespace/namespace interactions.
+	IsEnumScope bool
+}
+
+type TSNamespaceMembers map[string]TSNamespaceMember
+
+type TSNamespaceMember struct {
+	Data        TSNamespaceMemberData
+	Loc         logger.Loc
+	IsEnumValue bool
+}
+
+type TSNamespaceMemberData interface {
+	isTSNamespaceMember()
+}
+
+func (TSNamespaceMemberProperty) isTSNamespaceMember()   {}
+func (TSNamespaceMemberNamespace) isTSNamespaceMember()  {}
+func (TSNamespaceMemberEnumNumber) isTSNamespaceMember() {}
+func (TSNamespaceMemberEnumString) isTSNamespaceMember() {}
+
+// "namespace ns { export let it }"
+type TSNamespaceMemberProperty struct{}
+
+// "namespace ns { export namespace it {} }"
+type TSNamespaceMemberNamespace struct {
+	ExportedMembers TSNamespaceMembers
+}
+
+// "enum ns { it }"
+type TSNamespaceMemberEnumNumber struct {
+	Value float64
+}
+
+// "enum ns { it = 'it' }"
+type TSNamespaceMemberEnumString struct {
+	Value []uint16
 }
 
 type SymbolMap struct {

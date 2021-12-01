@@ -4,7 +4,15 @@ import (
 	"bytes"
 	"fmt"
 	"strconv"
+
+	"github.com/tdewolff/parse/v2"
 )
+
+var ErrInvalidJSON = fmt.Errorf("invalid JSON")
+
+type JSONer interface {
+	JSON(*bytes.Buffer) error
+}
 
 // AST is the full ECMAScript abstract syntax tree.
 type AST struct {
@@ -1400,6 +1408,25 @@ func (n LiteralExpr) JS() string {
 	return string(n.Data)
 }
 
+// JSON converts the node back to valid JSON
+func (n LiteralExpr) JSON(buf *bytes.Buffer) error {
+	if n.TokenType == TrueToken || n.TokenType == FalseToken || n.TokenType == NullToken || n.TokenType == DecimalToken {
+		buf.Write(n.Data)
+		return nil
+	} else if n.TokenType == StringToken {
+		data := n.Data
+		if n.Data[0] == '\'' {
+			data = parse.Copy(data)
+			data = bytes.ReplaceAll(data, []byte(`"`), []byte(`\"`))
+			data[0] = '"'
+			data[len(data)-1] = '"'
+		}
+		buf.Write(data)
+		return nil
+	}
+	return ErrInvalidJSON
+}
+
 // Element is an array literal element.
 type Element struct {
 	Value  IExpr // can be nil
@@ -1473,6 +1500,27 @@ func (n ArrayExpr) JS() string {
 	return s + "]"
 }
 
+// JSON converts the node back to valid JSON
+func (n ArrayExpr) JSON(buf *bytes.Buffer) error {
+	buf.WriteByte('[')
+	for i, item := range n.List {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		if item.Value == nil || item.Spread {
+			return ErrInvalidJSON
+		}
+		val, ok := item.Value.(JSONer)
+		if !ok {
+			return ErrInvalidJSON
+		} else if err := val.JSON(buf); err != nil {
+			return err
+		}
+	}
+	buf.WriteByte(']')
+	return nil
+}
+
 // Property is a property definition in an object literal.
 type Property struct {
 	// either Name or Spread are set. When Spread is set then Value is AssignmentExpression
@@ -1516,6 +1564,28 @@ func (n Property) JS() string {
 	return s
 }
 
+// JSON converts the node back to valid JSON
+func (n Property) JSON(buf *bytes.Buffer) error {
+	if n.Name == nil || n.Name.Literal.TokenType != StringToken && n.Name.Literal.TokenType != IdentifierToken || n.Spread || n.Init != nil {
+		return ErrInvalidJSON
+	} else if n.Name.Literal.TokenType == IdentifierToken {
+		buf.WriteByte('"')
+		buf.Write(n.Name.Literal.Data)
+		buf.WriteByte('"')
+	} else {
+		_ = n.Name.Literal.JSON(buf)
+	}
+	buf.WriteString(": ")
+
+	val, ok := n.Value.(JSONer)
+	if !ok {
+		return ErrInvalidJSON
+	} else if err := val.JSON(buf); err != nil {
+		return err
+	}
+	return nil
+}
+
 // ObjectExpr is an object literal.
 type ObjectExpr struct {
 	List []Property
@@ -1542,6 +1612,21 @@ func (n ObjectExpr) JS() string {
 		s += item.JS()
 	}
 	return s + "}"
+}
+
+// JSON converts the node back to valid JSON
+func (n ObjectExpr) JSON(buf *bytes.Buffer) error {
+	buf.WriteByte('{')
+	for i, item := range n.List {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		if err := item.JSON(buf); err != nil {
+			return err
+		}
+	}
+	buf.WriteByte('}')
+	return nil
 }
 
 // TemplatePart is a template head or middle.
@@ -1804,6 +1889,16 @@ func (n UnaryExpr) JS() string {
 		return n.Op.String() + " " + n.X.JS()
 	}
 	return n.Op.String() + n.X.JS()
+}
+
+// JSON converts the node back to valid JSON
+func (n UnaryExpr) JSON(buf *bytes.Buffer) error {
+	if lit, ok := n.X.(*LiteralExpr); ok && n.Op == NegToken && lit.TokenType == DecimalToken {
+		buf.WriteByte('-')
+		buf.Write(lit.Data)
+		return nil
+	}
+	return ErrInvalidJSON
 }
 
 // BinaryExpr is a binary expression.
