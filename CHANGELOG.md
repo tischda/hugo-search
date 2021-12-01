@@ -2,7 +2,7 @@
 
 ## [2.0.0] - unreleased
 
-* Update hugo to 0.88.1, fixes #1
+* Update hugo to 0.89.4, fixes #1
 * Freshen-up build and release system
 * Minor improvements
 

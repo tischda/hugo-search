@@ -6,24 +6,28 @@ import (
 	"unicode/utf8"
 
 	"github.com/evanw/esbuild/internal/ast"
+	"github.com/evanw/esbuild/internal/config"
 	"github.com/evanw/esbuild/internal/css_ast"
 	"github.com/evanw/esbuild/internal/css_lexer"
+	"github.com/evanw/esbuild/internal/helpers"
 	"github.com/evanw/esbuild/internal/sourcemap"
 )
 
 const quoteForURL byte = 0
 
 type printer struct {
-	options       Options
-	importRecords []ast.ImportRecord
-	css           []byte
-	builder       sourcemap.ChunkBuilder
+	options                Options
+	importRecords          []ast.ImportRecord
+	css                    []byte
+	extractedLegalComments map[string]bool
+	builder                sourcemap.ChunkBuilder
 }
 
 type Options struct {
 	RemoveWhitespace  bool
 	ASCIIOnly         bool
 	AddSourceMappings bool
+	LegalComments     config.LegalComments
 
 	// If we're writing out a source map, this table of line start indices lets
 	// us do binary search on to figure out what line a given AST node came from
@@ -35,8 +39,9 @@ type Options struct {
 }
 
 type PrintResult struct {
-	CSS            []byte
-	SourceMapChunk sourcemap.Chunk
+	CSS                    []byte
+	ExtractedLegalComments map[string]bool
+	SourceMapChunk         sourcemap.Chunk
 }
 
 func Print(tree css_ast.AST, options Options) PrintResult {
@@ -49,12 +54,29 @@ func Print(tree css_ast.AST, options Options) PrintResult {
 		p.printRule(rule, 0, false)
 	}
 	return PrintResult{
-		CSS:            p.css,
-		SourceMapChunk: p.builder.GenerateChunk(p.css),
+		CSS:                    p.css,
+		ExtractedLegalComments: p.extractedLegalComments,
+		SourceMapChunk:         p.builder.GenerateChunk(p.css),
 	}
 }
 
 func (p *printer) printRule(rule css_ast.Rule, indent int32, omitTrailingSemicolon bool) {
+	if r, ok := rule.Data.(*css_ast.RComment); ok {
+		switch p.options.LegalComments {
+		case config.LegalCommentsNone:
+			return
+
+		case config.LegalCommentsEndOfFile,
+			config.LegalCommentsLinkedWithComment,
+			config.LegalCommentsExternalWithoutComment:
+			if p.extractedLegalComments == nil {
+				p.extractedLegalComments = make(map[string]bool)
+			}
+			p.extractedLegalComments[r.Text] = true
+			return
+		}
+	}
+
 	if p.options.AddSourceMappings {
 		p.builder.AddSourceMapping(rule.Loc, p.css)
 	}
@@ -201,6 +223,9 @@ func (p *printer) printRule(rule css_ast.Rule, indent int32, omitTrailingSemicol
 			p.print(";")
 		}
 
+	case *css_ast.RComment:
+		p.printIndentedComment(indent, r.Text)
+
 	default:
 		panic("Internal error")
 	}
@@ -208,6 +233,25 @@ func (p *printer) printRule(rule css_ast.Rule, indent int32, omitTrailingSemicol
 	if !p.options.RemoveWhitespace {
 		p.print("\n")
 	}
+}
+
+func (p *printer) printIndentedComment(indent int32, text string) {
+	// Avoid generating a comment containing the character sequence "</style"
+	text = helpers.EscapeClosingTag(text, "/style")
+
+	// Re-indent multi-line comments
+	for {
+		newline := strings.IndexByte(text, '\n')
+		if newline == -1 {
+			break
+		}
+		p.print(text[:newline+1])
+		if !p.options.RemoveWhitespace {
+			p.printIndent(indent)
+		}
+		text = text[newline+1:]
+	}
+	p.print(text)
 }
 
 func (p *printer) printRuleBlock(rules []css_ast.Rule, indent int32) {
@@ -246,6 +290,13 @@ func (p *printer) printComplexSelectors(selectors []css_ast.ComplexSelector, ind
 }
 
 func (p *printer) printCompoundSelector(sel css_ast.CompoundSelector, isFirst bool, isLast bool) {
+	if !isFirst && sel.Combinator == "" {
+		// A space is required in between compound selectors if there is no
+		// combinator in the middle. It's fine to convert "a + b" into "a+b"
+		// but not to convert "a b" into "ab".
+		p.print(" ")
+	}
+
 	if sel.HasNestPrefix {
 		p.print("&")
 	}
@@ -258,8 +309,6 @@ func (p *printer) printCompoundSelector(sel css_ast.CompoundSelector, isFirst bo
 		if !p.options.RemoveWhitespace {
 			p.print(" ")
 		}
-	} else if !isFirst {
-		p.print(" ")
 	}
 
 	if sel.TypeSelector != nil {

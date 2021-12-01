@@ -123,9 +123,13 @@ func (f TimeFormatter) Format(t time.Time, layout string) string {
 	dayIdx := t.Weekday()
 
 	s = strings.ReplaceAll(s, longMonthNames[monthIdx], f.ltr.MonthWide(t.Month()))
-	s = strings.ReplaceAll(s, shortMonthNames[monthIdx], f.ltr.MonthAbbreviated(t.Month()))
+	if !strings.Contains(s, f.ltr.MonthWide(t.Month())) {
+		s = strings.ReplaceAll(s, shortMonthNames[monthIdx], f.ltr.MonthAbbreviated(t.Month()))
+	}
 	s = strings.ReplaceAll(s, longDayNames[dayIdx], f.ltr.WeekdayWide(t.Weekday()))
-	s = strings.ReplaceAll(s, shortDayNames[dayIdx], f.ltr.WeekdayAbbreviated(t.Weekday()))
+	if !strings.Contains(s, f.ltr.WeekdayWide(t.Weekday())) {
+		s = strings.ReplaceAll(s, shortDayNames[dayIdx], f.ltr.WeekdayAbbreviated(t.Weekday()))
+	}
 
 	return s
 }
@@ -136,6 +140,11 @@ func ToTimeInDefaultLocationE(i interface{}, location *time.Location) (tim time.
 		return vv.AsTime(location), nil
 	case toml.LocalDateTime:
 		return vv.AsTime(location), nil
+	// issue #8895
+	// datetimes parsed by `go-toml` have empty zone name
+	// convert back them into string and use `cast`
+	case time.Time:
+		i = vv.Format(time.RFC3339)
 	}
 	return cast.ToTimeInDefaultLocationE(i, location)
 }

@@ -174,7 +174,13 @@ func (d *decoder) FromParser(v interface{}) error {
 		return fmt.Errorf("toml: decoding pointer target cannot be nil")
 	}
 
-	err := d.fromParser(r.Elem())
+	r = r.Elem()
+	if r.Kind() == reflect.Interface && r.IsNil() {
+		newMap := map[string]interface{}{}
+		r.Set(reflect.ValueOf(newMap))
+	}
+
+	err := d.fromParser(r)
 	if err == nil {
 		return d.strict.Error(d.p.data)
 	}
@@ -408,6 +414,12 @@ func (d *decoder) handleKeyPart(key ast.Iterator, v reflect.Value, nextFn handle
 				mv = makeFn()
 			}
 			set = true
+		} else if !mv.CanAddr() {
+			t := v.Type().Elem()
+			oldmv := mv
+			mv = reflect.New(t).Elem()
+			mv.Set(oldmv)
+			set = true
 		}
 
 		x, err := nextFn(key, mv)
@@ -476,6 +488,9 @@ func (d *decoder) handleArrayTablePart(key ast.Iterator, v reflect.Value) (refle
 // cannot handle it.
 func (d *decoder) handleTable(key ast.Iterator, v reflect.Value) (reflect.Value, error) {
 	if v.Kind() == reflect.Slice {
+		if v.Len() == 0 {
+			return reflect.Value{}, newDecodeError(key.Node().Data, "cannot store a table in a slice")
+		}
 		elem := v.Index(v.Len() - 1)
 		x, err := d.handleTable(key, elem)
 		if err != nil {
@@ -510,6 +525,11 @@ func (d *decoder) handleKeyValues(v reflect.Value) (reflect.Value, error) {
 			break
 		}
 
+		err := d.seen.CheckExpression(expr)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+
 		x, err := d.handleKeyValue(expr, v)
 		if err != nil {
 			return reflect.Value{}, err
@@ -540,10 +560,6 @@ func (d *decoder) handleTablePart(key ast.Iterator, v reflect.Value) (reflect.Va
 }
 
 func (d *decoder) tryTextUnmarshaler(node *ast.Node, v reflect.Value) (bool, error) {
-	if v.Kind() != reflect.Struct {
-		return false, nil
-	}
-
 	// Special case for time, because we allow to unmarshal to it from
 	// different kind of AST nodes.
 	if v.Type() == timeType {
@@ -817,86 +833,92 @@ func (d *decoder) unmarshalInteger(value *ast.Node, v reflect.Value) error {
 		return err
 	}
 
+	var r reflect.Value
+
 	switch v.Kind() {
 	case reflect.Int64:
 		v.SetInt(i)
+		return nil
 	case reflect.Int32:
 		if i < math.MinInt32 || i > math.MaxInt32 {
 			return fmt.Errorf("toml: number %d does not fit in an int32", i)
 		}
 
-		v.Set(reflect.ValueOf(int32(i)))
-		return nil
+		r = reflect.ValueOf(int32(i))
 	case reflect.Int16:
 		if i < math.MinInt16 || i > math.MaxInt16 {
 			return fmt.Errorf("toml: number %d does not fit in an int16", i)
 		}
 
-		v.Set(reflect.ValueOf(int16(i)))
+		r = reflect.ValueOf(int16(i))
 	case reflect.Int8:
 		if i < math.MinInt8 || i > math.MaxInt8 {
 			return fmt.Errorf("toml: number %d does not fit in an int8", i)
 		}
 
-		v.Set(reflect.ValueOf(int8(i)))
+		r = reflect.ValueOf(int8(i))
 	case reflect.Int:
 		if i < minInt || i > maxInt {
 			return fmt.Errorf("toml: number %d does not fit in an int", i)
 		}
 
-		v.Set(reflect.ValueOf(int(i)))
+		r = reflect.ValueOf(int(i))
 	case reflect.Uint64:
 		if i < 0 {
 			return fmt.Errorf("toml: negative number %d does not fit in an uint64", i)
 		}
 
-		v.Set(reflect.ValueOf(uint64(i)))
+		r = reflect.ValueOf(uint64(i))
 	case reflect.Uint32:
 		if i < 0 || i > math.MaxUint32 {
 			return fmt.Errorf("toml: negative number %d does not fit in an uint32", i)
 		}
 
-		v.Set(reflect.ValueOf(uint32(i)))
+		r = reflect.ValueOf(uint32(i))
 	case reflect.Uint16:
 		if i < 0 || i > math.MaxUint16 {
 			return fmt.Errorf("toml: negative number %d does not fit in an uint16", i)
 		}
 
-		v.Set(reflect.ValueOf(uint16(i)))
+		r = reflect.ValueOf(uint16(i))
 	case reflect.Uint8:
 		if i < 0 || i > math.MaxUint8 {
 			return fmt.Errorf("toml: negative number %d does not fit in an uint8", i)
 		}
 
-		v.Set(reflect.ValueOf(uint8(i)))
+		r = reflect.ValueOf(uint8(i))
 	case reflect.Uint:
 		if i < 0 {
 			return fmt.Errorf("toml: negative number %d does not fit in an uint", i)
 		}
 
-		v.Set(reflect.ValueOf(uint(i)))
+		r = reflect.ValueOf(uint(i))
 	case reflect.Interface:
-		v.Set(reflect.ValueOf(i))
+		r = reflect.ValueOf(i)
 	default:
-		err = fmt.Errorf("toml: cannot store TOML integer into a Go %s", v.Kind())
+		return fmt.Errorf("toml: cannot store TOML integer into a Go %s", v.Kind())
 	}
 
-	return err
+	if !r.Type().AssignableTo(v.Type()) {
+		r = r.Convert(v.Type())
+	}
+
+	v.Set(r)
+
+	return nil
 }
 
 func (d *decoder) unmarshalString(value *ast.Node, v reflect.Value) error {
-	var err error
-
 	switch v.Kind() {
 	case reflect.String:
 		v.SetString(string(value.Data))
 	case reflect.Interface:
 		v.Set(reflect.ValueOf(string(value.Data)))
 	default:
-		err = newDecodeError(d.p.Raw(value.Raw), "cannot store TOML string into a Go %s", v.Kind())
+		return newDecodeError(d.p.Raw(value.Raw), "cannot store TOML string into a Go %s", v.Kind())
 	}
 
-	return err
+	return nil
 }
 
 func (d *decoder) handleKeyValue(expr *ast.Node, v reflect.Value) (reflect.Value, error) {

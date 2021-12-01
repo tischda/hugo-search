@@ -15,16 +15,18 @@ import (
 // support for parsing https://drafts.csswg.org/css-nesting-1/.
 
 type parser struct {
-	log           logger.Log
-	source        logger.Source
-	tracker       logger.LineColumnTracker
-	options       Options
-	tokens        []css_lexer.Token
-	stack         []css_lexer.T
-	index         int
-	end           int
-	prevError     logger.Loc
-	importRecords []ast.ImportRecord
+	log               logger.Log
+	source            logger.Source
+	tracker           logger.LineColumnTracker
+	options           Options
+	tokens            []css_lexer.Token
+	legalComments     []css_lexer.Comment
+	stack             []css_lexer.T
+	index             int
+	end               int
+	legalCommentIndex int
+	prevError         logger.Loc
+	importRecords     []ast.ImportRecord
 }
 
 type Options struct {
@@ -36,12 +38,13 @@ type Options struct {
 func Parse(log logger.Log, source logger.Source, options Options) css_ast.AST {
 	result := css_lexer.Tokenize(log, source)
 	p := parser{
-		log:       log,
-		source:    source,
-		tracker:   logger.MakeLineColumnTracker(&source),
-		options:   options,
-		tokens:    result.Tokens,
-		prevError: logger.Loc{Start: -1},
+		log:           log,
+		source:        source,
+		tracker:       logger.MakeLineColumnTracker(&source),
+		options:       options,
+		tokens:        result.Tokens,
+		legalComments: result.LegalComments,
+		prevError:     logger.Loc{Start: -1},
 	}
 	p.end = len(p.tokens)
 	rules := p.parseListOfRules(ruleContext{
@@ -113,24 +116,35 @@ func (p *parser) expect(kind css_lexer.T) bool {
 		return true
 	}
 	t := p.current()
+
 	var text string
-	if kind == css_lexer.TSemicolon && p.index > 0 && p.at(p.index-1).Kind == css_lexer.TWhitespace {
-		// Have a nice error message for forgetting a trailing semicolon
-		text = "Expected \";\""
+	var suggestion string
+
+	expected := kind.String()
+	if strings.HasPrefix(expected, "\"") && strings.HasSuffix(expected, "\"") {
+		suggestion = expected[1 : len(expected)-1]
+	}
+
+	if (kind == css_lexer.TSemicolon || kind == css_lexer.TColon) && p.index > 0 && p.at(p.index-1).Kind == css_lexer.TWhitespace {
+		// Have a nice error message for forgetting a trailing semicolon or colon
+		text = fmt.Sprintf("Expected %s", expected)
 		t = p.at(p.index - 1)
 	} else {
 		switch t.Kind {
 		case css_lexer.TEndOfFile, css_lexer.TWhitespace:
-			text = fmt.Sprintf("Expected %s but found %s", kind.String(), t.Kind.String())
+			text = fmt.Sprintf("Expected %s but found %s", expected, t.Kind.String())
 			t.Range.Len = 0
 		case css_lexer.TBadURL, css_lexer.TBadString:
-			text = fmt.Sprintf("Expected %s but found %s", kind.String(), t.Kind.String())
+			text = fmt.Sprintf("Expected %s but found %s", expected, t.Kind.String())
 		default:
-			text = fmt.Sprintf("Expected %s but found %q", kind.String(), p.raw())
+			text = fmt.Sprintf("Expected %s but found %q", expected, p.raw())
 		}
 	}
+
 	if t.Range.Loc.Start > p.prevError.Start {
-		p.log.AddRangeWarning(&p.tracker, t.Range, text)
+		data := p.tracker.MsgData(t.Range, text)
+		data.Location.Suggestion = suggestion
+		p.log.AddMsg(logger.Msg{Kind: logger.Warning, Data: data})
 		p.prevError = t.Range.Loc
 	}
 	return false
@@ -148,7 +162,7 @@ func (p *parser) unexpected() {
 		default:
 			text = fmt.Sprintf("Unexpected %q", p.raw())
 		}
-		p.log.AddRangeWarning(&p.tracker, t.Range, text)
+		p.log.Add(logger.Warning, &p.tracker, t.Range, text)
 		p.prevError = t.Range.Loc
 	}
 }
@@ -166,6 +180,22 @@ func (p *parser) parseListOfRules(context ruleContext) []css_ast.Rule {
 
 loop:
 	for {
+		// If there are any legal comments immediately before the current token,
+		// turn them all into comment rules and append them to the current rule list
+		for p.legalCommentIndex < len(p.legalComments) {
+			comment := p.legalComments[p.legalCommentIndex]
+			if comment.TokenIndexAfter > uint32(p.index) {
+				break
+			}
+			if comment.TokenIndexAfter == uint32(p.index) {
+				rules = append(rules, css_ast.Rule{Loc: comment.Loc, Data: &css_ast.RComment{Text: comment.Text}})
+				if context.isTopLevel {
+					locs = append(locs, comment.Loc)
+				}
+			}
+			p.legalCommentIndex++
+		}
+
 		switch p.current().Kind {
 		case css_lexer.TEndOfFile, css_lexer.TCloseBrace:
 			break loop
@@ -182,11 +212,15 @@ loop:
 			if context.isTopLevel {
 				switch rule.Data.(type) {
 				case *css_ast.RAtCharset:
-					if !didWarnAboutCharset && len(rules) > 0 {
-						p.log.AddRangeWarningWithNotes(&p.tracker, first, "\"@charset\" must be the first rule in the file",
-							[]logger.MsgData{logger.RangeData(&p.tracker, logger.Range{Loc: locs[len(locs)-1]},
-								"This rule cannot come before a \"@charset\" rule")})
-						didWarnAboutCharset = true
+					if !didWarnAboutCharset {
+						for i, before := range rules {
+							if _, ok := before.Data.(*css_ast.RComment); !ok {
+								p.log.AddWithNotes(logger.Warning, &p.tracker, first, "\"@charset\" must be the first rule in the file",
+									[]logger.MsgData{p.tracker.MsgData(logger.Range{Loc: locs[i]},
+										"This rule cannot come before a \"@charset\" rule")})
+								didWarnAboutCharset = true
+							}
+						}
 					}
 
 				case *css_ast.RAtImport:
@@ -194,10 +228,10 @@ loop:
 					importLoop:
 						for i, before := range rules {
 							switch before.Data.(type) {
-							case *css_ast.RAtCharset, *css_ast.RAtImport:
+							case *css_ast.RComment, *css_ast.RAtCharset, *css_ast.RAtImport:
 							default:
-								p.log.AddRangeWarningWithNotes(&p.tracker, first, "All \"@import\" rules must come first",
-									[]logger.MsgData{logger.RangeData(&p.tracker, logger.Range{Loc: locs[i]},
+								p.log.AddWithNotes(logger.Warning, &p.tracker, first, "All \"@import\" rules must come first",
+									[]logger.MsgData{p.tracker.MsgData(logger.Range{Loc: locs[i]},
 										"This rule cannot come before an \"@import\" rule")})
 								didWarnAboutImport = true
 								break importLoop
@@ -231,7 +265,7 @@ loop:
 	}
 
 	if p.options.MangleSyntax {
-		rules = removeEmptyAndDuplicateRules(rules)
+		rules = mangleRules(rules)
 	}
 	return rules
 }
@@ -245,7 +279,7 @@ func (p *parser) parseListOfDeclarations() (list []css_ast.Rule) {
 		case css_lexer.TEndOfFile, css_lexer.TCloseBrace:
 			list = p.processDeclarations(list)
 			if p.options.MangleSyntax {
-				list = removeEmptyAndDuplicateRules(list)
+				list = mangleRules(list)
 			}
 			return
 
@@ -264,25 +298,19 @@ func (p *parser) parseListOfDeclarations() (list []css_ast.Rule) {
 	}
 }
 
-func removeEmptyAndDuplicateRules(rules []css_ast.Rule) []css_ast.Rule {
+func mangleRules(rules []css_ast.Rule) []css_ast.Rule {
 	type hashEntry struct {
 		indices []uint32
 	}
 
-	n := len(rules)
-	start := n
-	entries := make(map[uint32]hashEntry)
-
-	// Scan from the back so we keep the last rule
-skipRule:
-	for i := n - 1; i >= 0; i-- {
-		rule := rules[i]
-
+	// Remove empty rules
+	n := 0
+	for _, rule := range rules {
 		switch r := rule.Data.(type) {
 		case *css_ast.RAtKeyframes:
-			if len(r.Blocks) == 0 {
-				continue
-			}
+			// Do not remove empty "@keyframe foo {}" rules. Even empty rules still
+			// dispatch JavaScript animation events, so removing them changes
+			// behavior: https://bugzilla.mozilla.org/show_bug.cgi?id=1004377.
 
 		case *css_ast.RKnownAt:
 			if len(r.Rules) == 0 {
@@ -295,16 +323,47 @@ skipRule:
 			}
 		}
 
+		rules[n] = rule
+		n++
+	}
+	rules = rules[:n]
+
+	// Remove duplicate rules, scanning from the back so we keep the last duplicate
+	start := n
+	entries := make(map[uint32]hashEntry)
+skipRule:
+	for i := n - 1; i >= 0; i-- {
+		rule := rules[i]
+
+		// Merge adjacent selectors with the same content
+		// "a { color: red; } b { color: red; }" => "a, b { color: red; }"
+		if i > 0 {
+			if r, ok := rule.Data.(*css_ast.RSelector); ok {
+				if prev, ok := rules[i-1].Data.(*css_ast.RSelector); ok && css_ast.RulesEqual(r.Rules, prev.Rules) &&
+					isSafeSelectors(r.Selectors) && isSafeSelectors(prev.Selectors) {
+				nextSelector:
+					for _, sel := range r.Selectors {
+						for _, prevSel := range prev.Selectors {
+							if sel.Equal(prevSel) {
+								// Don't add duplicate selectors more than once
+								continue nextSelector
+							}
+						}
+						prev.Selectors = append(prev.Selectors, sel)
+					}
+					continue skipRule
+				}
+			}
+		}
+
+		// For duplicate rules, omit all but the last copy
 		if hash, ok := rule.Data.Hash(); ok {
 			entry := entries[hash]
-
-			// For duplicate rules, omit all but the last copy
 			for _, index := range entry.indices {
 				if rule.Data.Equal(rules[index].Data) {
 					continue skipRule
 				}
 			}
-
 			entry.indices = append(entry.indices, uint32(i))
 			entries[hash] = entry
 		}
@@ -314,6 +373,163 @@ skipRule:
 	}
 
 	return rules[start:]
+}
+
+// Reference: https://developer.mozilla.org/en-US/docs/Web/HTML/Element
+var nonDeprecatedElementsSupportedByIE7 = map[string]bool{
+	"a":          true,
+	"abbr":       true,
+	"address":    true,
+	"area":       true,
+	"b":          true,
+	"base":       true,
+	"blockquote": true,
+	"body":       true,
+	"br":         true,
+	"button":     true,
+	"caption":    true,
+	"cite":       true,
+	"code":       true,
+	"col":        true,
+	"colgroup":   true,
+	"dd":         true,
+	"del":        true,
+	"dfn":        true,
+	"div":        true,
+	"dl":         true,
+	"dt":         true,
+	"em":         true,
+	"embed":      true,
+	"fieldset":   true,
+	"form":       true,
+	"h1":         true,
+	"h2":         true,
+	"h3":         true,
+	"h4":         true,
+	"h5":         true,
+	"h6":         true,
+	"head":       true,
+	"hr":         true,
+	"html":       true,
+	"i":          true,
+	"iframe":     true,
+	"img":        true,
+	"input":      true,
+	"ins":        true,
+	"kbd":        true,
+	"label":      true,
+	"legend":     true,
+	"li":         true,
+	"link":       true,
+	"map":        true,
+	"menu":       true,
+	"meta":       true,
+	"noscript":   true,
+	"object":     true,
+	"ol":         true,
+	"optgroup":   true,
+	"option":     true,
+	"p":          true,
+	"param":      true,
+	"pre":        true,
+	"q":          true,
+	"ruby":       true,
+	"s":          true,
+	"samp":       true,
+	"script":     true,
+	"select":     true,
+	"small":      true,
+	"span":       true,
+	"strong":     true,
+	"style":      true,
+	"sub":        true,
+	"sup":        true,
+	"table":      true,
+	"tbody":      true,
+	"td":         true,
+	"textarea":   true,
+	"tfoot":      true,
+	"th":         true,
+	"thead":      true,
+	"title":      true,
+	"tr":         true,
+	"u":          true,
+	"ul":         true,
+	"var":        true,
+}
+
+// This only returns true if all of these selectors are considered "safe" which
+// means that they are very likely to work in any browser a user might reasonably
+// be using. We do NOT want to merge adjacent qualified rules with the same body
+// if any of the selectors are unsafe, since then browsers which don't support
+// that particular feature would ignore the entire merged qualified rule:
+//
+//   Input:
+//     a { color: red }
+//     b { color: red }
+//     input::-moz-placeholder { color: red }
+//
+//   Valid output:
+//     a, b { color: red }
+//     input::-moz-placeholder { color: red }
+//
+//   Invalid output:
+//     a, b, input::-moz-placeholder { color: red }
+//
+// This considers IE 7 and above to be a browser that a user could possibly use.
+// Versions of IE less than 6 are not considered.
+func isSafeSelectors(complexSelectors []css_ast.ComplexSelector) bool {
+	for _, complex := range complexSelectors {
+		for _, compound := range complex.Selectors {
+			if compound.HasNestPrefix {
+				// Bail because this is an extension: https://drafts.csswg.org/css-nesting-1/
+				return false
+			}
+
+			if compound.Combinator != "" {
+				// "Before Internet Explorer 10, the combinator only works in standards mode"
+				// Reference: https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Selectors
+				return false
+			}
+
+			if compound.TypeSelector != nil {
+				if compound.TypeSelector.NamespacePrefix != nil {
+					// Bail if we hit a namespace, which doesn't work in IE before version 9
+					// Reference: https://developer.mozilla.org/en-US/docs/Web/CSS/Type_selectors
+					return false
+				}
+
+				if compound.TypeSelector.Name.Kind == css_lexer.TIdent && !nonDeprecatedElementsSupportedByIE7[compound.TypeSelector.Name.Text] {
+					// Bail if this element is either deprecated or not supported in IE 7
+					return false
+				}
+			}
+
+			for _, ss := range compound.SubclassSelectors {
+				switch s := ss.(type) {
+				case *css_ast.SSAttribute:
+					if s.MatcherModifier != 0 {
+						// Bail if we hit a case modifier, which doesn't work in IE at all
+						// Reference: https://developer.mozilla.org/en-US/docs/Web/CSS/Attribute_selectors
+						return false
+					}
+
+				case *css_ast.SSPseudoClass:
+					// Bail if this pseudo class doesn't match a hard-coded list that's
+					// known to work everywhere. For example, ":focus" doesn't work in IE 7.
+					// Reference: https://developer.mozilla.org/en-US/docs/Web/CSS/Pseudo-classes
+					if s.Args == nil && !s.IsElement {
+						switch s.Name {
+						case "active", "first-child", "hover", "link", "visited":
+							continue
+						}
+					}
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func (p *parser) parseURLOrString() (string, logger.Range, bool) {
@@ -428,7 +644,7 @@ func (p *parser) parseAtRule(context atRuleContext) css_ast.Rule {
 		if p.peek(css_lexer.TString) {
 			encoding := p.decoded()
 			if !strings.EqualFold(encoding, "UTF-8") {
-				p.log.AddRangeWarning(&p.tracker, p.current().Range,
+				p.log.Add(logger.Warning, &p.tracker, p.current().Range,
 					fmt.Sprintf("\"UTF-8\" will be used instead of unsupported charset %q", encoding))
 			}
 			p.advance()
@@ -442,8 +658,14 @@ func (p *parser) parseAtRule(context atRuleContext) css_ast.Rule {
 		p.eat(css_lexer.TWhitespace)
 		if path, r, ok := p.expectURLOrString(); ok {
 			importConditionsStart := p.index
-			for p.current().Kind != css_lexer.TSemicolon && p.current().Kind != css_lexer.TEndOfFile {
+			for {
+				if kind := p.current().Kind; kind == css_lexer.TSemicolon || kind == css_lexer.TOpenBrace || kind == css_lexer.TEndOfFile {
+					break
+				}
 				p.parseComponentValue()
+			}
+			if p.current().Kind == css_lexer.TOpenBrace {
+				break // Avoid parsing an invalid "@import" rule
 			}
 			importConditions := p.convertTokens(p.tokens[importConditionsStart:p.index])
 			kind := ast.ImportAt
@@ -585,7 +807,7 @@ func (p *parser) parseAtRule(context atRuleContext) css_ast.Rule {
 			//
 			// Instead of implementing all of that for an extremely obscure feature,
 			// CSS namespaces are just explicitly not supported.
-			p.log.AddRangeWarning(&p.tracker, atRange, "\"@namespace\" rules are not supported")
+			p.log.Add(logger.Warning, &p.tracker, atRange, "\"@namespace\" rules are not supported")
 		}
 	}
 
@@ -660,8 +882,9 @@ func (p *parser) convertTokens(tokens []css_lexer.Token) []css_ast.Token {
 }
 
 type convertTokensOpts struct {
-	allowImports       bool
-	verbatimWhitespace bool
+	allowImports         bool
+	verbatimWhitespace   bool
+	isInsideCalcFunction bool
 }
 
 func (p *parser) convertTokensHelper(tokens []css_lexer.Token, close css_lexer.T, opts convertTokensOpts) ([]css_ast.Token, []css_lexer.Token) {
@@ -682,6 +905,14 @@ loop:
 		}
 		nextWhitespace = 0
 
+		// Warn about invalid "+" and "-" operators that break the containing "calc()"
+		if opts.isInsideCalcFunction && t.Kind.IsNumeric() && len(result) > 0 && result[len(result)-1].Kind.IsNumeric() &&
+			(strings.HasPrefix(token.Text, "+") || strings.HasPrefix(token.Text, "-")) {
+			// "calc(1+2)" and "calc(1-2)" are invalid
+			p.log.Add(logger.Warning, &p.tracker, logger.Range{Loc: t.Range.Loc, Len: 1},
+				fmt.Sprintf("The %q operator only works if there is whitespace on both sides", token.Text[:1]))
+		}
+
 		switch t.Kind {
 		case css_lexer.TWhitespace:
 			if last := len(result) - 1; last >= 0 {
@@ -689,6 +920,20 @@ loop:
 			}
 			nextWhitespace = css_ast.WhitespaceBefore
 			continue
+
+		case css_lexer.TDelimPlus, css_lexer.TDelimMinus:
+			// Warn about invalid "+" and "-" operators that break the containing "calc()"
+			if opts.isInsideCalcFunction && len(tokens) > 0 {
+				if len(result) == 0 || result[len(result)-1].Kind == css_lexer.TComma {
+					// "calc(-(1 + 2))" is invalid
+					p.log.Add(logger.Warning, &p.tracker, t.Range,
+						fmt.Sprintf("%q can only be used as an infix operator, not a prefix operator", token.Text))
+				} else if token.Whitespace != css_ast.WhitespaceBefore || tokens[0].Kind != css_lexer.TWhitespace {
+					// "calc(1- 2)" and "calc(1 -(2))" are invalid
+					p.log.Add(logger.Warning, &p.tracker, t.Range,
+						fmt.Sprintf("The %q operator only works if there is whitespace on both sides", token.Text))
+				}
+			}
 
 		case css_lexer.TNumber:
 			if p.options.MangleSyntax {
@@ -737,8 +982,16 @@ loop:
 				// CSS variables require verbatim whitespace for correctness
 				nestedOpts.verbatimWhitespace = true
 			}
+			if token.Text == "calc" {
+				nestedOpts.isInsideCalcFunction = true
+			}
 			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseParen, nestedOpts)
 			token.Children = &nested
+
+			// Apply "calc" simplification rules when minifying
+			if p.options.MangleSyntax && token.Text == "calc" {
+				token = p.tryToReduceCalcExpression(token)
+			}
 
 			// Treat a URL function call with a string just like a URL token
 			if token.Text == "url" && len(nested) == 1 && nested[0].Kind == css_lexer.TString {

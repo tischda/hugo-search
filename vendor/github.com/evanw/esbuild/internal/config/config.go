@@ -25,7 +25,8 @@ type JSXExpr struct {
 }
 
 type TSOptions struct {
-	Parse bool
+	Parse               bool
+	NoAmbiguousLessThan bool
 }
 
 type Platform uint8
@@ -78,6 +79,7 @@ const (
 	LoaderJS
 	LoaderJSX
 	LoaderTS
+	LoaderTSNoAmbiguousLessThan // Used with ".mts" and ".cts"
 	LoaderTSX
 	LoaderJSON
 	LoaderText
@@ -90,12 +92,17 @@ const (
 )
 
 func (loader Loader) IsTypeScript() bool {
-	return loader == LoaderTS || loader == LoaderTSX
+	switch loader {
+	case LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX:
+		return true
+	default:
+		return false
+	}
 }
 
 func (loader Loader) CanHaveSourceMap() bool {
 	switch loader {
-	case LoaderJS, LoaderJSX, LoaderTS, LoaderTSX, LoaderCSS:
+	case LoaderJS, LoaderJSX, LoaderTS, LoaderTSNoAmbiguousLessThan, LoaderTSX, LoaderCSS:
 		return true
 	default:
 		return false
@@ -216,18 +223,19 @@ type Options struct {
 	WriteToStdout bool
 
 	OmitRuntimeForTests     bool
-	PreserveUnusedImportsTS bool
+	UnusedImportsTS         UnusedImportsTS
 	UseDefineForClassFields MaybeBool
 	ASCIIOnly               bool
 	KeepNames               bool
 	IgnoreDCEAnnotations    bool
+	TreeShaking             bool
 
 	Defines  *ProcessedDefines
 	TS       TSOptions
 	JSX      JSXOptions
 	Platform Platform
 
-	IsTargetUnconfigured   bool // If true, TypeScript's "target" setting is respected
+	TargetFromAPI          TargetFromAPI
 	UnsupportedJSFeatures  compat.JSFeature
 	UnsupportedCSSFeatures compat.CSSFeature
 	TSTarget               *TSTarget
@@ -274,6 +282,42 @@ type Options struct {
 	ExcludeSourcesContent bool
 
 	Stdin *StdinInfo
+}
+
+type TargetFromAPI uint8
+
+const (
+	// In this state, the "target" field in "tsconfig.json" is respected
+	TargetWasUnconfigured TargetFromAPI = iota
+
+	// In this state, the "target" field in "tsconfig.json" is overridden
+	TargetWasConfigured
+
+	// In this state, "useDefineForClassFields" is true unless overridden
+	TargetWasConfiguredIncludingESNext
+)
+
+type UnusedImportsTS uint8
+
+const (
+	// "import { unused } from 'foo'" => "" (TypeScript's default behavior)
+	UnusedImportsRemoveStmt UnusedImportsTS = iota
+
+	// "import { unused } from 'foo'" => "import 'foo'" ("importsNotUsedAsValues" != "remove")
+	UnusedImportsKeepStmtRemoveValues
+
+	// "import { unused } from 'foo'" => "import { unused } from 'foo'" ("preserveValueImports" == true)
+	UnusedImportsKeepValues
+)
+
+func UnusedImportsFromTsconfigValues(preserveImportsNotUsedAsValues bool, preserveValueImports bool) UnusedImportsTS {
+	if preserveValueImports {
+		return UnusedImportsKeepValues
+	}
+	if preserveImportsNotUsedAsValues {
+		return UnusedImportsKeepStmtRemoveValues
+	}
+	return UnusedImportsRemoveStmt
 }
 
 type TSTarget struct {
@@ -382,10 +426,6 @@ func SubstituteTemplate(template []PathTemplate, placeholders PathPlaceholders) 
 		}
 	}
 	return result
-}
-
-func IsTreeShakingEnabled(mode Mode, outputFormat Format) bool {
-	return mode == ModeBundle || (mode == ModeConvertFormat && outputFormat == FormatIIFE)
 }
 
 func ShouldCallRuntimeRequire(mode Mode, outputFormat Format) bool {
