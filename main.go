@@ -32,7 +32,7 @@ func main() {
 		os.Exit(1)
 	}
 	if flag.Arg(0) == "version" || *showVersion {
-		fmt.Println("hugo-search version", version)
+		fmt.Println("hugo-search", version)
 		return
 	}
 	log.SetFlags(0)
