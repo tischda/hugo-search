@@ -1,0 +1,6 @@
+security:
+  funcs:
+    getenv:
+      - ^HUGO_
+      - ^WC_
+      - ^BLEVE_URL
