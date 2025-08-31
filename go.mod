@@ -1,6 +1,6 @@
 module github.com/tischda/hugo-search
 
-go 1.17
+go 1.25
 
 require (
 	github.com/blevesearch/bleve v1.0.14

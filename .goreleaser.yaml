@@ -1,0 +1,30 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go mod vendor
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    ldflags:
+      - -s -w -X main.name={{.ProjectName}} -X main.version={{.Tag}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}} -X main.builtBy=goreleaser
+
+archives:   
+  # make OS and Arch compatible with the results of `uname`
+  - name_template: '{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}-{{- if eq .Arch "amd64" }}x86_64{{- else if eq .Arch "386" }}i386{{- else }}{{ .Arch }}{{ end }}{{- if .Arm }}v{{ .Arm }}{{ end }}'
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
