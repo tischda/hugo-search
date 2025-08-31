@@ -1,0 +1,75 @@
+version: '3'
+
+vars:
+  PROJECT_NAME:
+    sh: bash -c 'git rev-parse --show-toplevel | xargs basename'
+  VERSION:
+    sh: bash -c 'git describe --tags --always --dirty 2>/dev/null || echo "1.0.0-dev"'
+  BUILD_DATE:
+    sh: bash -c 'date -u "+%Y-%m-%dT%H:%M:%SZ"'
+  GIT_COMMIT:
+    sh: bash -c 'git rev-parse --short HEAD 2>/dev/null || echo "unknown"'
+  LDFLAGS: -ldflags=all="-s -w -X \'main.name={{.PROJECT_NAME}}\' -X \'main.version={{.VERSION}}\' -X \'main.date={{.BUILD_DATE}}\' -X \'main.commit={{.GIT_COMMIT}}\'"
+
+tasks:
+  build:
+    desc: Build the project
+    cmds:
+      - go build {{.LDFLAGS}}
+
+  test:
+    desc: Run tests with coverage
+    cmds:
+      - go test -v -cover ./...
+
+  watch:
+    desc: Watch for modifications in go files and rebuild if changed
+    cmds:
+      - watchexec.exe --quiet --postpone --exts go task build
+
+  cover:
+    desc: Generate and view coverage report
+    cmds:
+      - go test -coverprofile=coverage.out
+      - go tool cover -html=coverage.out
+
+  update:
+    desc: Update dependencies
+    cmds:
+      - go get -u
+      - go mod tidy
+      - go mod vendor
+
+  snapshot:
+    desc: Run goreleaser snapshot
+    cmds:
+      - goreleaser --snapshot --skip-publish --clean
+
+  release:
+    desc: Run goreleaser release
+    cmds:
+      - "echo releasing {{.VERSION}}"
+      - 'sed ''1,/\#\# \[{{.VERSION}}/d;/^\#\# /Q'' CHANGELOG.md > releaseinfo'
+      - cat releaseinfo
+      - echo ----
+      - goreleaser release --clean --release-notes=releaseinfo
+      - rm -f releaseinfo
+
+  dist:
+    desc: Clean and build
+    deps: [clean, build]
+
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - go clean
+      - rm -rf dist
+      - rm -f releaseinfo
+      - rm -f coverage.out
+
+  version:
+    desc: Show version information
+    cmds:
+      - "echo {{.PROJECT_NAME}} {{.VERSION}}, built on {{.BUILD_DATE}} \\(commit: {{.GIT_COMMIT}}\\)"
+      - "echo LDFLAGS:"
+      - echo "    {{.LDFLAGS}}"

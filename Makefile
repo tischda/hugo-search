@@ -4,58 +4,80 @@
 # Escape '#' and '[' characters with '\', and '$' characters with '$$'
 # ---------------------------------------------------------------------------
 
-BUILD_TAG=$(shell git describe --tags 2>/dev/null || echo unreleased)
-LDFLAGS=-ldflags=all="-X main.version=${BUILD_TAG} -s -w"
+PROJECT_NAME=$(shell git rev-parse --show-toplevel | xargs basename )
+VERSION=$(shell git describe --tags --always --dirty 2>/dev/null || echo "1.0.0-dev")
+BUILD_DATE=$(shell date -u "+%Y-%m-%dT%H:%M:%SZ")
+GIT_COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+LDFLAGS=-ldflags=all="-s -w -X \"main.name=$(PROJECT_NAME)\" -X \"main.version=$(VERSION)\" -X \"main.date=$(BUILD_DATE)\" -X \"main.commit=$(GIT_COMMIT)\""
 
-HUGO_PORT  = 1313
-BLEVE_PORT = 8080
+
+MAKEFLAGS += --no-print-directory
 
 all: build
 
+## build: build project
 build:
-	go build ${LDFLAGS}
+	go build $(LDFLAGS)
 
+## test: run tests with coverage
 test:
-	go test -v -cover
+	go test -v -cover ./...
 
+## watch: watch for modifications in go files and rebuild if changed
+watch:
+	watchexec.exe --quiet --postpone --exts go make build
+
+## cover: run tests and show coverage report in browser
 cover:
 	go test -coverprofile=coverage.out
 	go tool cover -html=coverage.out
 
+## install: build and install binary into workspace bin folder
 install:
-	go install ${LDFLAGS} ./...
+	go install $(LDFLAGS) ./...
 
+## update: update dependencies
 update:
 	go get -u
 	go mod tidy
-	# https://github.com/golang/go/issues/45161
+	@# 'go mod tidy' should update the vendor directory (https://github.com/golang/go/issues/45161)
 	go mod vendor
 
+## snapshot: make a snapshot release
 snapshot:
-	goreleaser --snapshot --skip-publish --rm-dist
+	goreleaser --snapshot --skip-publish --clean
 
+## release: make a release based on latest tag
 release: 
-	@sed '1,/\#\# \[${BUILD_TAG}/d;/^\#\# /Q' CHANGELOG.md > releaseinfo
-	goreleaser release --rm-dist --release-notes=releaseinfo
+	@echo releasing $(VERSION)
+	@sed '1,/\#\# \[${VERSION}/d;/^\#\# /Q' CHANGELOG.md > releaseinfo
+	@cat releaseinfo
+	@echo ----
+	@goreleaser release --clean --release-notes=releaseinfo
 	@rm -f releaseinfo
 
+## dist: clean and build
+dist: clean build
+
+## clean: remove temporary files
 clean:
 	go clean
-	rm -f releaseinfo
 	rm -rf dist
+	rm -f releaseinfo
 	rm -f coverage.out
-	rm -rf test/indexes
-	rm -rf test/public
 
-start: clean build
-	./hugo-search --addr=:$(BLEVE_PORT) --hugoPath=test --indexPath=test/indexes/search.bleve --verbose &
-	@echo .
-	@echo .
-	@echo .
-	./test/hugo -s test server --port=$(HUGO_PORT) &
+## version: show version info
+version:
+	@echo "$(PROJECT_NAME) $(VERSION), built on $(BUILD_DATE) (commit: $(GIT_COMMIT))"
+	@echo "LDFLAGS:"
+	@echo "    $(LDFLAGS)"
 
-stop:
-	taskkill /F /IM hugo-search.exe
-	taskkill /F /IM hugo.exe
+## help: display this help
+help: Makefile
+	@echo
+	@echo " Choose a command run in "$(PROJECT_NAME)":"
+	@echo
+	@sed -n 's/^##//p' $< | column -t -s ':' |  sed -e 's/^/ /'
+	@echo
 
-restart: stop start
+.PHONY: all test clean help
