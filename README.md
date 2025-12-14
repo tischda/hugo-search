@@ -30,6 +30,21 @@ Usage of hugo-search:
         print version and exit
 ~~~
 
+
+## Examples
+
+~~~
+hugo server --source test
+~~~
+
+In another console:
+~~~
+hugo-search.exe -hugoPath test
+~~~
+
+Open browser on http://localhost:1313
+
+
 ## Query index
 
 ~~~
@@ -44,7 +59,7 @@ $ curl http://localhost:8080/api/search.bleve/_search -d '{"query":{"query":"lor
 Warning: Cannot use while `hugo-search` is running.
 
 ~~~
-go get github.com/blevesearch/bleve-explorer
+go install github.com/blevesearch/bleve-explorer@latest
 
 bleve-explorer -dataDir indexes
 ~~~

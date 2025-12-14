@@ -1,11 +1,28 @@
-baseUrl = "http://localhost/"
+baseURL = "http://localhost/"
 
 title = "hugo-search TEST site"
-pluralizelisttitles = "false"
+pluralizeListTitles = false
 
 theme = "basic"
 
-SectionPagesMenu = "main"
+# Replace deprecated SectionPagesMenu with modern menu config
+[menus]
+  [[menus.main]]
+    name = "Home"
+    url = "/"
+    weight = 10
+
+# Required security settings for Hugo v0.100+
+[security]
+  enableInlineShortcodes = false
+  [security.exec]
+    allow = ['^go$', '^npx$', '^postcss$']
+    osEnv = ['(?i)^(PATH|PATHEXT|APPDATA|TEMP|TMP|HUGO_)']
+  [security.funcs]
+    getenv = ['^HUGO_', '^CI$', '^WC_', '^BLEVE_URL']
+  [security.http]
+    methods = ['(?i)GET|POST']
+    urls = ['.*']
 
 [params]
     # Default search URL (no trailing slash!)
