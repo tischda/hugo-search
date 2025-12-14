@@ -1,0 +1,37 @@
+name: linter
+permissions:
+  contents: read
+  pull-requests: read
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: stable
+        cache: false # no point in caching if go.sum is absent
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v8
+      with:
+        version: latest
+    #     args: --output.html.path=lint-report.html || echo "Lint issues found"
+
+    # - name: Upload Lint Report
+    #   uses: actions/upload-artifact@v4
+    #   with:
+    #     name: golangci-lint-report
+    #     path: lint-report.html
+
+    # NOTE: Yes, you can generate an HTML report, but it's no useable as-is.
+    # You would have to publish it somewhere. A github page only for that seems
+    # overkill, so we'll stick with plain text and fail the status on findings.

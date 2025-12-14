@@ -2,30 +2,49 @@ version: '3'
 
 vars:
   PROJECT_NAME:
-    sh: bash -c 'git rev-parse --show-toplevel | xargs basename'
+    sh: bash -c 'basename $(pwd)'
   VERSION:
     sh: bash -c 'git describe --tags --always --dirty 2>/dev/null || echo "1.0.0-dev"'
   BUILD_DATE:
     sh: bash -c 'date -u "+%Y-%m-%dT%H:%M:%SZ"'
   GIT_COMMIT:
     sh: bash -c 'git rev-parse --short HEAD 2>/dev/null || echo "unknown"'
+  XYZ_VERSION:
+    sh: bash -c 'echo {{.VERSION}} | sed -E "s/^v([0-9]+\.[0-9]+\.[0-9]+).*/\1/"'
+  VER_MAJOR:
+    sh: bash -c 'echo {{.XYZ_VERSION}} | cut -d. -f1'
+  VER_MINOR:
+    sh: bash -c 'echo {{.XYZ_VERSION}} | cut -d. -f2'
+  VER_PATCH:
+    sh: bash -c 'echo {{.XYZ_VERSION}} | cut -d. -f3'
+  VER_BUILD: "0"
   LDFLAGS: -ldflags=all="-s -w -X \'main.name={{.PROJECT_NAME}}\' -X \'main.version={{.VERSION}}\' -X \'main.date={{.BUILD_DATE}}\' -X \'main.commit={{.GIT_COMMIT}}\'"
+  FASTBUILD_CMD: go build -ldflags='-s -w -X main.name=timer -X main.version=v1.0.0-dirty -X main.date={{.BUILD_DATE}} -X main.commit=12345'
 
 tasks:
   build:
     desc: Build the project
     cmds:
+      - task: goversioninfo
       - go build {{.LDFLAGS}}
+
+  watch:
+    desc: Watch for changes and rebuild (a first build is necessary to create .syso files)
+    cmds:
+      - task: build
+      - cmd /c start watchexec.exe --postpone --timings --exts go \""{{.FASTBUILD_CMD}}"\"
+
+  goversioninfo:
+    desc: Build go version information
+    cmds:
+      - goversioninfo -product-name {{.PROJECT_NAME}} -product-version {{.VERSION}} -ver-major {{.VER_MAJOR}} -ver-minor {{.VER_MINOR}} -ver-patch {{.VER_PATCH}} -ver-build {{.VER_BUILD}} -o resource_386.syso
+      - goversioninfo -product-name {{.PROJECT_NAME}} -product-version {{.VERSION}} -ver-major {{.VER_MAJOR}} -ver-minor {{.VER_MINOR}} -ver-patch {{.VER_PATCH}} -ver-build {{.VER_BUILD}} -64 -o resource_amd64.syso
+      - goversioninfo -product-name {{.PROJECT_NAME}} -product-version {{.VERSION}} -ver-major {{.VER_MAJOR}} -ver-minor {{.VER_MINOR}} -ver-patch {{.VER_PATCH}} -ver-build {{.VER_BUILD}} -arm -o resource_arm64.syso
 
   test:
     desc: Run tests with coverage
     cmds:
       - go test -v -cover ./...
-
-  watch:
-    desc: Watch for modifications in go files and rebuild if changed
-    cmds:
-      - watchexec.exe --quiet --postpone --exts go task build
 
   cover:
     desc: Generate and view coverage report
@@ -52,12 +71,15 @@ tasks:
       - 'sed ''1,/\#\# \[{{.VERSION}}/d;/^\#\# /Q'' CHANGELOG.md > releaseinfo'
       - cat releaseinfo
       - echo ----
+      - task: goversioninfo
       - goreleaser release --clean --release-notes=releaseinfo
       - rm -f releaseinfo
 
   dist:
     desc: Clean and build
-    deps: [clean, build]
+    cmds:
+      - task: clean
+      - task: build
 
   clean:
     desc: Clean build artifacts
@@ -66,10 +88,16 @@ tasks:
       - rm -rf dist
       - rm -f releaseinfo
       - rm -f coverage.out
+      - rm -f resource_*.syso
 
   version:
     desc: Show version information
     cmds:
       - "echo {{.PROJECT_NAME}} {{.VERSION}}, built on {{.BUILD_DATE}} \\(commit: {{.GIT_COMMIT}}\\)"
       - "echo LDFLAGS:"
+      - echo ""
       - echo "    {{.LDFLAGS}}"
+      - echo
+      - echo "CHANGELOG:"
+      - sed '1,/\#\# \[${VERSION}/d;/^\#\# /Q' CHANGELOG.md
+

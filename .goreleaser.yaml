@@ -11,6 +11,8 @@ builds:
       - CGO_ENABLED=0
     goos:
       - windows
+      - linux
+      - darwin
     ldflags:
       - -s -w -X main.name={{.ProjectName}} -X main.version={{.Tag}} -X main.commit={{.ShortCommit}} -X main.date={{.Date}} -X main.builtBy=goreleaser
 

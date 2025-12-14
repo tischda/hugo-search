@@ -1,7 +1,4 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
-name: Build
+name: build
 permissions:
   contents: read
   pull-requests: read
@@ -10,20 +7,18 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
 
 jobs:
 
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Go
-      uses: actions/setup-go@v5
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
       with:
-        go-version: '1.25'
+        go-version: stable
+        cache: false # no point in caching if go.sum is absent
 
-    - name: Build Windows binary
+    - name: Build
       run: |
         GOOS=windows GOARCH=amd64 go build

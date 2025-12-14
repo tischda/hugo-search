@@ -1,25 +1,21 @@
-# hugo-search [![Build Status](https://github.com/tischda/hugo-search/actions/workflows/test.yml/badge.svg)](https://github.com/tischda/hugo-search/actions/workflows/test.yml)
+[![Build Status](https://github.com/tischda/hugo-search/actions/workflows/build.yml/badge.svg)](https://github.com/tischda/hugo-search/actions/workflows/build.yml)
+[![Test Status](https://github.com/tischda/hugo-search/actions/workflows/test.yml/badge.svg)](https://github.com/tischda/hugo-search/actions/workflows/test.yml)
+[![Coverage Status](https://coveralls.io/repos/tischda/hugo-search/badge.svg)](https://coveralls.io/r/tischda/hugo-search)
+[![Linter Status](https://github.com/github.com/tischda/hugo-search/actions/workflows/linter.yml/badge.svg)](https://github.com/github.com/tischda/hugo-search/actions/workflows/linter.yml)
+[![License](https://img.shields.io/github/license/github.com/tischda/hugo-search)](/LICENSE)
+[![Release](https://img.shields.io/github/release/github.com/tischda/hugo-search.svg)](https://github.com/github.com/tischda/hugo-search/releases/latest)
+
+# hugo search
 
 A [Bleve](http://www.blevesearch.com) search server for your [Hugo](http://gohugo.io) site.
 
-### Dependencies
-
-* Hugo
-* Bleve search
-
-
-### Compile
-
-Outside of GOPATH:
+## Install
 
 ~~~
-git clone https://github.com/tischda/hugo-search
-cd hugo-search
-make build
+go install https://github.com/tischda/hugo-search@latest
 ~~~
 
-
-### Usage
+## Usage
 
 ~~~
 Usage of hugo-search:
@@ -34,7 +30,7 @@ Usage of hugo-search:
         print version and exit
 ~~~
 
-### Query index
+## Query index
 
 ~~~
 $ curl http://localhost:8080/api/search.bleve/_search -d '{"query":{"query":"lorem"}}'
@@ -43,7 +39,7 @@ $ curl http://localhost:8080/api/search.bleve/_search -d '{"query":{"query":"lor
 {"status":{"total":1,"failed":0,"successful":1},"request":{"query":{"query":"lorem","boost":1},"size":0,"from":0,"highlight":null,"fields":null,"facets":null,"explain":false},"hits":[],"total_hits":3,"max_score":0.15713484143442302,"took":0,"facets":{}}
 ~~~
 
-### Explore index with bleve-explorer
+## Explore index with bleve-explorer
 
 Warning: Cannot use while `hugo-search` is running.
 

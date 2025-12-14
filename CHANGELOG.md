@@ -1,25 +1,25 @@
 # Changelog
 
-## [2.0.0] - unreleased
+## [v1.5.0] - unreleased
 
 * Update hugo to 0.89.4, fixes #1
 * Freshen-up build and release system
 * Minor improvements
 
-## [1.4.0] - 2019-01-21
+## [v1.4.0] - 21 January 2019
 
 * Use go modules instead of govendor
 * Update Bleve & Hugo dependencies
 
-## [1.3.0] - 2017-12-02
+## [v1.3.0] - 2 December 2017
 
 * Fix code to match latest versions of hugo and bleve
 
-## [1.2.0] - 2017-01-11
+## [v1.2.0] - 11 January 2017
 
 * Fix versions with govendor
 
-## [1.1.1] - 2016-12-04
+## [v1.1.1] - 4 December 2016
 
 * Code clean up
 * Unregister index before closing
@@ -27,15 +27,15 @@
 * Do not index special pages such as taxonomies and search results
 * Revert Makefile to work with make.exe from http://win-builds.org
 
-## [1.0.2] - 2016-09-08
+## [v1.0.2] - 8 September 2016
 
 * Fix build due to API changes
 
-## [1.0.1] - 2016-08-09
+## [v1.0.1] - 9 August 2016
 
 * Fix small bug in search.js
 * Make searchUrl configurable
 
-## [1.0.0] - 2016-04-03
+## [v1.0.0] - 3 April 2016
 
 * First version
