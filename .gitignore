@@ -1,9 +1,9 @@
+indexes/
+dist/
+public/
 *.exe
 coverage.out
 hugo-search
-indexes
-dist/
-hugo-search
-hugo-search.exe
+*.lock
 releaseinfo
 resource*.syso
