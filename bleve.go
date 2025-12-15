@@ -6,8 +6,9 @@ import (
 
 	"path"
 
-	"github.com/blevesearch/bleve"
-	bleveHttp "github.com/blevesearch/bleve/http"
+	bleveHttp "github.com/tischda/hugo-search/http"
+
+	"github.com/blevesearch/bleve/v2"
 	"github.com/rs/cors"
 )
 

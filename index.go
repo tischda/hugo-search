@@ -2,10 +2,10 @@ package main
 
 import (
 	"log"
-
 	"os"
 
-	"github.com/blevesearch/bleve"
+	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/mapping"
 	"github.com/gohugoio/hugo/resources/page"
 )
 
@@ -35,7 +35,7 @@ func createIndex(path string) bleve.Index {
 	err = os.RemoveAll(path)
 	exitOnError(err)
 
-	index, err := bleve.New(path, bleve.NewIndexMapping())
+	index, err := bleve.New(path, mapping.NewIndexMapping())
 	exitOnError(err)
 	return index
 }
