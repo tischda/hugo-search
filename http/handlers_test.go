@@ -79,10 +79,6 @@ func TestHandlers(t *testing.T) {
 	listFieldsHandler := NewListFieldsHandler("")
 	listFieldsHandler.IndexNameLookup = indexNameLookup
 
-	debugHandler := NewDebugDocumentHandler("")
-	debugHandler.IndexNameLookup = indexNameLookup
-	debugHandler.DocIDLookup = docIDLookup
-
 	aliasHandler := NewAliasHandler()
 
 	tests := []struct {

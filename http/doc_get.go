@@ -19,7 +19,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/blevesearch/bleve/v2/document"
+	api "github.com/blevesearch/bleve_index_api"
 )
 
 type DocGetHandler struct {
@@ -76,18 +76,18 @@ func (h *DocGetHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		ID:     docID,
 		Fields: map[string]interface{}{},
 	}
-	for _, field := range doc.Fields {
+	doc.VisitFields(func(field api.Field) {
 		var newval interface{}
 		switch field := field.(type) {
-		case *document.TextField:
-			newval = string(field.Value())
-		case *document.NumericField:
+		case api.TextField:
+			newval = string(field.Text())
+		case api.NumericField:
 			n, err := field.Number()
 			if err == nil {
 				newval = n
 			}
-		case *document.DateTimeField:
-			d, err := field.DateTime()
+		case api.DateTimeField:
+			d, _, err := field.DateTime()
 			if err == nil {
 				newval = d.Format(time.RFC3339Nano)
 			}
@@ -106,7 +106,7 @@ func (h *DocGetHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		} else {
 			rv.Fields[field.Name()] = newval
 		}
-	}
+	})
 
 	mustEncode(w, rv)
 }

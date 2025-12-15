@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/blevesearch/bleve"
+	"github.com/blevesearch/bleve/v2"
 )
 
 const testIndexPath = "test/indexes/search.bleve"

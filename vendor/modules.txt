@@ -104,7 +104,6 @@ github.com/blevesearch/bleve/analysis/token/stop
 github.com/blevesearch/bleve/analysis/tokenizer/unicode
 github.com/blevesearch/bleve/document
 github.com/blevesearch/bleve/geo
-github.com/blevesearch/bleve/http
 github.com/blevesearch/bleve/index
 github.com/blevesearch/bleve/index/scorch
 github.com/blevesearch/bleve/index/scorch/mergeplan
