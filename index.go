@@ -13,7 +13,11 @@ import (
 func buildIndexFromSite(theHugoPath string, theIndexPath string) {
 	pages := readSitePages(theHugoPath)
 	index := createIndex(theIndexPath)
-	defer index.Close()
+	defer func() {
+		if err := index.Close(); err != nil {
+			log.Printf("Error closing index %s: %v", theIndexPath, err)
+		}
+	}()
 	for _, page := range pages {
 		if pageHasTitle(page, false) && page.Type() != "search" {
 			addPageToIndex(index, page)

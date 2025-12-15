@@ -30,7 +30,7 @@ func TestPageHasTitle(t *testing.T) {
 			b = !pageHasTitle(page, false)
 		}
 	}
-	if !(a && b) {
+	if !a || !b {
 		t.Errorf("Expected: has title==(true && false), was: (%v && %v)", a, b)
 	}
 }

@@ -21,7 +21,7 @@ func readSitePages(path string) page.Pages {
 
 	params := make(map[string]interface{})
 
-	var flags config.Provider = config.NewFrom(params)
+	flags := config.NewFrom(params)
 	flags.Set("workingDir", dir)
 
 	configs, err := allconfig.LoadConfig(

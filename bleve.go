@@ -37,7 +37,9 @@ func registerIndex(indexPath string, indexName string) bleve.Index {
 // unregister and close the index
 func unregisterIndex(index bleve.Index, indexName string) {
 	bleveHttp.UnregisterIndexByName(indexName)
-	index.Close()
+	if err := index.Close(); err != nil {
+		log.Printf("Error closing index %s: %v", indexName, err)
+	}
 }
 
 // Cross Origin Resource Sharing (https://www.w3.org/TR/cors/)
