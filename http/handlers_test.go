@@ -62,16 +62,9 @@ func TestHandlers(t *testing.T) {
 	docIndexHandler.IndexNameLookup = indexNameLookup
 	docIndexHandler.DocIDLookup = docIDLookup
 
-	docCountHandler := NewDocCountHandler("")
-	docCountHandler.IndexNameLookup = indexNameLookup
-
 	docGetHandler := NewDocGetHandler("")
 	docGetHandler.IndexNameLookup = indexNameLookup
 	docGetHandler.DocIDLookup = docIDLookup
-
-	docDeleteHandler := NewDocDeleteHandler("")
-	docDeleteHandler.IndexNameLookup = indexNameLookup
-	docDeleteHandler.DocIDLookup = docIDLookup
 
 	searchHandler := NewSearchHandler("")
 	searchHandler.IndexNameLookup = indexNameLookup
@@ -256,28 +249,6 @@ func TestHandlers(t *testing.T) {
 			ResponseBody: []byte(`document id cannot be empty`),
 		},
 		{
-			Desc:    "doc count",
-			Handler: docCountHandler,
-			Path:    "/ti1/count",
-			Method:  "GET",
-			Params: url.Values{
-				"indexName": []string{"ti1"},
-			},
-			Status:       http.StatusOK,
-			ResponseBody: []byte(`{"status":"ok","count":1}`),
-		},
-		{
-			Desc:    "doc count invalid index",
-			Handler: docCountHandler,
-			Path:    "/tix/count",
-			Method:  "GET",
-			Params: url.Values{
-				"indexName": []string{"tix"},
-			},
-			Status:       http.StatusNotFound,
-			ResponseBody: []byte(`no such index 'tix'`),
-		},
-		{
 			Desc:    "doc get",
 			Handler: docGetHandler,
 			Path:    "/ti1/a",
@@ -310,65 +281,6 @@ func TestHandlers(t *testing.T) {
 			Handler: docGetHandler,
 			Path:    "/ti1/a",
 			Method:  "GET",
-			Params: url.Values{
-				"indexName": []string{"ti1"},
-			},
-			Status:       http.StatusBadRequest,
-			ResponseBody: []byte(`document id cannot be empty`),
-		},
-		{
-			Desc:    "index another doc",
-			Handler: docIndexHandler,
-			Path:    "/ti1/b",
-			Method:  "PUT",
-			Params: url.Values{
-				"indexName": []string{"ti1"},
-				"docID":     []string{"b"},
-			},
-			Body:         []byte(`{"name":"b","body":"del"}`),
-			Status:       http.StatusOK,
-			ResponseBody: []byte(`{"status":"ok"}`),
-		},
-		{
-			Desc:    "doc count again",
-			Handler: docCountHandler,
-			Path:    "/ti1/count",
-			Method:  "GET",
-			Params: url.Values{
-				"indexName": []string{"ti1"},
-			},
-			Status:       http.StatusOK,
-			ResponseBody: []byte(`{"status":"ok","count":2}`),
-		},
-		{
-			Desc:    "delete doc",
-			Handler: docDeleteHandler,
-			Path:    "/ti1/b",
-			Method:  "DELETE",
-			Params: url.Values{
-				"indexName": []string{"ti1"},
-				"docID":     []string{"b"},
-			},
-			Status:       http.StatusOK,
-			ResponseBody: []byte(`{"status":"ok"}`),
-		},
-		{
-			Desc:    "delete doc invalid index",
-			Handler: docDeleteHandler,
-			Path:    "/tix/b",
-			Method:  "DELETE",
-			Params: url.Values{
-				"indexName": []string{"tix"},
-				"docID":     []string{"b"},
-			},
-			Status:       http.StatusNotFound,
-			ResponseBody: []byte(`no such index 'tix'`),
-		},
-		{
-			Desc:    "delete doc missing docID",
-			Handler: docDeleteHandler,
-			Path:    "/ti1/b",
-			Method:  "DELETE",
 			Params: url.Values{
 				"indexName": []string{"ti1"},
 			},
