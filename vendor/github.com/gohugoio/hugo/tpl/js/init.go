@@ -14,6 +14,8 @@
 package js
 
 import (
+	"context"
+
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/tpl/internal"
 )
@@ -22,12 +24,20 @@ const name = "js"
 
 func init() {
 	f := func(d *deps.Deps) *internal.TemplateFuncsNamespace {
-		ctx := New(d)
+		ctx, err := New(d)
+		if err != nil {
+			panic(err)
+		}
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
+			Context: func(cctx context.Context, args ...any) (any, error) { return ctx, nil },
 		}
+
+		ns.AddMethodMapping(ctx.Babel,
+			[]string{"babel"},
+			[][2]string{},
+		)
 
 		return ns
 	}

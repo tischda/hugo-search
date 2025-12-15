@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"unicode"
 	"unicode/utf8"
+	"unique"
 )
 
 const eof = -1
@@ -43,18 +44,19 @@ type pageLexer struct {
 	summaryDivider []byte
 	// Set when we have parsed any summary divider
 	summaryDividerChecked bool
-	// Whether we're in a HTML comment.
-	isInHTMLComment bool
 
 	lexerShortcodeState
 
 	// items delivered to client
 	items Items
+
+	// error delivered to the client
+	err error
 }
 
 // Implement the Result interface
 func (l *pageLexer) Iterator() *Iterator {
-	return l.newIterator()
+	return NewIterator(l.items)
 }
 
 func (l *pageLexer) Input() []byte {
@@ -62,20 +64,22 @@ func (l *pageLexer) Input() []byte {
 }
 
 type Config struct {
-	EnableEmoji bool
+	NoFrontMatter    bool
+	NoSummaryDivider bool
 }
 
 // note: the input position here is normally 0 (start), but
 // can be set if position of first shortcode is known
 func newPageLexer(input []byte, stateStart stateFunc, cfg Config) *pageLexer {
 	lexer := &pageLexer{
-		input:      input,
-		stateStart: stateStart,
-		cfg:        cfg,
+		input:          input,
+		stateStart:     stateStart,
+		summaryDivider: summaryDivider,
+		cfg:            cfg,
 		lexerShortcodeState: lexerShortcodeState{
 			currLeftDelimItem:  tLeftDelimScNoMarkup,
 			currRightDelimItem: tRightDelimScNoMarkup,
-			openShortcodes:     make(map[string]bool),
+			openShortcodes:     make(map[unique.Handle[string]]bool),
 		},
 		items: make([]Item, 0, 5),
 	}
@@ -83,10 +87,6 @@ func newPageLexer(input []byte, stateStart stateFunc, cfg Config) *pageLexer {
 	lexer.sectionHandlers = createSectionHandlers(lexer)
 
 	return lexer
-}
-
-func (l *pageLexer) newIterator() *Iterator {
-	return &Iterator{l: l, lastPos: -1}
 }
 
 // main loop
@@ -105,10 +105,6 @@ var (
 	delimTOML         = []byte("+++")
 	delimYAML         = []byte("---")
 	delimOrg          = []byte("#+")
-	htmlCommentStart  = []byte("<!--")
-	htmlCommentEnd    = []byte("-->")
-
-	emojiDelim = byte(':')
 )
 
 func (l *pageLexer) next() rune {
@@ -120,6 +116,7 @@ func (l *pageLexer) next() rune {
 	runeValue, runeWidth := utf8.DecodeRune(l.input[l.pos:])
 	l.width = runeWidth
 	l.pos += l.width
+
 	return runeValue
 }
 
@@ -135,15 +132,47 @@ func (l *pageLexer) backup() {
 	l.pos -= l.width
 }
 
+func (l *pageLexer) append(item Item) {
+	if item.Pos() < len(l.input) {
+		item.firstByte = l.input[item.Pos()]
+	}
+	l.items = append(l.items, item)
+}
+
 // sends an item back to the client.
 func (l *pageLexer) emit(t ItemType) {
-	l.items = append(l.items, Item{t, l.start, l.input[l.start:l.pos], false})
-	l.start = l.pos
+	defer func() {
+		l.start = l.pos
+	}()
+
+	if t == tText {
+		// Identify any trailing whitespace/intendation.
+		// We currently only care about the last one.
+		for i := l.pos - 1; i >= l.start; i-- {
+			b := l.input[i]
+			if b != ' ' && b != '\t' && b != '\r' && b != '\n' {
+				break
+			}
+			if i == l.start && b != '\n' {
+				l.append(Item{Type: tIndentation, low: l.start, high: l.pos})
+				return
+			} else if b == '\n' && i < l.pos-1 {
+				l.append(Item{Type: t, low: l.start, high: i + 1})
+				l.append(Item{Type: tIndentation, low: i + 1, high: l.pos})
+				return
+			} else if b == '\n' && i == l.pos-1 {
+				break
+			}
+
+		}
+	}
+
+	l.append(Item{Type: t, low: l.start, high: l.pos})
 }
 
 // sends a string item back to the client.
 func (l *pageLexer) emitString(t ItemType) {
-	l.items = append(l.items, Item{t, l.start, l.input[l.start:l.pos], true})
+	l.append(Item{Type: t, low: l.start, high: l.pos, isString: true})
 	l.start = l.pos
 }
 
@@ -153,13 +182,36 @@ func (l *pageLexer) isEOF() bool {
 
 // special case, do not send '\\' back to client
 func (l *pageLexer) ignoreEscapesAndEmit(t ItemType, isString bool) {
-	val := bytes.Map(func(r rune) rune {
+	i := l.start
+	k := i
+
+	var segments []lowHigh
+
+	for i < l.pos {
+		r, w := utf8.DecodeRune(l.input[i:l.pos])
 		if r == '\\' {
-			return -1
+			if i > k {
+				segments = append(segments, lowHigh{k, i})
+			}
+			// See issue #10236.
+			// We don't send the backslash back to the client,
+			// which makes the end parsing simpler.
+			// This means that we cannot render the AST back to be
+			// exactly the same as the input,
+			// but that was also the situation before we introduced the issue in #10236.
+			k = i + w
 		}
-		return r
-	}, l.input[l.start:l.pos])
-	l.items = append(l.items, Item{t, l.start, val, isString})
+		i += w
+	}
+
+	if k < l.pos {
+		segments = append(segments, lowHigh{k, l.pos})
+	}
+
+	if len(segments) > 0 {
+		l.append(Item{Type: t, segments: segments})
+	}
+
 	l.start = l.pos
 }
 
@@ -176,8 +228,8 @@ func (l *pageLexer) ignore() {
 var lf = []byte("\n")
 
 // nil terminates the parser
-func (l *pageLexer) errorf(format string, args ...interface{}) stateFunc {
-	l.items = append(l.items, Item{tError, l.start, []byte(fmt.Sprintf(format, args...)), true})
+func (l *pageLexer) errorf(format string, args ...any) stateFunc {
+	l.append(Item{Type: tError, Err: fmt.Errorf(format, args...), low: l.start, high: l.pos})
 	return nil
 }
 
@@ -191,15 +243,6 @@ func (l *pageLexer) consumeCRLF() bool {
 		}
 	}
 	return consumed
-}
-
-func (l *pageLexer) consumeToNextLine() {
-	for {
-		r := l.next()
-		if r == eof || isEndOfLine(r) {
-			return
-		}
-	}
 }
 
 func (l *pageLexer) consumeToSpace() {
@@ -220,34 +263,6 @@ func (l *pageLexer) consumeSpace() {
 			return
 		}
 	}
-}
-
-// lex a string starting at ":"
-func lexEmoji(l *pageLexer) stateFunc {
-	pos := l.pos + 1
-	valid := false
-
-	for i := pos; i < len(l.input); i++ {
-		if i > pos && l.input[i] == emojiDelim {
-			pos = i + 1
-			valid = true
-			break
-		}
-		r, _ := utf8.DecodeRune(l.input[i:])
-		if !(isAlphaNumericOrHyphen(r) || r == '+') {
-			break
-		}
-	}
-
-	if valid {
-		l.pos = pos
-		l.emit(TypeEmoji)
-	} else {
-		l.pos++
-		l.emit(tText)
-	}
-
-	return lexMainSection
 }
 
 type sectionHandlers struct {
@@ -285,6 +300,8 @@ func (s *sectionHandlers) skip() int {
 }
 
 func createSectionHandlers(l *pageLexer) *sectionHandlers {
+	handlers := make([]*sectionHandler, 0, 2)
+
 	shortCodeHandler := &sectionHandler{
 		l: l,
 		skipFunc: func(l *pageLexer) int {
@@ -320,43 +337,34 @@ func createSectionHandlers(l *pageLexer) *sectionHandlers {
 		},
 	}
 
-	summaryDividerHandler := &sectionHandler{
-		l: l,
-		skipFunc: func(l *pageLexer) int {
-			if l.summaryDividerChecked || l.summaryDivider == nil {
-				return -1
-			}
-			return l.index(l.summaryDivider)
-		},
-		lexFunc: func(origin stateFunc, l *pageLexer) (stateFunc, bool) {
-			if !l.hasPrefix(l.summaryDivider) {
-				return origin, false
-			}
+	handlers = append(handlers, shortCodeHandler)
 
-			l.summaryDividerChecked = true
-			l.pos += len(l.summaryDivider)
-			// This makes it a little easier to reason about later.
-			l.consumeSpace()
-			l.emit(TypeLeadSummaryDivider)
-
-			return origin, true
-		},
-	}
-
-	handlers := []*sectionHandler{shortCodeHandler, summaryDividerHandler}
-
-	if l.cfg.EnableEmoji {
-		emojiHandler := &sectionHandler{
+	if !l.cfg.NoSummaryDivider {
+		summaryDividerHandler := &sectionHandler{
 			l: l,
 			skipFunc: func(l *pageLexer) int {
-				return l.indexByte(emojiDelim)
+				if l.summaryDividerChecked {
+					return -1
+				}
+				return l.index(l.summaryDivider)
 			},
 			lexFunc: func(origin stateFunc, l *pageLexer) (stateFunc, bool) {
-				return lexEmoji, true
+				if !l.hasPrefix(l.summaryDivider) {
+					return origin, false
+				}
+
+				l.summaryDividerChecked = true
+				l.pos += len(l.summaryDivider)
+				// This makes it a little easier to reason about later.
+				l.consumeSpace()
+				l.emit(TypeLeadSummaryDivider)
+
+				return origin, true
 			},
 		}
 
-		handlers = append(handlers, emojiHandler)
+		handlers = append(handlers, summaryDividerHandler)
+
 	}
 
 	return &sectionHandlers{
@@ -425,10 +433,6 @@ func lexMainSection(l *pageLexer) stateFunc {
 		return lexDone
 	}
 
-	if l.isInHTMLComment {
-		return lexEndFrontMatterHTMLComment
-	}
-
 	// Fast forward as far as possible.
 	skip := l.sectionHandlers.skip()
 
@@ -457,6 +461,7 @@ func lexDone(l *pageLexer) stateFunc {
 	return nil
 }
 
+//lint:ignore U1000 useful for debugging
 func (l *pageLexer) printCurrentInput() {
 	fmt.Printf("input[%d:]: %q", l.pos, string(l.input[l.pos:]))
 }
@@ -465,10 +470,6 @@ func (l *pageLexer) printCurrentInput() {
 
 func (l *pageLexer) index(sep []byte) int {
 	return bytes.Index(l.input[l.pos:], sep)
-}
-
-func (l *pageLexer) indexByte(sep byte) int {
-	return bytes.IndexByte(l.input[l.pos:], sep)
 }
 
 func (l *pageLexer) hasPrefix(prefix []byte) bool {

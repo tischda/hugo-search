@@ -1,26 +1,33 @@
-# Minify <a name="minify"></a> [![API reference](https://img.shields.io/badge/godoc-reference-5272B4)](https://pkg.go.dev/github.com/tdewolff/minify/v2?tab=doc) [![Go Report Card](https://goreportcard.com/badge/github.com/tdewolff/minify)](https://goreportcard.com/report/github.com/tdewolff/minify) [![codecov](https://codecov.io/gh/tdewolff/minify/branch/master/graph/badge.svg?token=Cr7r2EKPj2)](https://codecov.io/gh/tdewolff/minify) [![Donate](https://img.shields.io/badge/patreon-donate-DFB317)](https://www.patreon.com/tdewolff)
+# Minify <a name="minify"></a> [![API reference](https://img.shields.io/badge/godoc-reference-5272B4)](https://pkg.go.dev/github.com/tdewolff/minify/v2?tab=doc) [![Go Report Card](https://goreportcard.com/badge/github.com/tdewolff/minify)](https://goreportcard.com/report/github.com/tdewolff/minify) [![codecov](https://codecov.io/gh/tdewolff/minify/branch/master/graph/badge.svg?token=Cr7r2EKPj2)](https://codecov.io/gh/tdewolff/minify)
 
-**[Online demo](https://go.tacodewolff.nl/minify) if you need to minify files *now*.**
+**[Online demo](https://go.tacodewolff.nl/minify)** if you need to minify files *now*.
 
-**[Command line tool](https://github.com/tdewolff/minify/tree/master/cmd/minify) that minifies concurrently and watches file changes.**
+**[Binaries](https://github.com/tdewolff/minify/releases) of CLI for various platforms.** See [CLI](https://github.com/tdewolff/minify/tree/master/cmd/minify) for more installation instructions.
 
-**[Releases](https://github.com/tdewolff/minify/releases) of CLI for various platforms.** See [CLI](https://github.com/tdewolff/minify/tree/master/cmd/minify) for more installation instructions.
+**[Windows binary from scoop](https://scoop.sh/#/apps?q=minify)** install with `scoop install main/minify`
 
-**[Parse](https://github.com/tdewolff/minify/tree/master/parse) subpackage on which minify depends.**
- 
+**[Python bindings](https://pypi.org/project/tdewolff-minify/)** install with `pip install tdewolff-minify`
+
+**[JavaScript bindings](https://www.npmjs.com/package/@tdewolff/minify)** install with `npm i @tdewolff/minify`
+
+**[.NET bindings](https://github.com/JKamsker/NMinify)** install with `Install-Package NMinify` or `dotnet add package NMinify`, thanks to Jonas Kamsker for the port
+
 ---
 
 *Did you know that the shortest valid piece of HTML5 is `<!doctype html><title>x</title>`? See for yourself at the [W3C Validator](http://validator.w3.org/)!*
 
-Minify is a minifier package written in [Go][1]. It provides HTML5, CSS3, JS, JSON, SVG and XML minifiers and an interface to implement any other minifier. Minification is the process of removing bytes from a file (such as whitespace) without changing its output and therefore shrinking its size and speeding up transmission over the internet and possibly parsing. The implemented minifiers are designed for high performance.
+Minify is a minifier package written in [Go][1]. It provides HTML5, CSS3, JS, JSON, SVG and XML minifiers and an interface to implement any other minifier. Minification is the process of removing bytes from a file (such as whitespace) without changing its output and therefore shrinking its size and speeding up transmission over the internet and possibly parsing. The implemented minifiers are designed for high performance (see https://github.com/privatenumber/minification-benchmarks where this library is (one of) the fastest JS minifiers).
 
 The core functionality associates mimetypes with minification functions, allowing embedded resources (like CSS or JS within HTML files) to be minified as well. Users can add new implementations that are triggered based on a mimetype (or pattern), or redirect to an external command (like ClosureCompiler, UglifyCSS, ...).
 
 ### Sponsors
-
+#### SiteGround
 [![SiteGround](https://www.siteground.com/img/downloads/siteground-logo-black-transparent-vector.svg)](https://www.siteground.com/)
 
-Please see https://www.patreon.com/tdewolff for ways to contribute, otherwise please contact me directly!
+Thank you SiteGround for having sponsored this project for many years! Their contribution is invaluable for code maintenance and improvements. If you are in need of professional web hosting, I can highly recommend their products.
+
+#### Requesting sponsors
+I'm actively looking for support in the form of donations or sponsorships to keep developing this library and highly appreciate any gesture. Please see the Sponsors button in GitHub for ways to contribute, or contact me directly.
 
 #### Table of Contents
 
@@ -59,6 +66,7 @@ Please see https://www.patreon.com/tdewolff for ways to contribute, otherwise pl
 		- [Custom minifier](#custom-minifier-example)
 		- [ResponseWriter](#responsewriter)
 		- [Templates](#templates)
+    - [FAQ](#faq)
 	- [License](#license)
 
 ### Roadmap
@@ -76,7 +84,7 @@ Minifiers or bindings to minifiers exist in almost all programming languages. So
 This minifier proves to be that fast and extensive minifier that can handle HTML and any other filetype it may contain (CSS, JS, ...). It is usually orders of magnitude faster than existing minifiers.
 
 ## Installation
-Make sure you have [Git](https://git-scm.com/) and [Go](https://golang.org/dl/) (1.13 or higher) installed, run
+Make sure you have [Git](https://git-scm.com/) and [Go](https://golang.org/dl/) (1.18 or higher) installed, run
 ```
 mkdir Project
 cd Project
@@ -106,8 +114,7 @@ See [CLI tool](https://github.com/tdewolff/minify/tree/master/cmd/minify) for in
 If you want to use Docker, please see https://hub.docker.com/r/tdewolff/minify.
 
 ```bash
-$ docker run -it tdewolff/minify
-/ # minify --version
+$ docker run -it tdewolff/minify --help
 ```
 
 ## API stability
@@ -196,12 +203,13 @@ The HTML5 minifier uses these minifications:
 
 Options:
 
-- `KeepConditionalComments` preserve all IE conditional comments such as `<!--[if IE 6]><![endif]-->` and `<![if IE 6]><![endif]>`, see https://msdn.microsoft.com/en-us/library/ms537512(v=vs.85).aspx#syntax
+- `KeepSpecialComments` preserve all special comments, including Server Side Includes such as `<!--#include file="header.html" -->` and IE conditional comments such as `<!--[if IE 6]><![endif]-->` and `<![if IE 6]><![endif]>`, see https://msdn.microsoft.com/en-us/library/ms537512(v=vs.85).aspx#syntax
 - `KeepDefaultAttrVals` preserve default attribute values such as `<script type="application/javascript">`
 - `KeepDocumentTags` preserve `html`, `head` and `body` tags
 - `KeepEndTags` preserve all end tags
 - `KeepQuotes` preserve quotes around attribute values
 - `KeepWhitespace` preserve whitespace between inline tags but still collapse multiple whitespace characters into one
+- `TemplateDelims` preserve context within and surrounding the given opening and closing delimiters
 
 After recent benchmarking and profiling it became really fast and minifies pages in the 10ms range, making it viable for on-the-fly minification.
 
@@ -251,12 +259,12 @@ There are a couple of comparison tables online, such as [CSS Minifier Comparison
 
 Options:
 
-- `KeepCSS2` prohibits using CSS3 syntax (such as exponents in numbers, or `rgba(` &#8594; `rgb(`), might be incomplete
 - `Precision` number of significant digits to preserve for numbers, `0` means no trimming
+- `Version` CSS version to use for output, `0` is the latest
 
 ## JS
 
-The JS minifier typically shaves off about 35% -- 65% of filesize depening on the file, which is a compression close to many other minifiers. Common speeds of PHP and JS implementations are about 100-300kB/s (see [Uglify2](http://lisperator.net/uglifyjs/), [Adventures in PHP web asset minimization](https://www.happyassassin.net/2014/12/29/adventures-in-php-web-asset-minimization/)). This implementation is orders of magnitude faster at around ~25MB/s.
+The JS minifier typically shaves off about 35% -- 65% of filesize depending on the file, which is a compression close to many other minifiers. Common speeds of PHP and JS implementations are about 100-300kB/s (see [Uglify2](http://lisperator.net/uglifyjs/), [Adventures in PHP web asset minimization](https://www.happyassassin.net/2014/12/29/adventures-in-php-web-asset-minimization/)). This implementation is orders of magnitude faster at around ~25MB/s.
 
 The following features are implemented:
 
@@ -278,6 +286,7 @@ Options:
 
 - `KeepVarNames` keeps variable names as they are and omits shortening variable names
 - `Precision` number of significant digits to preserve for numbers, `0` means no trimming
+- `Version` ECMAScript version to use for output, `0` is the latest
 
 ### Comparison with other tools
 
@@ -376,6 +385,24 @@ m.AddFunc("image/svg+xml", svg.Minify)
 m.AddFuncRegexp(regexp.MustCompile("^(application|text)/(x-)?(java|ecma)script$"), js.Minify)
 m.AddFuncRegexp(regexp.MustCompile("[/+]json$"), json.Minify)
 m.AddFuncRegexp(regexp.MustCompile("[/+]xml$"), xml.Minify)
+
+m.AddFunc("importmap", json.Minify)
+m.AddFunc("speculationrules", json.Minify)
+
+aspMinifier := &html.Minifier{}
+aspMinifier.TemplateDelims = [2]string{"<%", "%>"}
+m.Add("text/asp", aspMinifier)
+m.Add("text/x-ejs-template", aspMinifier)
+
+phpMinifier := &html.Minifier{}
+phpMinifier.TemplateDelims = [2]string{"<?", "?>"} // also handles <?php
+m.Add("application/x-httpd-php", phpMinifier)
+
+tmplMinifier := &html.Minifier{}
+tmplMinifier.TemplateDelims = [2]string{"{{", "}}"}
+m.Add("text/x-go-template", tmplMinifier)
+m.Add("text/x-mustache-template", tmplMinifier)
+m.Add("text/x-handlebars-template", tmplMinifier)
 ```
 
 You can set options to several minifiers.
@@ -509,6 +536,24 @@ func main() {
 	m.AddFuncRegexp(regexp.MustCompile("[/+]json$"), json.Minify)
 	m.AddFuncRegexp(regexp.MustCompile("[/+]xml$"), xml.Minify)
 
+    m.AddFunc("importmap", json.Minify)
+    m.AddFunc("speculationrules", json.Minify)
+
+    aspMinifier := &html.Minifier{}
+    aspMinifier.TemplateDelims = [2]string{"<%", "%>"}
+    m.Add("text/asp", aspMinifier)
+    m.Add("text/x-ejs-template", aspMinifier)
+
+    phpMinifier := &html.Minifier{}
+    phpMinifier.TemplateDelims = [2]string{"<?", "?>"} // also handles <?php
+    m.Add("application/x-httpd-php", phpMinifier)
+
+    tmplMinifier := &html.Minifier{}
+    tmplMinifier.TemplateDelims = [2]string{"{{", "}}"}
+    m.Add("text/x-go-template", tmplMinifier)
+    m.Add("text/x-mustache-template", tmplMinifier)
+    m.Add("text/x-handlebars-template", tmplMinifier)
+
 	if err := m.Minify("text/html", os.Stdout, os.Stdin); err != nil {
 		panic(err)
 	}
@@ -599,8 +644,52 @@ func main() {
 	m.AddFuncRegexp(regexp.MustCompile("[/+]json$"), json.Minify)
 	m.AddFuncRegexp(regexp.MustCompile("[/+]xml$"), xml.Minify)
 
+    m.AddFunc("importmap", json.Minify)
+    m.AddFunc("speculationrules", json.Minify)
+
+    aspMinifier := &html.Minifier{}
+    aspMinifier.TemplateDelims = [2]string{"<%", "%>"}
+    m.Add("text/asp", aspMinifier)
+    m.Add("text/x-ejs-template", aspMinifier)
+
+    phpMinifier := &html.Minifier{}
+    phpMinifier.TemplateDelims = [2]string{"<?", "?>"} // also handles <?php
+    m.Add("application/x-httpd-php", phpMinifier)
+
+    tmplMinifier := &html.Minifier{}
+    tmplMinifier.TemplateDelims = [2]string{"{{", "}}"}
+    m.Add("text/x-go-template", tmplMinifier)
+    m.Add("text/x-mustache-template", tmplMinifier)
+    m.Add("text/x-handlebars-template", tmplMinifier)
+
 	fs := http.FileServer(http.Dir("www/"))
-	http.Handle("/", m.Middleware(fs))
+	http.Handle("/", m.MiddlewareWithError(fs))
+}
+
+func handleError(w http.ResponseWriter, r *http.Request, err error) {
+    http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+```
+
+In order to properly handle minify errors, it is necessary to close the response writer since all writes are concurrently handled. There is no need to check errors on writes since they will be returned on closing.
+
+```go
+func main() {
+	m := minify.New()
+	m.AddFunc("text/html", html.Minify)
+	m.AddFuncRegexp(regexp.MustCompile("^(application|text)/(x-)?(java|ecma)script$"), js.Minify)
+
+	input := `<script>const i = 1_000_</script>` // Faulty JS
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(input))
+
+		if err = w.(io.Closer).Close(); err != nil {
+			panic(err)
+		}
+	})).ServeHTTP(rec, req)
 }
 ```
 
@@ -671,7 +760,7 @@ func compileTemplates(filenames ...string) (*template.Template, error) {
 			tmpl = tmpl.New(name)
 		}
 
-		b, err := ioutil.ReadFile(filename)
+		b, err := os.ReadFile(filename)
 		if err != nil {
 			return nil, err
 		}
@@ -692,7 +781,15 @@ Example usage:
 templates := template.Must(compileTemplates("view.html", "home.html"))
 ```
 
+## FAQ
+### Newlines remain in minified output
+While you might expect the minified output to be on a single line for it to be fully minified, this is not true. In many cases, using a literal newline doesn't affect the file size, and in some cases it may even reduce the file size.
+
+A typical example is HTML. Whitespace is significant in HTML, meaning that spaces and newlines between or around tags may affect how they are displayed. There is no distinction between a space or a newline and they may be interchanged without affecting the displayed HTML. Remember that a space (0x20) and a newline (0x0A) are both one byte long, so that there is no difference in file size when interchanging them. This minifier removes unnecessary whitespace by replacing stretches of spaces and newlines by a single whitespace character. Specifically, if the stretch of white space characters contains a newline, it will replace it by a newline and otherwise by a space. This doesn't affect the file size, but may help somewhat for debugging or file transmission objectives.
+
+Another example is JavaScript. Single or double quoted string literals may not contain newline characters but instead need to escape them as `\n`. These are two bytes instead of a single newline byte. Using template literals it is allowed to have literal newline characters and we can use that fact to shave-off one byte! The result is that the minified output contains newlines instead of escaped newline characters, which makes the final file size smaller. Of course, changing from single or double quotes to template literals depends on other factors as well, and this minifier makes a calculation whether the template literal results in a shorter file size or not before converting a string literal.
+
 ## License
-Released under the [MIT license](LICENSE.md).
+Released under the [MIT license](LICENSE).
 
 [1]: http://golang.org/ "Go Language"

@@ -14,9 +14,75 @@
 package config
 
 import (
+	"time"
+
 	"github.com/gohugoio/hugo/common/maps"
+	"github.com/gohugoio/hugo/common/paths"
 	"github.com/gohugoio/hugo/common/types"
+	"github.com/gohugoio/hugo/common/urls"
+	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/langs"
 )
+
+// AllProvider is a sub set of all config settings.
+type AllProvider interface {
+	Language() *langs.Language
+	Languages() langs.Languages
+	LanguagesDefaultFirst() langs.Languages
+	LanguagePrefix() string
+	BaseURL() urls.BaseURL
+	BaseURLLiveReload() urls.BaseURL
+	PathParser() *paths.PathParser
+	Environment() string
+	IsMultihost() bool
+	IsMultilingual() bool
+	NoBuildLock() bool
+	BaseConfig() BaseConfig
+	Dirs() CommonDirs
+	Quiet() bool
+	DirsBase() CommonDirs
+	ContentTypes() ContentTypesProvider
+	GetConfigSection(string) any
+	GetConfig() any
+	CanonifyURLs() bool
+	DisablePathToLower() bool
+	RemovePathAccents() bool
+	IsUglyURLs(section string) bool
+	DefaultContentLanguage() string
+	DefaultContentLanguageInSubdir() bool
+	IsLangDisabled(string) bool
+	SummaryLength() int
+	Pagination() Pagination
+	BuildExpired() bool
+	BuildFuture() bool
+	BuildDrafts() bool
+	Running() bool
+	Watching() bool
+	NewIdentityManager(name string, opts ...identity.ManagerOption) identity.Manager
+	FastRenderMode() bool
+	PrintUnusedTemplates() bool
+	EnableMissingTranslationPlaceholders() bool
+	TemplateMetrics() bool
+	TemplateMetricsHints() bool
+	PrintI18nWarnings() bool
+	CreateTitle(s string) string
+	IgnoreFile(s string) bool
+	NewContentEditor() string
+	Timeout() time.Duration
+	StaticDirs() []string
+	IgnoredLogs() map[string]bool
+	WorkingDir() string
+	EnableEmoji() bool
+}
+
+// We cannot import the media package as that would create a circular dependency.
+// This interface defines a subset of what media.ContentTypes provides.
+type ContentTypesProvider interface {
+	IsContentSuffix(suffix string) bool
+	IsContentFile(filename string) bool
+	IsIndexContentFile(filename string) bool
+	IsHTMLSuffix(suffix string) bool
+}
 
 // Provider provides the configuration settings for Hugo.
 type Provider interface {
@@ -24,15 +90,16 @@ type Provider interface {
 	GetInt(key string) int
 	GetBool(key string) bool
 	GetParams(key string) maps.Params
-	GetStringMap(key string) map[string]interface{}
+	GetStringMap(key string) map[string]any
 	GetStringMapString(key string) map[string]string
 	GetStringSlice(key string) []string
-	Get(key string) interface{}
-	Set(key string, value interface{})
-	Merge(key string, value interface{})
+	Get(key string) any
+	Set(key string, value any)
+	Keys() []string
+	Merge(key string, value any)
 	SetDefaults(params maps.Params)
 	SetDefaultMergeStrategy()
-	WalkParams(walkFn func(params ...KeyParams) bool)
+	WalkParams(walkFn func(params ...maps.KeyParams) bool)
 	IsSet(key string) bool
 }
 
@@ -42,16 +109,4 @@ type Provider interface {
 func GetStringSlicePreserveString(cfg Provider, key string) []string {
 	sd := cfg.Get(key)
 	return types.ToStringSlicePreserveString(sd)
-}
-
-// SetBaseTestDefaults provides some common config defaults used in tests.
-func SetBaseTestDefaults(cfg Provider) {
-	cfg.Set("resourceDir", "resources")
-	cfg.Set("contentDir", "content")
-	cfg.Set("dataDir", "data")
-	cfg.Set("i18nDir", "i18n")
-	cfg.Set("layoutDir", "layouts")
-	cfg.Set("assetDir", "assets")
-	cfg.Set("archetypeDir", "archetypes")
-	cfg.Set("publishDir", "public")
 }

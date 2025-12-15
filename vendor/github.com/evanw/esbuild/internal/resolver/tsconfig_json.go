@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	"github.com/evanw/esbuild/internal/cache"
-	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/config"
+	"github.com/evanw/esbuild/internal/fs"
 	"github.com/evanw/esbuild/internal/helpers"
 	"github.com/evanw/esbuild/internal/js_ast"
 	"github.com/evanw/esbuild/internal/js_lexer"
@@ -33,20 +33,72 @@ type TSConfigJSON struct {
 	// the wildcard is substituted into the fallback path. The keys represent
 	// module-style path names and the fallback paths are relative to the
 	// "baseUrl" value in the "tsconfig.json" file.
-	Paths map[string][]string
+	Paths *TSConfigPaths
 
-	JSXFactory                     []string
-	JSXFragmentFactory             []string
-	TSTarget                       *config.TSTarget
-	UseDefineForClassFields        config.MaybeBool
-	PreserveImportsNotUsedAsValues bool
-	PreserveValueImports           bool
+	tsTargetKey    tsTargetKey
+	TSStrict       *config.TSAlwaysStrict
+	TSAlwaysStrict *config.TSAlwaysStrict
+	JSXSettings    config.TSConfigJSX
+	Settings       config.TSConfig
+}
+
+func (derived *TSConfigJSON) applyExtendedConfig(base TSConfigJSON) {
+	if base.tsTargetKey.Range.Len > 0 {
+		derived.tsTargetKey = base.tsTargetKey
+	}
+	if base.TSStrict != nil {
+		derived.TSStrict = base.TSStrict
+	}
+	if base.TSAlwaysStrict != nil {
+		derived.TSAlwaysStrict = base.TSAlwaysStrict
+	}
+	if base.BaseURL != nil {
+		derived.BaseURL = base.BaseURL
+	}
+	if base.Paths != nil {
+		derived.Paths = base.Paths
+		derived.BaseURLForPaths = base.BaseURLForPaths
+	}
+	derived.JSXSettings.ApplyExtendedConfig(base.JSXSettings)
+	derived.Settings.ApplyExtendedConfig(base.Settings)
+}
+
+func (config *TSConfigJSON) TSAlwaysStrictOrStrict() *config.TSAlwaysStrict {
+	if config.TSAlwaysStrict != nil {
+		return config.TSAlwaysStrict
+	}
+
+	// If "alwaysStrict" is absent, it defaults to "strict" instead
+	return config.TSStrict
+}
+
+// This information is only used for error messages
+type tsTargetKey struct {
+	LowerValue string
+	Source     logger.Source
+	Range      logger.Range
+}
+
+type TSConfigPath struct {
+	Text string
+	Loc  logger.Loc
+}
+
+type TSConfigPaths struct {
+	Map map[string][]TSConfigPath
+
+	// This may be different from the original "tsconfig.json" source if the
+	// "paths" value is from another file via an "extends" clause.
+	Source logger.Source
 }
 
 func ParseTSConfigJSON(
 	log logger.Log,
 	source logger.Source,
 	jsonCache *cache.JSONCache,
+	fs fs.FS,
+	fileDir string,
+	configDir string,
 	extends func(string, logger.Range) *TSConfigJSON,
 ) *TSConfigJSON {
 	// Unfortunately "tsconfig.json" isn't actually JSON. It's some other
@@ -57,10 +109,7 @@ func ParseTSConfigJSON(
 	// these particular files. This is likely not a completely accurate
 	// emulation of what the TypeScript compiler does (e.g. string escape
 	// behavior may also be different).
-	json, ok := jsonCache.Parse(log, source, js_parser.JSONOptions{
-		AllowComments:       true, // https://github.com/microsoft/TypeScript/issues/4987
-		AllowTrailingCommas: true,
-	})
+	json, ok := jsonCache.Parse(log, source, js_parser.JSONOptions{Flavor: js_lexer.TSConfigJSON})
 	if !ok {
 		return nil
 	}
@@ -74,7 +123,15 @@ func ParseTSConfigJSON(
 		if valueJSON, _, ok := getProperty(json, "extends"); ok {
 			if value, ok := getString(valueJSON); ok {
 				if base := extends(value, source.RangeOfString(valueJSON.Loc)); base != nil {
-					result = *base
+					result.applyExtendedConfig(*base)
+				}
+			} else if array, ok := valueJSON.Data.(*js_ast.EArray); ok {
+				for _, item := range array.Items {
+					if str, ok := getString(item); ok {
+						if base := extends(str, source.RangeOfString(item.Loc)); base != nil {
+							result.applyExtendedConfig(*base)
+						}
+					}
 				}
 			}
 		}
@@ -85,21 +142,61 @@ func ParseTSConfigJSON(
 		// Parse "baseUrl"
 		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "baseUrl"); ok {
 			if value, ok := getString(valueJSON); ok {
+				value = getSubstitutedPathWithConfigDirTemplate(fs, value, configDir)
+				if !fs.IsAbs(value) {
+					value = fs.Join(fileDir, value)
+				}
 				result.BaseURL = &value
+			}
+		}
+
+		// Parse "jsx"
+		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "jsx"); ok {
+			if value, ok := getString(valueJSON); ok {
+				switch strings.ToLower(value) {
+				case "preserve":
+					result.JSXSettings.JSX = config.TSJSXPreserve
+				case "react-native":
+					result.JSXSettings.JSX = config.TSJSXReactNative
+				case "react":
+					result.JSXSettings.JSX = config.TSJSXReact
+				case "react-jsx":
+					result.JSXSettings.JSX = config.TSJSXReactJSX
+				case "react-jsxdev":
+					result.JSXSettings.JSX = config.TSJSXReactJSXDev
+				}
 			}
 		}
 
 		// Parse "jsxFactory"
 		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "jsxFactory"); ok {
 			if value, ok := getString(valueJSON); ok {
-				result.JSXFactory = parseMemberExpressionForJSX(log, &source, &tracker, valueJSON.Loc, value)
+				result.JSXSettings.JSXFactory = parseMemberExpressionForJSX(log, &source, &tracker, valueJSON.Loc, value)
 			}
 		}
 
 		// Parse "jsxFragmentFactory"
 		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "jsxFragmentFactory"); ok {
 			if value, ok := getString(valueJSON); ok {
-				result.JSXFragmentFactory = parseMemberExpressionForJSX(log, &source, &tracker, valueJSON.Loc, value)
+				result.JSXSettings.JSXFragmentFactory = parseMemberExpressionForJSX(log, &source, &tracker, valueJSON.Loc, value)
+			}
+		}
+
+		// Parse "jsxImportSource"
+		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "jsxImportSource"); ok {
+			if value, ok := getString(valueJSON); ok {
+				result.JSXSettings.JSXImportSource = &value
+			}
+		}
+
+		// Parse "experimentalDecorators"
+		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "experimentalDecorators"); ok {
+			if value, ok := getBool(valueJSON); ok {
+				if value {
+					result.Settings.ExperimentalDecorators = config.True
+				} else {
+					result.Settings.ExperimentalDecorators = config.False
+				}
 			}
 		}
 
@@ -107,56 +204,65 @@ func ParseTSConfigJSON(
 		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "useDefineForClassFields"); ok {
 			if value, ok := getBool(valueJSON); ok {
 				if value {
-					result.UseDefineForClassFields = config.True
+					result.Settings.UseDefineForClassFields = config.True
 				} else {
-					result.UseDefineForClassFields = config.False
+					result.Settings.UseDefineForClassFields = config.False
 				}
 			}
 		}
 
 		// Parse "target"
-		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "target"); ok {
+		if valueJSON, keyLoc, ok := getProperty(compilerOptionsJSON, "target"); ok {
 			if value, ok := getString(valueJSON); ok {
-				constraints := make(map[compat.Engine][]int)
-				r := source.RangeOfString(valueJSON.Loc)
+				lowerValue := strings.ToLower(value)
 				ok := true
 
 				// See https://www.typescriptlang.org/tsconfig#target
-				switch strings.ToLower(value) {
-				case "es5":
-					constraints[compat.ES] = []int{5}
-				case "es6", "es2015":
-					constraints[compat.ES] = []int{2015}
-				case "es2016":
-					constraints[compat.ES] = []int{2016}
-				case "es2017":
-					constraints[compat.ES] = []int{2017}
-				case "es2018":
-					constraints[compat.ES] = []int{2018}
-				case "es2019":
-					constraints[compat.ES] = []int{2019}
-				case "es2020":
-					constraints[compat.ES] = []int{2020}
-				case "es2021":
-					constraints[compat.ES] = []int{2021}
-				case "esnext":
-					// Nothing to do in this case
+				switch lowerValue {
+				case "es3", "es5", "es6", "es2015", "es2016", "es2017", "es2018", "es2019", "es2020", "es2021":
+					result.Settings.Target = config.TSTargetBelowES2022
+				case "es2022", "es2023", "es2024", "esnext":
+					result.Settings.Target = config.TSTargetAtOrAboveES2022
 				default:
 					ok = false
 					if !helpers.IsInsideNodeModules(source.KeyPath.Text) {
-						log.Add(logger.Warning, &tracker, r,
+						log.AddID(logger.MsgID_TSConfigJSON_InvalidTarget, logger.Warning, &tracker, source.RangeOfString(valueJSON.Loc),
 							fmt.Sprintf("Unrecognized target environment %q", value))
 					}
 				}
 
-				// These feature restrictions are merged with esbuild's own restrictions
 				if ok {
-					result.TSTarget = &config.TSTarget{
-						Source:                source,
-						Range:                 r,
-						Target:                value,
-						UnsupportedJSFeatures: compat.UnsupportedJSFeatures(constraints),
+					result.tsTargetKey = tsTargetKey{
+						Source:     source,
+						Range:      source.RangeOfString(keyLoc),
+						LowerValue: lowerValue,
 					}
+				}
+			}
+		}
+
+		// Parse "strict"
+		if valueJSON, keyLoc, ok := getProperty(compilerOptionsJSON, "strict"); ok {
+			if value, ok := getBool(valueJSON); ok {
+				valueRange := js_lexer.RangeOfIdentifier(source, valueJSON.Loc)
+				result.TSStrict = &config.TSAlwaysStrict{
+					Name:   "strict",
+					Value:  value,
+					Source: source,
+					Range:  logger.Range{Loc: keyLoc, Len: valueRange.End() - keyLoc.Start},
+				}
+			}
+		}
+
+		// Parse "alwaysStrict"
+		if valueJSON, keyLoc, ok := getProperty(compilerOptionsJSON, "alwaysStrict"); ok {
+			if value, ok := getBool(valueJSON); ok {
+				valueRange := js_lexer.RangeOfIdentifier(source, valueJSON.Loc)
+				result.TSAlwaysStrict = &config.TSAlwaysStrict{
+					Name:   "alwaysStrict",
+					Value:  value,
+					Source: source,
+					Range:  logger.Range{Loc: keyLoc, Len: valueRange.End() - keyLoc.Start},
 				}
 			}
 		}
@@ -165,11 +271,14 @@ func ParseTSConfigJSON(
 		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "importsNotUsedAsValues"); ok {
 			if value, ok := getString(valueJSON); ok {
 				switch value {
-				case "preserve", "error":
-					result.PreserveImportsNotUsedAsValues = true
 				case "remove":
+					result.Settings.ImportsNotUsedAsValues = config.TSImportsNotUsedAsValues_Remove
+				case "preserve":
+					result.Settings.ImportsNotUsedAsValues = config.TSImportsNotUsedAsValues_Preserve
+				case "error":
+					result.Settings.ImportsNotUsedAsValues = config.TSImportsNotUsedAsValues_Error
 				default:
-					log.Add(logger.Warning, &tracker, source.RangeOfString(valueJSON.Loc),
+					log.AddID(logger.MsgID_TSConfigJSON_InvalidImportsNotUsedAsValues, logger.Warning, &tracker, source.RangeOfString(valueJSON.Loc),
 						fmt.Sprintf("Invalid value %q for \"importsNotUsedAsValues\"", value))
 				}
 			}
@@ -178,20 +287,30 @@ func ParseTSConfigJSON(
 		// Parse "preserveValueImports"
 		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "preserveValueImports"); ok {
 			if value, ok := getBool(valueJSON); ok {
-				result.PreserveValueImports = value
+				if value {
+					result.Settings.PreserveValueImports = config.True
+				} else {
+					result.Settings.PreserveValueImports = config.False
+				}
+			}
+		}
+
+		// Parse "verbatimModuleSyntax"
+		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "verbatimModuleSyntax"); ok {
+			if value, ok := getBool(valueJSON); ok {
+				if value {
+					result.Settings.VerbatimModuleSyntax = config.True
+				} else {
+					result.Settings.VerbatimModuleSyntax = config.False
+				}
 			}
 		}
 
 		// Parse "paths"
 		if valueJSON, _, ok := getProperty(compilerOptionsJSON, "paths"); ok {
 			if paths, ok := valueJSON.Data.(*js_ast.EObject); ok {
-				hasBaseURL := result.BaseURL != nil
-				if hasBaseURL {
-					result.BaseURLForPaths = *result.BaseURL
-				} else {
-					result.BaseURLForPaths = "."
-				}
-				result.Paths = make(map[string][]string)
+				result.BaseURLForPaths = fileDir
+				result.Paths = &TSConfigPaths{Source: source, Map: make(map[string][]TSConfigPath)}
 				for _, prop := range paths.Properties {
 					if key, ok := getString(prop.Key); ok {
 						if !isValidTSConfigPathPattern(key, log, &source, &tracker, prop.Key.Loc) {
@@ -222,14 +341,14 @@ func ParseTSConfigJSON(
 						if array, ok := prop.ValueOrNil.Data.(*js_ast.EArray); ok {
 							for _, item := range array.Items {
 								if str, ok := getString(item); ok {
-									if isValidTSConfigPathPattern(str, log, &source, &tracker, item.Loc) &&
-										(hasBaseURL || isValidTSConfigPathNoBaseURLPattern(str, log, &source, &tracker, item.Loc)) {
-										result.Paths[key] = append(result.Paths[key], str)
+									if isValidTSConfigPathPattern(str, log, &source, &tracker, item.Loc) {
+										str = getSubstitutedPathWithConfigDirTemplate(fs, str, configDir)
+										result.Paths.Map[key] = append(result.Paths.Map[key], TSConfigPath{Text: str, Loc: item.Loc})
 									}
 								}
 							}
 						} else {
-							log.Add(logger.Warning, &tracker, source.RangeOfString(prop.ValueOrNil.Loc), fmt.Sprintf(
+							log.AddID(logger.MsgID_TSConfigJSON_InvalidPaths, logger.Warning, &tracker, source.RangeOfString(prop.ValueOrNil.Loc), fmt.Sprintf(
 								"Substitutions for pattern %q should be an array", key))
 						}
 					}
@@ -238,7 +357,46 @@ func ParseTSConfigJSON(
 		}
 	}
 
+	// Warn about compiler options not wrapped in "compilerOptions".
+	// For example: https://github.com/evanw/esbuild/issues/3301
+	if obj, ok := json.Data.(*js_ast.EObject); ok {
+	loop:
+		for _, prop := range obj.Properties {
+			if key, ok := prop.Key.Data.(*js_ast.EString); ok && key.Value != nil {
+				key := helpers.UTF16ToString(key.Value)
+				switch key {
+				case "alwaysStrict",
+					"baseUrl",
+					"experimentalDecorators",
+					"importsNotUsedAsValues",
+					"jsx",
+					"jsxFactory",
+					"jsxFragmentFactory",
+					"jsxImportSource",
+					"paths",
+					"preserveValueImports",
+					"strict",
+					"target",
+					"useDefineForClassFields",
+					"verbatimModuleSyntax":
+					log.AddIDWithNotes(logger.MsgID_TSConfigJSON_InvalidTopLevelOption, logger.Warning, &tracker, source.RangeOfString(prop.Key.Loc),
+						fmt.Sprintf("Expected the %q option to be nested inside a \"compilerOptions\" object", key),
+						[]logger.MsgData{})
+					break loop
+				}
+			}
+		}
+	}
+
 	return &result
+}
+
+// See: https://github.com/microsoft/TypeScript/pull/58042
+func getSubstitutedPathWithConfigDirTemplate(fs fs.FS, value string, basePath string) string {
+	if strings.HasPrefix(value, "${configDir}") {
+		return fs.Join(basePath, "./"+value[12:])
+	}
+	return value
 }
 
 func parseMemberExpressionForJSX(log logger.Log, source *logger.Source, tracker *logger.LineColumnTracker, loc logger.Loc, text string) []string {
@@ -247,9 +405,9 @@ func parseMemberExpressionForJSX(log logger.Log, source *logger.Source, tracker 
 	}
 	parts := strings.Split(text, ".")
 	for _, part := range parts {
-		if !js_lexer.IsIdentifier(part) {
+		if !js_ast.IsIdentifier(part) {
 			warnRange := source.RangeOfString(loc)
-			log.Add(logger.Warning, tracker, warnRange, fmt.Sprintf("Invalid JSX member expression: %q", text))
+			log.AddID(logger.MsgID_TSConfigJSON_InvalidJSX, logger.Warning, tracker, warnRange, fmt.Sprintf("Invalid JSX member expression: %q", text))
 			return nil
 		}
 	}
@@ -262,7 +420,7 @@ func isValidTSConfigPathPattern(text string, log logger.Log, source *logger.Sour
 		if text[i] == '*' {
 			if foundAsterisk {
 				r := source.RangeOfString(loc)
-				log.Add(logger.Warning, tracker, r, fmt.Sprintf(
+				log.AddID(logger.MsgID_TSConfigJSON_InvalidPaths, logger.Warning, tracker, r, fmt.Sprintf(
 					"Invalid pattern %q, must have at most one \"*\" character", text))
 				return false
 			}
@@ -276,7 +434,7 @@ func isSlash(c byte) bool {
 	return c == '/' || c == '\\'
 }
 
-func isValidTSConfigPathNoBaseURLPattern(text string, log logger.Log, source *logger.Source, tracker *logger.LineColumnTracker, loc logger.Loc) bool {
+func isValidTSConfigPathNoBaseURLPattern(text string, log logger.Log, source *logger.Source, tracker **logger.LineColumnTracker, loc logger.Loc) bool {
 	var c0 byte
 	var c1 byte
 	var c2 byte
@@ -313,7 +471,11 @@ func isValidTSConfigPathNoBaseURLPattern(text string, log logger.Log, source *lo
 	}
 
 	r := source.RangeOfString(loc)
-	log.Add(logger.Warning, tracker, r, fmt.Sprintf(
+	if *tracker == nil {
+		t := logger.MakeLineColumnTracker(source)
+		*tracker = &t
+	}
+	log.AddID(logger.MsgID_TSConfigJSON_InvalidPaths, logger.Warning, *tracker, r, fmt.Sprintf(
 		"Non-relative path %q is not allowed when \"baseUrl\" is not set (did you forget a leading \"./\"?)", text))
 	return false
 }

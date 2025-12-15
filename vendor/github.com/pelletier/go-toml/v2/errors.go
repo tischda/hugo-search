@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/pelletier/go-toml/v2/internal/danger"
+	"github.com/pelletier/go-toml/v2/unstable"
 )
 
 // DecodeError represents an error encountered during the parsing or decoding
@@ -27,7 +28,7 @@ type DecodeError struct {
 // corresponding field in the target value. It contains all the missing fields
 // in Errors.
 //
-// Emitted by Decoder when SetStrict(true) was called.
+// Emitted by Decoder when DisallowUnknownFields() was called.
 type StrictMissingError struct {
 	// One error per field that could not be found.
 	Errors []DecodeError
@@ -54,25 +55,6 @@ func (s *StrictMissingError) String() string {
 }
 
 type Key []string
-
-// internal version of DecodeError that is used as the base to create a
-// DecodeError with full context.
-type decodeError struct {
-	highlight []byte
-	message   string
-	key       Key // optional
-}
-
-func (de *decodeError) Error() string {
-	return de.message
-}
-
-func newDecodeError(highlight []byte, format string, args ...interface{}) error {
-	return &decodeError{
-		highlight: highlight,
-		message:   fmt.Errorf(format, args...).Error(),
-	}
-}
 
 // Error returns the error message contained in the DecodeError.
 func (e *DecodeError) Error() string {
@@ -103,13 +85,14 @@ func (e *DecodeError) Key() Key {
 //
 // The function copies all bytes used in DecodeError, so that document and
 // highlight can be freely deallocated.
+//
 //nolint:funlen
-func wrapDecodeError(document []byte, de *decodeError) *DecodeError {
-	offset := danger.SubsliceOffset(document, de.highlight)
+func wrapDecodeError(document []byte, de *unstable.ParserError) *DecodeError {
+	offset := danger.SubsliceOffset(document, de.Highlight)
 
 	errMessage := de.Error()
 	errLine, errColumn := positionAtEnd(document[:offset])
-	before, after := linesOfContext(document, de.highlight, offset, 3)
+	before, after := linesOfContext(document, de.Highlight, offset, 3)
 
 	var buf strings.Builder
 
@@ -139,7 +122,7 @@ func wrapDecodeError(document []byte, de *decodeError) *DecodeError {
 		buf.Write(before[0])
 	}
 
-	buf.Write(de.highlight)
+	buf.Write(de.Highlight)
 
 	if len(after) > 0 {
 		buf.Write(after[0])
@@ -157,7 +140,7 @@ func wrapDecodeError(document []byte, de *decodeError) *DecodeError {
 		buf.WriteString(strings.Repeat(" ", len(before[0])))
 	}
 
-	buf.WriteString(strings.Repeat("~", len(de.highlight)))
+	buf.WriteString(strings.Repeat("~", len(de.Highlight)))
 
 	if len(errMessage) > 0 {
 		buf.WriteString(" ")
@@ -182,7 +165,7 @@ func wrapDecodeError(document []byte, de *decodeError) *DecodeError {
 		message: errMessage,
 		line:    errLine,
 		column:  errColumn,
-		key:     de.key,
+		key:     de.Key,
 		human:   buf.String(),
 	}
 }

@@ -3,6 +3,7 @@ package html
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 
 	"github.com/tdewolff/minify/v2"
@@ -22,6 +23,7 @@ var (
 	svgMimeBytes    = []byte("image/svg+xml")
 	formMimeBytes   = []byte("application/x-www-form-urlencoded")
 	mathMimeBytes   = []byte("application/mathml+xml")
+	xmlMimeBytes    = []byte("text/xml")
 	dataSchemeBytes = []byte("data:")
 	jsSchemeBytes   = []byte("javascript:")
 	httpBytes       = []byte("http")
@@ -41,29 +43,41 @@ var (
 
 ////////////////////////////////////////////////////////////////
 
-// DefaultMinifier is the default minifier.
-var DefaultMinifier = &Minifier{}
+var GoTemplateDelims = [2]string{"{{", "}}"}
+var HandlebarsTemplateDelims = [2]string{"{{", "}}"}
+var MustacheTemplateDelims = [2]string{"{{", "}}"}
+var EJSTemplateDelims = [2]string{"<%", "%>"}
+var ASPTemplateDelims = [2]string{"<%", "%>"}
+var PHPTemplateDelims = [2]string{"<?", "?>"}
 
 // Minifier is an HTML minifier.
 type Minifier struct {
 	KeepComments            bool
 	KeepConditionalComments bool
+	KeepSpecialComments     bool
 	KeepDefaultAttrVals     bool
 	KeepDocumentTags        bool
 	KeepEndTags             bool
 	KeepQuotes              bool
 	KeepWhitespace          bool
+	TemplateDelims          [2]string
 }
 
 // Minify minifies HTML data, it reads from r and writes to w.
 func Minify(m *minify.M, w io.Writer, r io.Reader, params map[string]string) error {
-	return DefaultMinifier.Minify(m, w, r, params)
+	return (&Minifier{}).Minify(m, w, r, params)
 }
 
 // Minify minifies HTML data, it reads from r and writes to w.
 func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]string) error {
 	var rawTagHash Hash
 	var rawTagMediatype []byte
+
+	if o.KeepConditionalComments {
+		fmt.Println("DEPRECATED: KeepConditionalComments is replaced by KeepSpecialComments")
+		o.KeepSpecialComments = true
+		o.KeepConditionalComments = false // omit next warning
+	}
 
 	omitSpace := true // if true the next leading space is omitted
 	inPre := false
@@ -74,7 +88,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 	z := parse.NewInput(r)
 	defer z.Restore()
 
-	l := html.NewLexer(z)
+	l := html.NewTemplateLexer(z, o.TemplateDelims)
 	tb := NewTokenBuffer(z, l)
 	for {
 		t := *tb.Shift()
@@ -92,31 +106,38 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 		case html.CommentToken:
 			if o.KeepComments {
 				w.Write(t.Data)
-			} else if o.KeepConditionalComments && 6 < len(t.Text) && (bytes.HasPrefix(t.Text, []byte("[if ")) || bytes.HasSuffix(t.Text, []byte("[endif]")) || bytes.HasSuffix(t.Text, []byte("[endif]--"))) {
-				// [if ...] is always 7 or more characters, [endif] is only encountered for downlevel-revealed
-				// see https://msdn.microsoft.com/en-us/library/ms537512(v=vs.85).aspx#syntax
-				if bytes.HasPrefix(t.Data, []byte("<!--[if ")) && bytes.HasSuffix(t.Data, []byte("<![endif]-->")) { // downlevel-hidden
-					begin := bytes.IndexByte(t.Data, '>') + 1
-					end := len(t.Data) - len("<![endif]-->")
-					w.Write(t.Data[:begin])
-					if err := o.Minify(m, w, buffer.NewReader(t.Data[begin:end]), nil); err != nil {
-						return minify.UpdateErrorPosition(err, z, t.Offset)
+			} else if o.KeepSpecialComments {
+				if 6 < len(t.Text) && (bytes.HasPrefix(t.Text, []byte("[if ")) || bytes.HasSuffix(t.Text, []byte("[endif]")) || bytes.HasSuffix(t.Text, []byte("[endif]--"))) {
+					// [if ...] is always 7 or more characters, [endif] is only encountered for downlevel-revealed
+					// see https://msdn.microsoft.com/en-us/library/ms537512(v=vs.85).aspx#syntax
+					if bytes.HasPrefix(t.Data, []byte("<!--[if ")) && bytes.HasSuffix(t.Data, []byte("<![endif]-->")) { // downlevel-hidden
+						begin := bytes.IndexByte(t.Data, '>') + 1
+						end := len(t.Data) - len("<![endif]-->")
+						if begin < end {
+							w.Write(t.Data[:begin])
+							if err := o.Minify(m, w, buffer.NewReader(t.Data[begin:end]), nil); err != nil {
+								return minify.UpdateErrorPosition(err, z, t.Offset)
+							}
+							w.Write(t.Data[end:])
+						} else {
+							w.Write(t.Data) // malformed
+						}
+					} else {
+						w.Write(t.Data) // downlevel-revealed or short downlevel-hidden
 					}
-					w.Write(t.Data[end:])
-				} else {
-					w.Write(t.Data) // downlevel-revealed or short downlevel-hidden
+				} else if 1 < len(t.Text) && t.Text[0] == '#' {
+					// SSI tags
+					w.Write(t.Data)
 				}
-			} else if 1 < len(t.Text) && t.Text[0] == '#' {
-				// SSI tags
-				w.Write(t.Data)
 			}
-		case html.SvgToken:
-			if err := m.MinifyMimetype(svgMimeBytes, w, buffer.NewReader(t.Data), nil); err != nil {
+		case html.SVGToken:
+			if err := m.MinifyMimetype(svgMimeBytes, w, buffer.NewReader(t.Data), inlineParams); err != nil {
 				if err != minify.ErrNotExist {
 					return minify.UpdateErrorPosition(err, z, t.Offset)
 				}
 				w.Write(t.Data)
 			}
+			omitSpace = false
 		case html.MathToken:
 			if err := m.MinifyMimetype(mathMimeBytes, w, buffer.NewReader(t.Data), nil); err != nil {
 				if err != minify.ErrNotExist {
@@ -124,15 +145,26 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 				}
 				w.Write(t.Data)
 			}
+			omitSpace = false
+		case html.XMLToken:
+			if err := m.MinifyMimetype(xmlMimeBytes, w, buffer.NewReader(t.Data), nil); err != nil {
+				if err != minify.ErrNotExist {
+					return minify.UpdateErrorPosition(err, z, t.Offset)
+				}
+				w.Write(t.Data)
+			}
+			omitSpace = false
+		case html.TemplateToken:
+			w.Write(t.Data)
+			omitSpace = false
 		case html.TextToken:
-			// CSS and JS minifiers for inline code
-			if rawTagHash != 0 {
+			if rawTagHash != 0 && !t.HasTemplate {
 				if rawTagHash == Style || rawTagHash == Script || rawTagHash == Iframe {
 					var mimetype []byte
 					var params map[string]string
 					if rawTagHash == Iframe {
 						mimetype = htmlMimeBytes
-					} else if len(rawTagMediatype) > 0 {
+					} else if 0 < len(rawTagMediatype) {
 						mimetype, params = parse.Mediatype(rawTagMediatype)
 					} else if rawTagHash == Script {
 						mimetype = jsMimeBytes
@@ -150,6 +182,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 				}
 			} else if inPre {
 				w.Write(t.Data)
+				// omitSpace = true after block element
 			} else {
 				t.Data = parse.ReplaceMultipleWhitespaceAndEntities(t.Data, EntitiesMap, TextRevEntitiesMap)
 
@@ -172,31 +205,25 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 							t.Data = t.Data[:len(t.Data)-1]
 							omitSpace = false
 							break
-						} else if next.TokenType == html.TextToken {
-							// this only happens when a comment, doctype or phrasing end tag (only for !o.KeepWhitespace) was in between
-							// remove if the text token starts with a whitespace
-							if len(next.Data) > 0 && parse.IsWhitespace(next.Data[0]) {
-								t.Data = t.Data[:len(t.Data)-1]
-								omitSpace = false
-							}
+						} else if next.TokenType == html.TextToken && !parse.IsAllWhitespace(next.Data) || next.TokenType == html.TemplateToken {
+							// stop looking when text encountered
 							break
-						} else if next.TokenType == html.StartTagToken || next.TokenType == html.EndTagToken {
+						} else if next.TokenType == html.StartTagToken || next.TokenType == html.EndTagToken || next.TokenType == html.SVGToken || next.TokenType == html.MathToken || next.TokenType == html.XMLToken {
 							if o.KeepWhitespace {
 								break
 							}
-							// remove when followed up by a block tag
-							if next.Traits&nonPhrasingTag != 0 {
+							// remove when followed by a block tag
+							if next.Traits&blockTag != 0 {
 								t.Data = t.Data[:len(t.Data)-1]
 								omitSpace = false
 								break
-							} else if next.TokenType == html.StartTagToken {
+							} else if next.TokenType == html.StartTagToken || next.TokenType == html.SVGToken || next.TokenType == html.MathToken || next.TokenType == html.XMLToken {
 								break
 							}
 						}
 						i++
 					}
 				}
-
 				w.Write(t.Data)
 			}
 		case html.StartTagToken, html.EndTagToken:
@@ -274,14 +301,14 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 					}
 				}
 
-				if o.KeepWhitespace || t.Traits&objectTag != 0 {
-					omitSpace = false
-				} else if t.Traits&nonPhrasingTag != 0 {
-					omitSpace = true // omit spaces after block elements
-				}
-
 				if !omitEndTag {
-					if len(t.Data) > 3+len(t.Text) {
+					if o.KeepWhitespace || t.Traits&objectTag != 0 {
+						omitSpace = false
+					} else if t.Traits&blockTag != 0 {
+						omitSpace = true // omit spaces after block elements
+					}
+
+					if 3+len(t.Text) < len(t.Data) {
 						t.Data[2+len(t.Text)] = '>'
 						t.Data = t.Data[:3+len(t.Text)]
 					}
@@ -290,7 +317,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 
 				// skip text in select and optgroup tags
 				if t.Hash == Option || t.Hash == Optgroup {
-					if next := tb.Peek(0); next.TokenType == html.TextToken {
+					if next := tb.Peek(0); next.TokenType == html.TextToken && !next.HasTemplate {
 						tb.Shift()
 					}
 				}
@@ -299,7 +326,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 
 			if o.KeepWhitespace || t.Traits&objectTag != 0 {
 				omitSpace = false
-			} else if t.Traits&nonPhrasingTag != 0 {
+			} else if t.Traits&blockTag != 0 {
 				omitSpace = true // omit spaces after block elements
 			}
 
@@ -330,7 +357,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 								for i := 0; i < len(content.AttrVal); i++ {
 									if content.AttrVal[i] == '=' && i+2 < len(content.AttrVal) {
 										i++
-										if n := parse.Number(content.AttrVal[i:]); n > 0 {
+										if n := parse.Number(content.AttrVal[i:]); 0 < n {
 											minNum := minify.Number(content.AttrVal[i:i+n], -1)
 											if len(minNum) < n {
 												copy(content.AttrVal[i:i+len(minNum)], minNum)
@@ -376,6 +403,9 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 						break
 					} else if attr.Text == nil {
 						continue // removed attribute
+					} else if attr.HasTemplate {
+						w.Write(attr.Data)
+						continue // don't minify attributes that contain templates
 					}
 
 					val := attr.AttrVal
@@ -393,34 +423,30 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 							attr.Hash == Action && t.Hash == Form) {
 							continue // omit empty attribute values
 						}
-						if attr.Traits&caselessAttr != 0 {
-							val = parse.ToLower(val)
-							if attr.Hash == Enctype || attr.Hash == Codetype || attr.Hash == Accept || attr.Hash == Type && (t.Hash == A || t.Hash == Link || t.Hash == Embed || t.Hash == Object || t.Hash == Source || t.Hash == Script || t.Hash == Style) {
-								val = minify.Mediatype(val)
-							}
-						}
 						if rawTagHash != 0 && attr.Hash == Type {
 							rawTagMediatype = parse.Copy(val)
 						}
 
+						if attr.Hash == Enctype ||
+							attr.Hash == Formenctype ||
+							attr.Hash == Accept ||
+							attr.Hash == Type && (t.Hash == A || t.Hash == Link || t.Hash == Embed || t.Hash == Object || t.Hash == Source || t.Hash == Script) {
+							val = minify.Mediatype(val)
+						}
+
 						// default attribute values can be omitted
-						if !o.KeepDefaultAttrVals && (attr.Hash == Type && (t.Hash == Script && jsMimetypes[string(val)] ||
-							t.Hash == Style && bytes.Equal(val, cssMimeBytes) ||
-							t.Hash == Link && bytes.Equal(val, cssMimeBytes) ||
-							t.Hash == Input && bytes.Equal(val, textBytes) ||
-							t.Hash == Button && bytes.Equal(val, submitBytes)) ||
-							attr.Hash == Language && t.Hash == Script ||
-							attr.Hash == Method && bytes.Equal(val, getBytes) ||
-							attr.Hash == Enctype && bytes.Equal(val, formMimeBytes) ||
+						if !o.KeepDefaultAttrVals && (attr.Hash == Type && (t.Hash == Script && jsMimetypes[string(parse.ToLower(parse.Copy(val)))] ||
+							t.Hash == Style && parse.EqualFold(val, cssMimeBytes) ||
+							t.Hash == Link && parse.EqualFold(val, cssMimeBytes) ||
+							t.Hash == Input && parse.EqualFold(val, textBytes) ||
+							t.Hash == Button && parse.EqualFold(val, submitBytes)) ||
+							attr.Hash == Method && parse.EqualFold(val, getBytes) ||
+							attr.Hash == Enctype && parse.EqualFold(val, formMimeBytes) ||
 							attr.Hash == Colspan && bytes.Equal(val, oneBytes) ||
 							attr.Hash == Rowspan && bytes.Equal(val, oneBytes) ||
-							attr.Hash == Shape && bytes.Equal(val, rectBytes) ||
+							attr.Hash == Shape && parse.EqualFold(val, rectBytes) ||
 							attr.Hash == Span && bytes.Equal(val, oneBytes) ||
-							attr.Hash == Clear && bytes.Equal(val, noneBytes) ||
-							attr.Hash == Frameborder && bytes.Equal(val, oneBytes) ||
-							attr.Hash == Scrolling && bytes.Equal(val, autoBytes) ||
-							attr.Hash == Valuetype && bytes.Equal(val, dataBytes) ||
-							attr.Hash == Media && t.Hash == Style && bytes.Equal(val, allBytes)) {
+							attr.Hash == Media && t.Hash == Style && parse.EqualFold(val, allBytes)) {
 							continue
 						}
 
@@ -436,14 +462,14 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 							if len(val) == 0 {
 								continue
 							}
-						} else if len(attr.Text) > 2 && attr.Text[0] == 'o' && attr.Text[1] == 'n' {
+						} else if 2 < len(attr.Text) && attr.Text[0] == 'o' && attr.Text[1] == 'n' {
 							// JS minifier for attribute inline code
 							val = parse.TrimWhitespace(val)
-							if len(val) >= 11 && parse.EqualFold(val[:11], jsSchemeBytes) {
+							if 11 <= len(val) && parse.EqualFold(val[:11], jsSchemeBytes) {
 								val = val[11:]
 							}
 							attrMinifyBuffer.Reset()
-							if err := m.MinifyMimetype(jsMimeBytes, attrMinifyBuffer, buffer.NewReader(val), nil); err == nil {
+							if err := m.MinifyMimetype(jsMimeBytes, attrMinifyBuffer, buffer.NewReader(val), inlineParams); err == nil {
 								val = attrMinifyBuffer.Bytes()
 							} else if err != minify.ErrNotExist {
 								return minify.UpdateErrorPosition(err, z, attr.Offset)
@@ -477,14 +503,19 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 
 					w.Write(spaceBytes)
 					w.Write(attr.Text)
-					if len(val) > 0 && attr.Traits&booleanAttr == 0 {
+					if 0 < len(val) && attr.Traits&booleanAttr == 0 {
 						w.Write(isBytes)
 
 						// use double quotes for RDFa attributes
 						isXML := attr.Hash == Vocab || attr.Hash == Typeof || attr.Hash == Property || attr.Hash == Resource || attr.Hash == Prefix || attr.Hash == Content || attr.Hash == About || attr.Hash == Rev || attr.Hash == Datatype || attr.Hash == Inlist
 
 						// no quotes if possible, else prefer single or double depending on which occurs more often in value
-						val = html.EscapeAttrVal(&attrByteBuffer, attr.AttrVal, val, o.KeepQuotes || isXML)
+						var quote byte
+
+						if 0 < len(attr.Data) && (attr.Data[len(attr.Data)-1] == '\'' || attr.Data[len(attr.Data)-1] == '"') {
+							quote = attr.Data[len(attr.Data)-1]
+						}
+						val = html.EscapeAttrVal(&attrByteBuffer, val, quote, o.KeepQuotes || isXML)
 						w.Write(val)
 					}
 				}
@@ -495,13 +526,13 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 
 			// skip text in select and optgroup tags
 			if t.Hash == Select || t.Hash == Optgroup {
-				if next := tb.Peek(0); next.TokenType == html.TextToken {
+				if next := tb.Peek(0); next.TokenType == html.TextToken && !next.HasTemplate {
 					tb.Shift()
 				}
 			}
 
 			// keep space after phrasing tags (<i>, <span>, ...) FontAwesome etc.
-			if t.TokenType == html.StartTagToken && t.Traits&nonPhrasingTag == 0 {
+			if t.TokenType == html.StartTagToken && t.Traits == normalTag {
 				if next := tb.Peek(0); next.Hash == t.Hash && next.TokenType == html.EndTagToken {
 					omitSpace = false
 				}

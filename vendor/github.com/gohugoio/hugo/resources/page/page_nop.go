@@ -16,21 +16,21 @@
 package page
 
 import (
+	"bytes"
+	"context"
 	"html/template"
 	"time"
 
-	"github.com/gohugoio/hugo/identity"
-
-	"github.com/gohugoio/hugo/hugofs/files"
-	"github.com/gohugoio/hugo/tpl"
+	"github.com/gohugoio/hugo/markup/converter"
+	"github.com/gohugoio/hugo/markup/tableofcontents"
 
 	"github.com/gohugoio/hugo/hugofs"
 
-	"github.com/bep/gitmap"
 	"github.com/gohugoio/hugo/navigation"
 
 	"github.com/gohugoio/hugo/common/hugo"
 	"github.com/gohugoio/hugo/common/maps"
+	"github.com/gohugoio/hugo/common/paths"
 	"github.com/gohugoio/hugo/source"
 
 	"github.com/gohugoio/hugo/config"
@@ -41,7 +41,17 @@ import (
 )
 
 var (
-	NopPage Page = new(nopPage)
+	NopPage                 Page            = new(nopPage)
+	NopContentRenderer      ContentRenderer = new(nopContentRenderer)
+	NopMarkup               Markup          = new(nopMarkup)
+	NopContent              Content         = new(nopContent)
+	NopCPageContentRenderer                 = struct {
+		OutputFormatPageContentProvider
+		ContentRenderer
+	}{
+		NopPage,
+		NopContentRenderer,
+	}
 	NilPage *nopPage
 )
 
@@ -52,24 +62,12 @@ func (p *nopPage) Aliases() []string {
 	return nil
 }
 
-func (p *nopPage) Sitemap() config.Sitemap {
-	return config.Sitemap{}
+func (p *nopPage) Sitemap() config.SitemapConfig {
+	return config.SitemapConfig{}
 }
 
 func (p *nopPage) Layout() string {
 	return ""
-}
-
-func (p *nopPage) RSSLink() template.URL {
-	return ""
-}
-
-func (p *nopPage) Author() Author {
-	return Author{}
-}
-
-func (p *nopPage) Authors() AuthorList {
-	return nil
 }
 
 func (p *nopPage) AllTranslations() Pages {
@@ -88,11 +86,19 @@ func (p *nopPage) BaseFileName() string {
 	return ""
 }
 
-func (p *nopPage) BundleType() files.ContentClass {
+func (p *nopPage) BundleType() string {
 	return ""
 }
 
-func (p *nopPage) Content() (interface{}, error) {
+func (p *nopPage) Markup(...any) Markup {
+	return NopMarkup
+}
+
+func (p *nopPage) Content(context.Context) (any, error) {
+	return "", nil
+}
+
+func (p *nopPage) ContentWithoutSummary(ctx context.Context) (template.HTML, error) {
 	return "", nil
 }
 
@@ -104,7 +110,7 @@ func (p *nopPage) CurrentSection() Page {
 	return nil
 }
 
-func (p *nopPage) Data() interface{} {
+func (p *nopPage) Data() any {
 	return nil
 }
 
@@ -116,11 +122,11 @@ func (p *nopPage) Description() string {
 	return ""
 }
 
-func (p *nopPage) RefFrom(argsm map[string]interface{}, source interface{}) (string, error) {
+func (p *nopPage) RefFrom(argsm map[string]any, source any) (string, error) {
 	return "", nil
 }
 
-func (p *nopPage) RelRefFrom(argsm map[string]interface{}, source interface{}) (string, error) {
+func (p *nopPage) RelRefFrom(argsm map[string]any, source any) (string, error) {
 	return "", nil
 }
 
@@ -132,7 +138,7 @@ func (p *nopPage) Draft() bool {
 	return false
 }
 
-func (p *nopPage) Eq(other interface{}) bool {
+func (p *nopPage) Eq(other any) bool {
 	return p == other
 }
 
@@ -140,18 +146,8 @@ func (p *nopPage) ExpiryDate() (t time.Time) {
 	return
 }
 
-func (p *nopPage) Ext() string {
-	return ""
-}
-
-func (p *nopPage) Extension() string {
-	return ""
-}
-
-var nilFile *source.FileInfo
-
-func (p *nopPage) File() source.File {
-	return nilFile
+func (p *nopPage) File() *source.File {
+	return nil
 }
 
 func (p *nopPage) FileInfo() hugofs.FileMetaInfo {
@@ -166,7 +162,7 @@ func (p *nopPage) FirstSection() Page {
 	return nil
 }
 
-func (p *nopPage) FuzzyWordCount() int {
+func (p *nopPage) FuzzyWordCount(context.Context) int {
 	return 0
 }
 
@@ -174,11 +170,7 @@ func (p *nopPage) GetPage(ref string) (Page, error) {
 	return nil, nil
 }
 
-func (p *nopPage) GetPageWithTemplateInfo(info tpl.Info, ref string) (Page, error) {
-	return nil, nil
-}
-
-func (p *nopPage) GetParam(key string) interface{} {
+func (p *nopPage) GetParam(key string) any {
 	return nil
 }
 
@@ -186,7 +178,11 @@ func (p *nopPage) GetTerms(taxonomy string) Pages {
 	return nil
 }
 
-func (p *nopPage) GitInfo() *gitmap.GitInfo {
+func (p *nopPage) GitInfo() *source.GitInfo {
+	return nil
+}
+
+func (p *nopPage) CodeOwners() []string {
 	return nil
 }
 
@@ -198,20 +194,20 @@ func (p *nopPage) HasShortcode(name string) bool {
 	return false
 }
 
-func (p *nopPage) Hugo() (h hugo.Info) {
+func (p *nopPage) Hugo() (h hugo.HugoInfo) {
 	return
 }
 
-func (p *nopPage) InSection(other interface{}) (bool, error) {
-	return false, nil
+func (p *nopPage) InSection(other any) bool {
+	return false
 }
 
-func (p *nopPage) IsAncestor(other interface{}) (bool, error) {
-	return false, nil
+func (p *nopPage) IsAncestor(other any) bool {
+	return false
 }
 
-func (p *nopPage) IsDescendant(other interface{}) (bool, error) {
-	return false, nil
+func (p *nopPage) IsDescendant(other any) bool {
+	return false
 }
 
 func (p *nopPage) IsDraft() bool {
@@ -262,7 +258,7 @@ func (p *nopPage) Lastmod() (t time.Time) {
 	return
 }
 
-func (p *nopPage) Len() int {
+func (p *nopPage) Len(context.Context) int {
 	return 0
 }
 
@@ -306,15 +302,15 @@ func (p *nopPage) RegularPagesRecursive() Pages {
 	return nil
 }
 
-func (p *nopPage) Paginate(seq interface{}, options ...interface{}) (*Pager, error) {
+func (p *nopPage) Paginate(seq any, options ...any) (*Pager, error) {
 	return nil, nil
 }
 
-func (p *nopPage) Paginator(options ...interface{}) (*Pager, error) {
+func (p *nopPage) Paginator(options ...any) (*Pager, error) {
 	return nil, nil
 }
 
-func (p *nopPage) Param(key interface{}) (interface{}, error) {
+func (p *nopPage) Param(key any) (any, error) {
 	return nil, nil
 }
 
@@ -330,19 +326,27 @@ func (p *nopPage) Parent() Page {
 	return nil
 }
 
+func (p *nopPage) Ancestors() Pages {
+	return nil
+}
+
 func (p *nopPage) Path() string {
 	return ""
+}
+
+func (p *nopPage) PathInfo() *paths.Path {
+	return nil
 }
 
 func (p *nopPage) Permalink() string {
 	return ""
 }
 
-func (p *nopPage) Plain() string {
+func (p *nopPage) Plain(context.Context) string {
 	return ""
 }
 
-func (p *nopPage) PlainWords() []string {
+func (p *nopPage) PlainWords(context.Context) []string {
 	return nil
 }
 
@@ -374,11 +378,15 @@ func (p *nopPage) RawContent() string {
 	return ""
 }
 
-func (p *nopPage) ReadingTime() int {
+func (p *nopPage) RenderShortcodes(ctx context.Context) (template.HTML, error) {
+	return "", nil
+}
+
+func (p *nopPage) ReadingTime(context.Context) int {
 	return 0
 }
 
-func (p *nopPage) Ref(argsm map[string]interface{}) (string, error) {
+func (p *nopPage) Ref(argsm map[string]any) (string, error) {
 	return "", nil
 }
 
@@ -386,15 +394,15 @@ func (p *nopPage) RelPermalink() string {
 	return ""
 }
 
-func (p *nopPage) RelRef(argsm map[string]interface{}) (string, error) {
+func (p *nopPage) RelRef(argsm map[string]any) (string, error) {
 	return "", nil
 }
 
-func (p *nopPage) Render(layout ...string) (template.HTML, error) {
+func (p *nopPage) Render(ctx context.Context, layout ...string) (template.HTML, error) {
 	return "", nil
 }
 
-func (p *nopPage) RenderString(args ...interface{}) (template.HTML, error) {
+func (p *nopPage) RenderString(ctx context.Context, args ...any) (template.HTML, error) {
 	return "", nil
 }
 
@@ -407,6 +415,10 @@ func (p *nopPage) Resources() resource.Resources {
 }
 
 func (p *nopPage) Scratch() *maps.Scratch {
+	return nil
+}
+
+func (p *nopPage) Store() *maps.Scratch {
 	return nil
 }
 
@@ -446,11 +458,11 @@ func (p *nopPage) String() string {
 	return "nopPage"
 }
 
-func (p *nopPage) Summary() template.HTML {
+func (p *nopPage) Summary(context.Context) template.HTML {
 	return ""
 }
 
-func (p *nopPage) TableOfContents() template.HTML {
+func (p *nopPage) TableOfContents(context.Context) template.HTML {
 	return ""
 }
 
@@ -470,7 +482,7 @@ func (p *nopPage) Translations() Pages {
 	return nil
 }
 
-func (p *nopPage) Truncated() bool {
+func (p *nopPage) Truncated(context.Context) bool {
 	return false
 }
 
@@ -490,10 +502,95 @@ func (p *nopPage) Weight() int {
 	return 0
 }
 
-func (p *nopPage) WordCount() int {
+func (p *nopPage) WordCount(context.Context) int {
 	return 0
 }
 
-func (p *nopPage) GetIdentity() identity.Identity {
-	return identity.NewPathIdentity("content", "foo/bar.md")
+func (p *nopPage) Fragments(context.Context) *tableofcontents.Fragments {
+	return nil
+}
+
+func (p *nopPage) HeadingsFiltered(context.Context) tableofcontents.Headings {
+	return nil
+}
+
+type nopContentRenderer int
+
+func (r *nopContentRenderer) ParseAndRenderContent(ctx context.Context, content []byte, renderTOC bool) (converter.ResultRender, error) {
+	b := &bytes.Buffer{}
+	return b, nil
+}
+
+func (r *nopContentRenderer) ParseContent(ctx context.Context, content []byte) (converter.ResultParse, bool, error) {
+	return nil, false, nil
+}
+
+func (r *nopContentRenderer) RenderContent(ctx context.Context, content []byte, doc any) (converter.ResultRender, bool, error) {
+	return nil, false, nil
+}
+
+type (
+	nopMarkup  int
+	nopContent int
+)
+
+var (
+	_ Markup  = (*nopMarkup)(nil)
+	_ Content = (*nopContent)(nil)
+)
+
+func (c *nopMarkup) Render(context.Context) (Content, error) {
+	return NopContent, nil
+}
+
+func (c *nopMarkup) RenderString(ctx context.Context, args ...any) (template.HTML, error) {
+	return "", nil
+}
+
+func (c *nopMarkup) RenderShortcodes(context.Context) (template.HTML, error) {
+	return "", nil
+}
+
+func (c *nopContent) Plain(context.Context) string {
+	return ""
+}
+
+func (c *nopContent) PlainWords(context.Context) []string {
+	return nil
+}
+
+func (c *nopContent) WordCount(context.Context) int {
+	return 0
+}
+
+func (c *nopContent) FuzzyWordCount(context.Context) int {
+	return 0
+}
+
+func (c *nopContent) ReadingTime(context.Context) int {
+	return 0
+}
+
+func (c *nopContent) Len(context.Context) int {
+	return 0
+}
+
+func (c *nopContent) Content(context.Context) (template.HTML, error) {
+	return "", nil
+}
+
+func (c *nopContent) ContentWithoutSummary(context.Context) (template.HTML, error) {
+	return "", nil
+}
+
+func (c *nopMarkup) Fragments(context.Context) *tableofcontents.Fragments {
+	return nil
+}
+
+func (c *nopMarkup) FragmentsHTML(context.Context) template.HTML {
+	return ""
+}
+
+func (c *nopContent) Summary(context.Context) (Summary, error) {
+	return Summary{}, nil
 }

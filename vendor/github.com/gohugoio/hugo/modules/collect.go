@@ -1,4 +1,4 @@
-// Copyright 2019 The Hugo Authors. All rights reserved.
+// Copyright 2025 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,7 +15,10 @@ package modules
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,7 +26,10 @@ import (
 	"time"
 
 	"github.com/bep/debounce"
+	"github.com/gohugoio/hugo/common/herrors"
 	"github.com/gohugoio/hugo/common/loggers"
+	"github.com/gohugoio/hugo/common/paths"
+	"golang.org/x/mod/module"
 
 	"github.com/spf13/cast"
 
@@ -34,10 +40,6 @@ import (
 
 	"github.com/gohugoio/hugo/hugofs/files"
 
-	"github.com/rogpeppe/go-internal/module"
-
-	"github.com/pkg/errors"
-
 	"github.com/gohugoio/hugo/config"
 	"github.com/spf13/afero"
 )
@@ -45,25 +47,6 @@ import (
 var ErrNotExist = errors.New("module does not exist")
 
 const vendorModulesFilename = "modules.txt"
-
-// IsNotExist returns whether an error means that a module could not be found.
-func IsNotExist(err error) bool {
-	return errors.Cause(err) == ErrNotExist
-}
-
-// CreateProjectModule creates modules from the given config.
-// This is used in tests only.
-func CreateProjectModule(cfg config.Provider) (Module, error) {
-	workingDir := cfg.GetString("workingDir")
-	var modConfig Config
-
-	mod := createProjectModule(nil, workingDir, modConfig)
-	if err := ApplyProjectConfigDefaults(cfg, mod); err != nil {
-		return nil, err
-	}
-
-	return mod, nil
-}
 
 func (h *Client) Collect() (ModulesConfig, error) {
 	mc, coll := h.collect(true)
@@ -89,6 +72,9 @@ func (h *Client) Collect() (ModulesConfig, error) {
 }
 
 func (h *Client) collect(tidy bool) (ModulesConfig, *collector) {
+	if h == nil {
+		panic("nil client")
+	}
 	c := &collector{
 		Client: h,
 	}
@@ -106,35 +92,44 @@ func (h *Client) collect(tidy bool) (ModulesConfig, *collector) {
 		}
 	}*/
 
+	var workspaceFilename string
+	if h.ccfg.ModuleConfig.Workspace != WorkspaceDisabled {
+		workspaceFilename = h.ccfg.ModuleConfig.Workspace
+	}
+
 	return ModulesConfig{
-		AllModules:        c.modules,
-		GoModulesFilename: c.GoModulesFilename,
+		AllModules:          c.modules,
+		GoModulesFilename:   c.GoModulesFilename,
+		GoWorkspaceFilename: workspaceFilename,
 	}, c
 }
 
 type ModulesConfig struct {
-	// All modules, including any disabled.
-	AllModules Modules
-
 	// All active modules.
-	ActiveModules Modules
+	AllModules Modules
 
 	// Set if this is a Go modules enabled project.
 	GoModulesFilename string
+
+	// Set if a Go workspace file is configured.
+	GoWorkspaceFilename string
+}
+
+func (m ModulesConfig) HasConfigFile() bool {
+	for _, mod := range m.AllModules {
+		if len(mod.ConfigFilenames()) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *ModulesConfig) setActiveMods(logger loggers.Logger) error {
-	var activeMods Modules
 	for _, mod := range m.AllModules {
 		if !mod.Config().HugoVersion.IsValid() {
-			logger.Warnf(`Module %q is not compatible with this Hugo version; run "hugo mod graph" for more information.`, mod.Path())
-		}
-		if !mod.Disabled() {
-			activeMods = append(activeMods, mod)
+			logger.Warnf(`Module %q is not compatible with this Hugo version: %s; run "hugo mod graph" for more information.`, mod.Path(), mod.Config().HugoVersion)
 		}
 	}
-
-	m.ActiveModules = activeMods
 
 	return nil
 }
@@ -160,9 +155,14 @@ func filterUnwantedMounts(mounts []Mount) []Mount {
 	return tmp
 }
 
+type pathVersionKey struct {
+	path    string
+	version string
+}
+
 type collected struct {
 	// Pick the first and prevent circular loops.
-	seen map[string]bool
+	seenPaths map[string]*moduleAdapter
 
 	// Maps module path to a _vendor dir. These values are fetched from
 	// _vendor/modules.txt, and the first (top-most) will win.
@@ -191,9 +191,9 @@ type collector struct {
 
 func (c *collector) initModules() error {
 	c.collected = &collected{
-		seen:     make(map[string]bool),
-		vendored: make(map[string]vendoredModule),
-		gomods:   goModules{},
+		seenPaths: make(map[string]*moduleAdapter),
+		vendored:  make(map[string]vendoredModule),
+		gomods:    goModules{},
 	}
 
 	// If both these are true, we don't even need Go installed to build.
@@ -205,13 +205,16 @@ func (c *collector) initModules() error {
 	return c.loadModules()
 }
 
-func (c *collector) isSeen(path string) bool {
-	key := pathKey(path)
-	if c.seen[key] {
-		return true
+func (c *collector) isPathSeen(p string, owner *moduleAdapter) *moduleAdapter {
+	// Remove any major version suffix.
+	// We do allow multiple major versions in the same project,
+	// but not as transitive dependencies.
+	p = pathBase(p)
+	if v, ok := c.seenPaths[p]; ok {
+		return v
 	}
-	c.seen[key] = true
-	return false
+	c.seenPaths[p] = owner
+	return nil
 }
 
 func (c *collector) getVendoredDir(path string) (vendoredModule, bool) {
@@ -219,29 +222,37 @@ func (c *collector) getVendoredDir(path string) (vendoredModule, bool) {
 	return v, found
 }
 
-func (c *collector) add(owner *moduleAdapter, moduleImport Import, disabled bool) (*moduleAdapter, error) {
+func (c *collector) getAndCreateModule(owner *moduleAdapter, moduleImport Import) (*moduleAdapter, error) {
 	var (
-		mod       *goModule
-		moduleDir string
-		version   string
-		vendored  bool
+		mod                   *goModule
+		moduleDir             string
+		versionMod            string
+		requestedVersionQuery string = moduleImport.Version
+		vendored              bool
 	)
 
 	modulePath := moduleImport.Path
+	vendorPath := modulePath
+	vendorPathEscaped := modulePath
+	if requestedVersionQuery != "" {
+		vendorPath += "@" + requestedVersionQuery
+		vendorPathEscaped += "@" + url.QueryEscape(requestedVersionQuery)
+	}
+
 	var realOwner Module = owner
 
-	if !c.ccfg.shouldIgnoreVendor(modulePath) {
+	if !(c.ccfg.shouldIgnoreVendor(vendorPath)) {
 		if err := c.collectModulesTXT(owner); err != nil {
 			return nil, err
 		}
 
 		// Try _vendor first.
 		var vm vendoredModule
-		vm, vendored = c.getVendoredDir(modulePath)
+		vm, vendored = c.getVendoredDir(vendorPathEscaped)
 		if vendored {
 			moduleDir = vm.Dir
 			realOwner = vm.Owner
-			version = vm.Version
+			versionMod = vm.Version
 
 			if owner.projectMod {
 				// We want to keep the go.mod intact with the versions and all.
@@ -252,31 +263,45 @@ func (c *collector) add(owner *moduleAdapter, moduleImport Import, disabled bool
 	}
 
 	if moduleDir == "" {
-		var versionQuery string
-		mod = c.gomods.GetByPath(modulePath)
-		if mod != nil {
-			moduleDir = mod.Dir
-			versionQuery = mod.Version
+		if requestedVersionQuery == "" {
+			mod = c.gomods.GetByPath(modulePath)
+			if mod != nil {
+				moduleDir = mod.Dir
+			}
 		}
 
 		if moduleDir == "" {
-			if c.GoModulesFilename != "" && isProbablyModule(modulePath) {
-				// Try to "go get" it and reload the module configuration.
-				if versionQuery == "" {
+			if isProbablyModule(modulePath) {
+				if requestedVersionQuery != "" {
+					var err error
+					mod, err = c.downloadModuleVersion(modulePath, requestedVersionQuery)
+					if err != nil {
+						return nil, err
+					}
+					if mod == nil {
+						return nil, fmt.Errorf("module %q not found", modulePath)
+					}
+					moduleDir = mod.Dir
+					versionMod = mod.Version
+				} else if c.GoModulesFilename != "" {
 					// See https://golang.org/ref/mod#version-queries
 					// This will select the latest release-version (not beta etc.).
-					versionQuery = "upgrade"
-				}
-				if err := c.Get(fmt.Sprintf("%s@%s", modulePath, versionQuery)); err != nil {
-					return nil, err
-				}
-				if err := c.loadModules(); err != nil {
-					return nil, err
-				}
+					const versionQuery = "upgrade"
+					// Try to "go get" it and reload the module configuration.
 
-				mod = c.gomods.GetByPath(modulePath)
-				if mod != nil {
-					moduleDir = mod.Dir
+					// Note that we cannot use c.Get for this, as that may
+					// trigger a new module collection and potentially create a infinite loop.
+					if err := c.get(fmt.Sprintf("%s@%s", modulePath, versionQuery)); err != nil {
+						return nil, err
+					}
+					if err := c.loadModules(); err != nil {
+						return nil, err
+					}
+
+					mod = c.gomods.GetByPath(modulePath)
+					if mod != nil {
+						moduleDir = mod.Dir
+					}
 				}
 			}
 
@@ -289,7 +314,8 @@ func (c *collector) add(owner *moduleAdapter, moduleImport Import, disabled bool
 					return nil, nil
 				}
 				if found, _ := afero.Exists(c.fs, moduleDir); !found {
-					c.err = c.wrapModuleNotFound(errors.Errorf(`module %q not found; either add it as a Hugo Module or store it in %q.`, modulePath, c.ccfg.ThemesDir))
+					//lint:ignore ST1005 end user message.
+					c.err = c.wrapModuleNotFound(fmt.Errorf(`module %q not found in %q; either add it as a Hugo Module or store it in %q.`, modulePath, moduleDir, c.ccfg.ThemesDir))
 					return nil, nil
 				}
 			}
@@ -297,7 +323,7 @@ func (c *collector) add(owner *moduleAdapter, moduleImport Import, disabled bool
 	}
 
 	if found, _ := afero.Exists(c.fs, moduleDir); !found {
-		c.err = c.wrapModuleNotFound(errors.Errorf("%q not found", moduleDir))
+		c.err = c.wrapModuleNotFound(fmt.Errorf("%q not found", moduleDir))
 		return nil, nil
 	}
 
@@ -306,11 +332,11 @@ func (c *collector) add(owner *moduleAdapter, moduleImport Import, disabled bool
 	}
 
 	ma := &moduleAdapter{
-		dir:      moduleDir,
-		vendor:   vendored,
-		disabled: disabled,
-		gomod:    mod,
-		version:  version,
+		dir:          moduleDir,
+		vendor:       vendored,
+		gomod:        mod,
+		version:      versionMod,
+		versionQuery: requestedVersionQuery,
 		// This may be the owner of the _vendor dir
 		owner: realOwner,
 	}
@@ -329,33 +355,60 @@ func (c *collector) add(owner *moduleAdapter, moduleImport Import, disabled bool
 		return nil, err
 	}
 
-	c.modules = append(c.modules, ma)
 	return ma, nil
 }
 
-func (c *collector) addAndRecurse(owner *moduleAdapter, disabled bool) error {
+func (c *collector) addAndRecurse(owner *moduleAdapter) error {
 	moduleConfig := owner.Config()
 	if owner.projectMod {
 		if err := c.applyMounts(Import{}, owner); err != nil {
-			return err
+			return fmt.Errorf("failed to apply mounts for project: %w", err)
 		}
 	}
-
+	seen := make(map[pathVersionKey]bool)
 	for _, moduleImport := range moduleConfig.Imports {
-		disabled := disabled || moduleImport.Disable
-
-		if !c.isSeen(moduleImport.Path) {
-			tc, err := c.add(owner, moduleImport, disabled)
-			if err != nil {
-				return err
-			}
-			if tc == nil || moduleImport.IgnoreImports {
-				continue
-			}
-			if err := c.addAndRecurse(tc, disabled); err != nil {
-				return err
-			}
+		if moduleImport.Disable {
+			continue
 		}
+
+		// Prevent cyclic references.
+		if v := c.isPathSeen(moduleImport.Path, owner); v != nil && v != owner {
+			continue
+		}
+
+		tc, err := c.getAndCreateModule(owner, moduleImport)
+		if err != nil {
+			return err
+		}
+
+		if tc == nil {
+			continue
+		}
+
+		pk := pathVersionKey{path: tc.Path(), version: tc.Version()}
+		seenInCurrent := seen[pk]
+		if seenInCurrent {
+			// Only one import of the same module per project.
+			if owner.projectMod {
+				// In Hugo v0.150.0 we introduced direct dependencies, and it may be tempting to import the same version
+				// with different mount setups. We may allow that in the future, but we need to get some experience first.
+				// For now, we just warn. The user needs to add multiple mount points in the same import.
+				c.logger.Warnf("module with path %q is imported for the same version %q more than once", tc.Path(), tc.Version())
+			}
+			continue
+		}
+		seen[pk] = true
+
+		c.modules = append(c.modules, tc)
+
+		if moduleImport.IgnoreImports {
+			continue
+		}
+
+		if err := c.addAndRecurse(tc); err != nil {
+			return err
+		}
+
 	}
 	return nil
 }
@@ -408,17 +461,19 @@ func (c *collector) applyMounts(moduleImport Import, mod *moduleAdapter) error {
 func (c *collector) applyThemeConfig(tc *moduleAdapter) error {
 	var (
 		configFilename string
-		themeCfg       map[string]interface{}
+		themeCfg       map[string]any
 		hasConfigFile  bool
 		err            error
 	)
 
-	// Viper supports more, but this is the sub-set supported by Hugo.
-	for _, configFormats := range config.ValidConfigFileExtensions {
-		configFilename = filepath.Join(tc.Dir(), "config."+configFormats)
-		hasConfigFile, _ = afero.Exists(c.fs, configFilename)
-		if hasConfigFile {
-			break
+LOOP:
+	for _, configBaseName := range config.DefaultConfigNames {
+		for _, configFormats := range config.ValidConfigFileExtensions {
+			configFilename = filepath.Join(tc.Dir(), configBaseName+"."+configFormats)
+			hasConfigFile, _ = afero.Exists(c.fs, configFilename)
+			if hasConfigFile {
+				break LOOP
+			}
 		}
 	}
 
@@ -487,7 +542,7 @@ func (c *collector) applyThemeConfig(tc *moduleAdapter) error {
 		}
 
 		if config.Params == nil {
-			config.Params = make(map[string]interface{})
+			config.Params = make(map[string]any)
 		}
 
 		for k, v := range themeCfg {
@@ -519,13 +574,18 @@ func (c *collector) collect() {
 
 	projectMod := createProjectModule(c.gomods.GetMain(), c.ccfg.WorkingDir, c.moduleConfig)
 
-	if err := c.addAndRecurse(projectMod, false); err != nil {
+	if err := c.addAndRecurse(projectMod); err != nil {
 		c.err = err
 		return
 	}
 
 	// Add the project mod on top.
 	c.modules = append(Modules{projectMod}, c.modules...)
+
+	if err := c.writeHugoDirectSum(c.modules); err != nil {
+		c.err = err
+		return
+	}
 }
 
 func (c *collector) isVendored(dir string) bool {
@@ -539,7 +599,7 @@ func (c *collector) collectModulesTXT(owner Module) error {
 
 	f, err := c.fs.Open(filename)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if herrors.IsNotExist(err) {
 			return nil
 		}
 
@@ -555,9 +615,12 @@ func (c *collector) collectModulesTXT(owner Module) error {
 		line := scanner.Text()
 		line = strings.Trim(line, "# ")
 		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 		parts := strings.Fields(line)
 		if len(parts) != 2 {
-			return errors.Errorf("invalid modules list: %q", filename)
+			return fmt.Errorf("invalid modules list: %q", filename)
 		}
 		path := parts[0]
 
@@ -604,9 +667,14 @@ func (c *collector) mountCommonJSConfig(owner *moduleAdapter, mounts []Mount) ([
 	}
 
 	// Mount the common JS config files.
-	fis, err := afero.ReadDir(c.fs, owner.Dir())
+	d, err := c.fs.Open(owner.Dir())
 	if err != nil {
-		return mounts, err
+		return mounts, fmt.Errorf("failed to open dir %q: %q", owner.Dir(), err)
+	}
+	defer d.Close()
+	fis, err := d.(fs.ReadDirFile).ReadDir(-1)
+	if err != nil {
+		return mounts, fmt.Errorf("failed to read dir %q: %q", owner.Dir(), err)
 	}
 
 	for _, fi := range fis {
@@ -627,6 +695,19 @@ func (c *collector) mountCommonJSConfig(owner *moduleAdapter, mounts []Mount) ([
 	return mounts, nil
 }
 
+func (c *collector) nodeModulesRoot(s string) string {
+	s = filepath.ToSlash(s)
+	if strings.HasPrefix(s, "node_modules/") {
+		return s
+	}
+	if strings.HasPrefix(s, "../../node_modules/") {
+		// See #14083. This was a common construct to mount node_modules from the project root.
+		// This started failing in v0.152.0 when we tightened the validation.
+		return strings.TrimPrefix(s, "../../")
+	}
+	return ""
+}
+
 func (c *collector) normalizeMounts(owner *moduleAdapter, mounts []Mount) ([]Mount, error) {
 	var out []Mount
 	dir := owner.Dir()
@@ -638,11 +719,25 @@ func (c *collector) normalizeMounts(owner *moduleAdapter, mounts []Mount) ([]Mou
 			return nil, errors.New(errMsg + ": both source and target must be set")
 		}
 
+		// Special case for node_modules imports in themes/modules.
+		// See #14089.
+		var isModuleNodeModulesImport bool
+		if !owner.projectMod {
+			nodeModulesImportSource := c.nodeModulesRoot(mnt.Source)
+			if nodeModulesImportSource != "" {
+				isModuleNodeModulesImport = true
+				mnt.Source = nodeModulesImportSource
+			}
+		}
+
 		mnt.Source = filepath.Clean(mnt.Source)
 		mnt.Target = filepath.Clean(mnt.Target)
 		var sourceDir string
 
-		if owner.projectMod && filepath.IsAbs(mnt.Source) {
+		if !owner.projectMod && !filepath.IsLocal(mnt.Source) {
+			return nil, fmt.Errorf("%s: %q: mount source must be a local path for modules/themes", errMsg, mnt.Source)
+		}
+		if filepath.IsAbs(mnt.Source) {
 			// Abs paths in the main project is allowed.
 			sourceDir = mnt.Source
 		} else {
@@ -652,7 +747,37 @@ func (c *collector) normalizeMounts(owner *moduleAdapter, mounts []Mount) ([]Mou
 		// Verify that Source exists
 		_, err := c.fs.Stat(sourceDir)
 		if err != nil {
-			continue
+			if paths.IsSameFilePath(sourceDir, c.ccfg.PublishDir) {
+				// This is a little exotic, but there are use cases for mounting the public folder.
+				// This will typically also be in .gitingore, so create it.
+				if err := c.fs.MkdirAll(sourceDir, 0o755); err != nil {
+					return nil, fmt.Errorf("%s: %q", errMsg, err)
+				}
+			} else if strings.HasSuffix(sourceDir, files.FilenameHugoStatsJSON) {
+				// A common pattern for Tailwind 3 is to mount that file to get it on the server watch list.
+
+				// A common pattern is also to add hugo_stats.json to .gitignore.
+
+				// Create an empty file.
+				f, err := c.fs.Create(sourceDir)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %q", errMsg, err)
+				}
+				f.Close()
+			} else {
+				if isModuleNodeModulesImport {
+					// A module imported a path inside node_modules, but it didn't exist.
+					// Make this a special case and also try relative to the project root.
+					sourceDir = filepath.Join(c.ccfg.WorkingDir, mnt.Source)
+					_, err := c.fs.Stat(sourceDir)
+					if err != nil {
+						continue
+					}
+					mnt.Source = sourceDir
+				} else {
+					continue
+				}
+			}
 		}
 
 		// Verify that target points to one of the predefined component dirs
@@ -662,7 +787,7 @@ func (c *collector) normalizeMounts(owner *moduleAdapter, mounts []Mount) ([]Mou
 			targetBase = mnt.Target[0:idxPathSep]
 		}
 		if !files.IsComponentFolder(targetBase) {
-			return nil, errors.Errorf("%s: mount target must be one of: %v", errMsg, files.ComponentFolders)
+			return nil, fmt.Errorf("%s: mount target must be one of: %v", errMsg, files.ComponentFolders)
 		}
 
 		out = append(out, mnt)
@@ -672,7 +797,10 @@ func (c *collector) normalizeMounts(owner *moduleAdapter, mounts []Mount) ([]Mou
 }
 
 func (c *collector) wrapModuleNotFound(err error) error {
-	err = errors.Wrap(ErrNotExist, err.Error())
+	if c.Client.ccfg.IgnoreModuleDoesNotExist {
+		return nil
+	}
+	err = fmt.Errorf(err.Error()+": %w", ErrNotExist)
 	if c.GoModulesFilename == "" {
 		return err
 	}
@@ -681,9 +809,9 @@ func (c *collector) wrapModuleNotFound(err error) error {
 
 	switch c.goBinaryStatus {
 	case goBinaryStatusNotFound:
-		return errors.Wrap(err, baseMsg+" you need to install Go to use it. See https://golang.org/dl/.")
+		return fmt.Errorf(baseMsg+" you need to install Go to use it. See https://golang.org/dl/ : %q", err)
 	case goBinaryStatusTooOld:
-		return errors.Wrap(err, baseMsg+" you need to a newer version of Go to use it. See https://golang.org/dl/.")
+		return fmt.Errorf(baseMsg+" you need to a newer version of Go to use it. See https://golang.org/dl/ : %w", err)
 	}
 
 	return err
@@ -711,12 +839,7 @@ func createProjectModule(gomod *goModule, workingDir string, conf Config) *modul
 	}
 }
 
-// In the first iteration of Hugo Modules, we do not support multiple
-// major versions running at the same time, so we pick the first (upper most).
-// We will investigate namespaces in future versions.
-// TODO(bep) add a warning when the above happens.
-func pathKey(p string) string {
+func pathBase(p string) string {
 	prefix, _, _ := module.SplitPathVersion(p)
-
 	return strings.ToLower(prefix)
 }

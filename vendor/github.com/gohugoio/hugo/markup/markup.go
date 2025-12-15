@@ -11,12 +11,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package markup contains the markup handling (e.g. Markdown).
 package markup
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/gohugoio/hugo/markup/highlight"
+	"github.com/gohugoio/hugo/media"
 
 	"github.com/gohugoio/hugo/markup/markup_config"
 
@@ -25,9 +28,7 @@ import (
 	"github.com/gohugoio/hugo/markup/org"
 
 	"github.com/gohugoio/hugo/markup/asciidocext"
-	"github.com/gohugoio/hugo/markup/blackfriday"
 	"github.com/gohugoio/hugo/markup/converter"
-	"github.com/gohugoio/hugo/markup/mmark"
 	"github.com/gohugoio/hugo/markup/pandoc"
 	"github.com/gohugoio/hugo/markup/rst"
 )
@@ -35,21 +36,16 @@ import (
 func NewConverterProvider(cfg converter.ProviderConfig) (ConverterProvider, error) {
 	converters := make(map[string]converter.Provider)
 
-	markupConfig, err := markup_config.Decode(cfg.Cfg)
-	if err != nil {
-		return nil, err
+	mcfg := cfg.MarkupConfig()
+
+	if cfg.Highlighter == nil {
+		cfg.Highlighter = highlight.New(mcfg.Highlight)
 	}
 
-	if cfg.Highlight == nil {
-		h := highlight.New(markupConfig.Highlight)
-		cfg.Highlight = func(code, lang, optsStr string) (string, error) {
-			return h.Highlight(code, lang, optsStr)
-		}
-	}
+	defaultHandler := mcfg.DefaultMarkdownHandler
+	var defaultFound bool
 
-	cfg.MarkupConfig = markupConfig
-
-	add := func(p converter.ProviderProvider, aliases ...string) error {
+	add := func(p converter.ProviderProvider, subType string, aliases ...string) error {
 		c, err := p.New(cfg)
 		if err != nil {
 			return err
@@ -58,35 +54,41 @@ func NewConverterProvider(cfg converter.ProviderConfig) (ConverterProvider, erro
 		name := c.Name()
 
 		aliases = append(aliases, name)
+		aliases = append(aliases, subType)
 
-		if strings.EqualFold(name, cfg.MarkupConfig.DefaultMarkdownHandler) {
+		if strings.EqualFold(name, defaultHandler) {
 			aliases = append(aliases, "markdown")
+			defaultFound = true
 		}
 
 		addConverter(converters, c, aliases...)
 		return nil
 	}
 
-	if err := add(goldmark.Provider); err != nil {
+	contentTypes := cfg.Conf.ContentTypes().(media.ContentTypes)
+
+	if err := add(goldmark.Provider, contentTypes.Markdown.SubType, contentTypes.Markdown.Suffixes()...); err != nil {
 		return nil, err
 	}
-	if err := add(blackfriday.Provider); err != nil {
+	if err := add(asciidocext.Provider, contentTypes.AsciiDoc.SubType, contentTypes.AsciiDoc.Suffixes()...); err != nil {
 		return nil, err
 	}
-	if err := add(mmark.Provider); err != nil {
+	if err := add(rst.Provider, contentTypes.ReStructuredText.SubType, contentTypes.ReStructuredText.Suffixes()...); err != nil {
 		return nil, err
 	}
-	if err := add(asciidocext.Provider, "ad", "adoc"); err != nil {
+	if err := add(pandoc.Provider, contentTypes.Pandoc.SubType, contentTypes.Pandoc.Suffixes()...); err != nil {
 		return nil, err
 	}
-	if err := add(rst.Provider); err != nil {
+	if err := add(org.Provider, contentTypes.EmacsOrgMode.SubType, contentTypes.EmacsOrgMode.Suffixes()...); err != nil {
 		return nil, err
 	}
-	if err := add(pandoc.Provider, "pdc"); err != nil {
-		return nil, err
-	}
-	if err := add(org.Provider); err != nil {
-		return nil, err
+
+	if !defaultFound {
+		msg := "markup: Configured defaultMarkdownHandler %q not found."
+		if defaultHandler == "blackfriday" {
+			msg += " Did you mean to use goldmark? Blackfriday was removed in Hugo v0.100.0."
+		}
+		return nil, fmt.Errorf(msg, defaultHandler)
 	}
 
 	return &converterRegistry{
@@ -97,13 +99,14 @@ func NewConverterProvider(cfg converter.ProviderConfig) (ConverterProvider, erro
 
 type ConverterProvider interface {
 	Get(name string) converter.Provider
+	IsGoldmark(name string) bool
 	// Default() converter.Provider
 	GetMarkupConfig() markup_config.Config
-	Highlight(code, lang, optsStr string) (string, error)
+	GetHighlighter() highlight.Highlighter
 }
 
 type converterRegistry struct {
-	// Maps name (md, markdown, blackfriday etc.) to a converter provider.
+	// Maps name (md, markdown, goldmark etc.) to a converter provider.
 	// Note that this is also used for aliasing, so the same converter
 	// may be registered multiple times.
 	// All names are lower case.
@@ -112,20 +115,38 @@ type converterRegistry struct {
 	config converter.ProviderConfig
 }
 
+func (r *converterRegistry) IsGoldmark(name string) bool {
+	cp := r.Get(name)
+	return cp != nil && cp.Name() == "goldmark"
+}
+
 func (r *converterRegistry) Get(name string) converter.Provider {
 	return r.converters[strings.ToLower(name)]
 }
 
-func (r *converterRegistry) Highlight(code, lang, optsStr string) (string, error) {
-	return r.config.Highlight(code, lang, optsStr)
+func (r *converterRegistry) GetHighlighter() highlight.Highlighter {
+	return r.config.Highlighter
 }
 
 func (r *converterRegistry) GetMarkupConfig() markup_config.Config {
-	return r.config.MarkupConfig
+	return r.config.MarkupConfig()
 }
 
 func addConverter(m map[string]converter.Provider, c converter.Provider, aliases ...string) {
 	for _, alias := range aliases {
 		m[alias] = c
+	}
+}
+
+// ResolveMarkup returns the markup type.
+func ResolveMarkup(s string) string {
+	s = strings.ToLower(s)
+	switch s {
+	case "goldmark":
+		return media.DefaultContentTypes.Markdown.SubType
+	case "asciidocext":
+		return media.DefaultContentTypes.AsciiDoc.SubType
+	default:
+		return s
 	}
 }

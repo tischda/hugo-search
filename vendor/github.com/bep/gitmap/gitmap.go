@@ -1,4 +1,4 @@
-// Copyright © 2016-present Bjørn Erik Pedersen <bjorn.erik.pedersen@gmail.com>.
+// Copyright 2024 Bjørn Erik Pedersen <bjorn.erik.pedersen@gmail.com>.
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -19,7 +20,7 @@ var (
 	// will be modified during tests
 	gitExec string
 
-	GitNotFound = errors.New("Git executable not found in $PATH")
+	ErrGitNotFound = errors.New("git executable not found in $PATH")
 )
 
 type GitRepo struct {
@@ -46,22 +47,64 @@ type GitInfo struct {
 	AuthorEmail     string    `json:"authorEmail"`     // The author email address, respecting .mailmap
 	AuthorDate      time.Time `json:"authorDate"`      // The author date
 	CommitDate      time.Time `json:"commitDate"`      // The commit date
+	Body            string    `json:"body"`            // The commit message body
+	Parent          *GitInfo  `json:"-"`               // The file-filtered ancestor commit, if any
 }
 
-// Map creates a GitRepo with a file map from the given repository path and revision.
-// Use blank or HEAD as revision for the currently active revision.
-func Map(repository, revision string) (*GitRepo, error) {
+// Ancestors returns a slice of GitInfo objects representing the ancestors.
+func (g *GitInfo) Ancestors() GitInfos {
+	var ancestors GitInfos
+	for parent := g.Parent; parent != nil; parent = parent.Parent {
+		ancestors = append(ancestors, parent)
+	}
+	return ancestors
+}
+
+type GitInfos []*GitInfo
+
+// Reverse creates a copy of the GitInfos slice in reverse order.
+func (g GitInfos) Reverse() GitInfos {
+	reversed := make(GitInfos, len(g))
+	for i, v := range g {
+		reversed[len(g)-1-i] = v
+	}
+	return reversed
+}
+
+// Runner is an interface for running Git commands,
+// as implemented buy *exec.Cmd.
+type Runner interface {
+	Run() error
+}
+
+// Options for the Map function
+type Options struct {
+	Repository        string // Path to the repository to map
+	Revision          string // Use blank or HEAD for the currently active revision
+	GetGitCommandFunc func(stdout, stderr io.Writer, args ...string) (Runner, error)
+}
+
+// Map creates a GitRepo with a file map from the given options.
+func Map(opts Options) (*GitRepo, error) {
+	if opts.GetGitCommandFunc == nil {
+		opts.GetGitCommandFunc = func(stdout, stderr io.Writer, args ...string) (Runner, error) {
+			cmd := exec.Command(gitExec, args...)
+			cmd.Stdout = stdout
+			cmd.Stderr = stderr
+			return cmd, nil
+		}
+	}
+
 	m := make(GitMap)
+	a := make(GitMap)
 
 	// First get the top level repo path
-	absRepoPath, err := filepath.Abs(repository)
-
+	absRepoPath, err := filepath.Abs(opts.Repository)
 	if err != nil {
 		return nil, err
 	}
 
-	out, err := git("-C", repository, "rev-parse", "--show-cdup")
-
+	out, err := git(opts, "-C", opts.Repository, "rev-parse", "--show-cdup")
 	if err != nil {
 		return nil, err
 	}
@@ -70,36 +113,44 @@ func Map(repository, revision string) (*GitRepo, error) {
 	topLevelPath := filepath.ToSlash(filepath.Join(absRepoPath, cdUp))
 
 	gitLogArgs := strings.Fields(fmt.Sprintf(
-		`--name-only --no-merges --format=format:%%x1e%%H%%x1f%%h%%x1f%%s%%x1f%%aN%%x1f%%aE%%x1f%%ai%%x1f%%ci %s`,
-		revision,
+		`--name-only --no-merges --format=format:%%x1e%%H%%x1f%%h%%x1f%%s%%x1f%%aN%%x1f%%aE%%x1f%%ai%%x1f%%ci%%x1f%%b%%x1d %s`,
+		opts.Revision,
 	))
 
-	gitLogArgs = append([]string{"-c", "diff.renames=0", "-c", "log.showSignature=0", "-C", repository, "log"}, gitLogArgs...)
-	out, err = git(gitLogArgs...)
-
+	gitLogArgs = append([]string{"-c", "diff.renames=0", "-c", "log.showSignature=0", "-C", opts.Repository, "log"}, gitLogArgs...)
+	out, err = git(opts, gitLogArgs...)
 	if err != nil {
 		return nil, err
 	}
 
-	entriesStr := string(out)
-	entriesStr = strings.Trim(entriesStr, "\n\x1e'")
+	entriesStr := strings.Trim(out, "\n\x1e'")
 	entries := strings.Split(entriesStr, "\x1e")
 
 	for _, e := range entries {
-		lines := strings.Split(e, "\n")
+		lines := strings.Split(e, "\x1d")
 		gitInfo, err := toGitInfo(lines[0])
-
 		if err != nil {
 			return nil, err
 		}
-
-		for _, filename := range lines[1:] {
+		filenames := strings.Split(lines[1], "\n")
+		for _, filename := range filenames {
 			filename := strings.TrimSpace(filename)
 			if filename == "" {
 				continue
 			}
-			if _, ok := m[filename]; !ok {
-				m[filename] = gitInfo
+			// Cannot reuse because each GitInfo object has its own ancestor
+			// gitInfo.Ancestor is always nil at this point, so we're copying
+			gitInfoCopy := *gitInfo
+
+			if rootInfo, ok := m[filename]; !ok {
+				m[filename] = &gitInfoCopy
+			} else {
+				var ancInfo *GitInfo
+				if ancInfo, ok = a[filename]; !ok {
+					ancInfo = rootInfo
+				}
+				ancInfo.Parent = &gitInfoCopy
+				a[filename] = ancInfo.Parent
 			}
 		}
 	}
@@ -107,24 +158,30 @@ func Map(repository, revision string) (*GitRepo, error) {
 	return &GitRepo{Files: m, TopLevelAbsPath: topLevelPath}, nil
 }
 
-func git(args ...string) ([]byte, error) {
-	out, err := exec.Command(gitExec, args...).CombinedOutput()
-
+func git(opts Options, args ...string) (string, error) {
+	var outBuff bytes.Buffer
+	var errBuff bytes.Buffer
+	cmd, err := opts.GetGitCommandFunc(&outBuff, &errBuff, args...)
+	if err != nil {
+		return "", err
+	}
+	err = cmd.Run()
 	if err != nil {
 		if ee, ok := err.(*exec.Error); ok {
 			if ee.Err == exec.ErrNotFound {
-				return nil, GitNotFound
+				return "", ErrGitNotFound
 			}
 		}
-
-		return nil, errors.New(string(bytes.TrimSpace(out)))
+		return "", errors.New(strings.TrimSpace(errBuff.String()))
 	}
-
-	return out, nil
+	return outBuff.String(), nil
 }
 
 func toGitInfo(entry string) (*GitInfo, error) {
 	items := strings.Split(entry, "\x1f")
+	if len(items) == 7 {
+		items = append(items, "")
+	}
 	authorDate, err := time.Parse("2006-01-02 15:04:05 -0700", items[5])
 	if err != nil {
 		return nil, err
@@ -142,6 +199,7 @@ func toGitInfo(entry string) (*GitInfo, error) {
 		AuthorEmail:     items[4],
 		AuthorDate:      authorDate,
 		CommitDate:      commitDate,
+		Body:            strings.TrimSpace(items[7]),
 	}, nil
 }
 

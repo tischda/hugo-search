@@ -63,12 +63,12 @@ func (d *Document) parseKeyword(i int, stop stopFn) (int, Node) {
 	case "INCLUDE":
 		return d.parseInclude(k)
 	case "LINK":
-		if parts := strings.Split(k.Value, " "); len(parts) >= 2 {
+		if parts := strings.SplitN(k.Value, " ", 2); len(parts) == 2 {
 			d.Links[parts[0]] = parts[1]
 		}
 		return 1, k
 	case "MACRO":
-		if parts := strings.Split(k.Value, " "); len(parts) >= 2 {
+		if parts := strings.SplitN(k.Value, " ", 2); len(parts) == 2 {
 			d.Macros[parts[0]] = parts[1]
 		}
 		return 1, k
@@ -187,8 +187,8 @@ func (d *Document) loadSetupFile(k Keyword) (int, Node) {
 	return 1, k
 }
 
-func (n Comment) String() string      { return orgWriter.WriteNodesAsString(n) }
-func (n Keyword) String() string      { return orgWriter.WriteNodesAsString(n) }
-func (n NodeWithMeta) String() string { return orgWriter.WriteNodesAsString(n) }
-func (n NodeWithName) String() string { return orgWriter.WriteNodesAsString(n) }
-func (n Include) String() string      { return orgWriter.WriteNodesAsString(n) }
+func (n Comment) String() string      { return String(n) }
+func (n Keyword) String() string      { return String(n) }
+func (n NodeWithMeta) String() string { return String(n) }
+func (n NodeWithName) String() string { return String(n) }
+func (n Include) String() string      { return String(n) }

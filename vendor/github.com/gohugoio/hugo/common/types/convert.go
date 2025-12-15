@@ -25,13 +25,13 @@ import (
 
 // ToDuration converts v to time.Duration.
 // See ToDurationE if you need to handle errors.
-func ToDuration(v interface{}) time.Duration {
+func ToDuration(v any) time.Duration {
 	d, _ := ToDurationE(v)
 	return d
 }
 
 // ToDurationE converts v to time.Duration.
-func ToDurationE(v interface{}) (time.Duration, error) {
+func ToDurationE(v any) (time.Duration, error) {
 	if n := cast.ToInt(v); n > 0 {
 		return time.Duration(n) * time.Millisecond, nil
 	}
@@ -44,14 +44,14 @@ func ToDurationE(v interface{}) (time.Duration, error) {
 
 // ToStringSlicePreserveString is the same as ToStringSlicePreserveStringE,
 // but it never fails.
-func ToStringSlicePreserveString(v interface{}) []string {
+func ToStringSlicePreserveString(v any) []string {
 	vv, _ := ToStringSlicePreserveStringE(v)
 	return vv
 }
 
 // ToStringSlicePreserveStringE converts v to a string slice.
 // If v is a string, it will be wrapped in a string slice.
-func ToStringSlicePreserveStringE(v interface{}) ([]string, error) {
+func ToStringSlicePreserveStringE(v any) ([]string, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -69,7 +69,7 @@ func ToStringSlicePreserveStringE(v interface{}) ([]string, error) {
 	switch vv.Kind() {
 	case reflect.Slice, reflect.Array:
 		result = make([]string, vv.Len())
-		for i := 0; i < vv.Len(); i++ {
+		for i := range vv.Len() {
 			s, err := cast.ToStringE(vv.Index(i).Interface())
 			if err != nil {
 				return nil, err
@@ -80,13 +80,12 @@ func ToStringSlicePreserveStringE(v interface{}) ([]string, error) {
 	default:
 		return nil, fmt.Errorf("failed to convert %T to a string slice", v)
 	}
-
 }
 
 // TypeToString converts v to a string if it's a valid string type.
 // Note that this will not try to convert numeric values etc.,
 // use ToString for that.
-func TypeToString(v interface{}) (string, bool) {
+func TypeToString(v any) (string, bool) {
 	switch s := v.(type) {
 	case string:
 		return s, true
@@ -110,13 +109,13 @@ func TypeToString(v interface{}) (string, bool) {
 }
 
 // ToString converts v to a string.
-func ToString(v interface{}) string {
+func ToString(v any) string {
 	s, _ := ToStringE(v)
 	return s
 }
 
 // ToStringE converts v to a string.
-func ToStringE(v interface{}) (string, error) {
+func ToStringE(v any) (string, error) {
 	if s, ok := TypeToString(v); ok {
 		return s, nil
 	}

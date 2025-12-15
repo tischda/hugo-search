@@ -14,18 +14,20 @@
 package transform
 
 import (
-	"io/ioutil"
+	"errors"
+	"fmt"
+	"io"
 	"strings"
 
+	"github.com/gohugoio/hugo/resources"
 	"github.com/gohugoio/hugo/resources/resource"
 
+	"github.com/gohugoio/hugo/common/hashing"
 	"github.com/gohugoio/hugo/common/types"
 
 	"github.com/mitchellh/mapstructure"
 
-	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/parser/metadecoders"
-	"github.com/pkg/errors"
 
 	"github.com/spf13/cast"
 )
@@ -33,18 +35,18 @@ import (
 // Unmarshal unmarshals the data given, which can be either a string, json.RawMessage
 // or a Resource. Supported formats are JSON, TOML, YAML, and CSV.
 // You can optionally provide an options map as the first argument.
-func (ns *Namespace) Unmarshal(args ...interface{}) (interface{}, error) {
+func (ns *Namespace) Unmarshal(args ...any) (any, error) {
 	if len(args) < 1 || len(args) > 2 {
 		return nil, errors.New("unmarshal takes 1 or 2 arguments")
 	}
 
-	var data interface{}
+	var data any
 	decoder := metadecoders.Default
 
 	if len(args) == 1 {
 		data = args[0]
 	} else {
-		m, ok := args[0].(map[string]interface{})
+		m, ok := args[0].(map[string]any)
 		if !ok {
 			return nil, errors.New("first argument must be a map")
 		}
@@ -54,7 +56,7 @@ func (ns *Namespace) Unmarshal(args ...interface{}) (interface{}, error) {
 		data = args[1]
 		decoder, err = decodeDecoder(m)
 		if err != nil {
-			return nil, errors.WithMessage(err, "failed to decode options")
+			return nil, fmt.Errorf("failed to decode options: %w", err)
 		}
 	}
 
@@ -69,10 +71,18 @@ func (ns *Namespace) Unmarshal(args ...interface{}) (interface{}, error) {
 			key += decoder.OptionsKey()
 		}
 
-		return ns.cache.GetOrCreate(key, func() (interface{}, error) {
-			f := metadecoders.FormatFromMediaType(r.MediaType())
-			if f == "" {
-				return nil, errors.Errorf("MIME %q not supported", r.MediaType())
+		v, err := ns.cacheUnmarshal.GetOrCreate(key, func(string) (*resources.StaleValue[any], error) {
+			var f metadecoders.Format
+			if decoder.Format != "" {
+				f = metadecoders.FormatFromString(decoder.Format)
+				if f == "" {
+					return nil, fmt.Errorf("format %q not supported", decoder.Format)
+				}
+			} else {
+				f = metadecoders.FormatFromStrings(r.MediaType().Suffixes()...)
+				if f == "" {
+					return nil, fmt.Errorf("MIME %q not supported", r.MediaType())
+				}
 			}
 
 			reader, err := r.ReadSeekCloser()
@@ -81,33 +91,80 @@ func (ns *Namespace) Unmarshal(args ...interface{}) (interface{}, error) {
 			}
 			defer reader.Close()
 
-			b, err := ioutil.ReadAll(reader)
+			b, err := io.ReadAll(reader)
 			if err != nil {
 				return nil, err
 			}
 
-			return decoder.Unmarshal(b, f)
+			v, err := decoder.Unmarshal(b, f)
+			if err != nil {
+				return nil, err
+			}
+
+			return &resources.StaleValue[any]{
+				Value: v,
+				StaleVersionFunc: func() uint32 {
+					return resource.StaleVersion(r)
+				},
+			}, nil
 		})
+		if err != nil {
+			return nil, err
+		}
+
+		return v.Value, nil
+
 	}
 
 	dataStr, err := types.ToStringE(data)
 	if err != nil {
-		return nil, errors.Errorf("type %T not supported", data)
+		return nil, fmt.Errorf("type %T not supported", data)
 	}
 
-	key := helpers.MD5String(dataStr)
+	if strings.TrimSpace(dataStr) == "" {
+		return nil, nil
+	}
 
-	return ns.cache.GetOrCreate(key, func() (interface{}, error) {
-		f := decoder.FormatFromContentString(dataStr)
-		if f == "" {
-			return nil, errors.New("unknown format")
+	key := hashing.MD5FromStringHexEncoded(dataStr)
+
+	if decoder != metadecoders.Default {
+		key += decoder.OptionsKey()
+	}
+
+	v, err := ns.cacheUnmarshal.GetOrCreate(key, func(string) (*resources.StaleValue[any], error) {
+		var f metadecoders.Format
+		if decoder.Format != "" {
+			f = metadecoders.FormatFromString(decoder.Format)
+			if f == "" {
+				return nil, fmt.Errorf("format %q not supported", decoder.Format)
+			}
+		} else {
+			f = decoder.FormatFromContentString(dataStr)
+			if f == "" {
+				return nil, errors.New("unknown format")
+			}
 		}
 
-		return decoder.Unmarshal([]byte(dataStr), f)
+		v, err := decoder.Unmarshal([]byte(dataStr), f)
+		if err != nil {
+			return nil, err
+		}
+
+		return &resources.StaleValue[any]{
+			Value: v,
+			StaleVersionFunc: func() uint32 {
+				return 0
+			},
+		}, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	return v.Value, nil
 }
 
-func decodeDecoder(m map[string]interface{}) (metadecoders.Decoder, error) {
+func decodeDecoder(m map[string]any) (metadecoders.Decoder, error) {
 	opts := metadecoders.Default
 
 	if m == nil {
@@ -140,7 +197,7 @@ func decodeDecoder(m map[string]interface{}) (metadecoders.Decoder, error) {
 	return opts, err
 }
 
-func stringToRune(v interface{}) (rune, error) {
+func stringToRune(v any) (rune, error) {
 	s, err := cast.ToStringE(v)
 	if err != nil {
 		return 0, err
@@ -156,7 +213,7 @@ func stringToRune(v interface{}) (rune, error) {
 		if i == 0 {
 			r = rr
 		} else {
-			return 0, errors.Errorf("invalid character: %q", v)
+			return 0, fmt.Errorf("invalid character: %q", v)
 		}
 	}
 

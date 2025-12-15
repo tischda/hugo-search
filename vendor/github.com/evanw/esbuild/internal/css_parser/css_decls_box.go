@@ -1,6 +1,8 @@
 package css_parser
 
 import (
+	"strings"
+
 	"github.com/evanw/esbuild/internal/css_ast"
 	"github.com/evanw/esbuild/internal/css_lexer"
 	"github.com/evanw/esbuild/internal/logger"
@@ -21,12 +23,11 @@ type boxSide struct {
 }
 
 type boxTracker struct {
-	key       css_ast.D
 	keyText   string
-	allowAuto bool // If true, allow the "auto" keyword
-
 	sides     [4]boxSide
+	allowAuto bool // If true, allow the "auto" keyword
 	important bool // True if all active rules were flagged as "!important"
+	key       css_ast.D
 }
 
 type unitSafetyStatus uint8
@@ -41,18 +42,17 @@ const (
 // We want to avoid a situation where the browser treats some of the original
 // rules as valid and others as invalid.
 //
-//   Safe:
-//     top: 1px; left: 0; bottom: 1px; right: 0;
-//     top: 1Q; left: 2Q; bottom: 3Q; right: 4Q;
+//	Safe:
+//	  top: 1px; left: 0; bottom: 1px; right: 0;
+//	  top: 1Q; left: 2Q; bottom: 3Q; right: 4Q;
 //
-//   Unsafe:
-//     top: 1vh; left: 2vw; bottom: 3vh; right: 4vw;
-//     top: 1Q; left: 2Q; bottom: 3Q; right: 0;
-//     inset: 1Q 0 0 0; top: 0;
-//
+//	Unsafe:
+//	  top: 1vh; left: 2vw; bottom: 3vh; right: 4vw;
+//	  top: 1Q; left: 2Q; bottom: 3Q; right: 0;
+//	  inset: 1Q 0 0 0; top: 0;
 type unitSafetyTracker struct {
-	status unitSafetyStatus
 	unit   string
+	status unitSafetyStatus
 }
 
 func (a unitSafetyTracker) isSafeWith(b unitSafetyTracker) bool {
@@ -93,7 +93,7 @@ func (box *boxTracker) updateSide(rules []css_ast.Rule, side int, new boxSide) {
 	box.sides[side] = new
 }
 
-func (box *boxTracker) mangleSides(rules []css_ast.Rule, decl *css_ast.RDeclaration, index int, removeWhitespace bool) {
+func (box *boxTracker) mangleSides(rules []css_ast.Rule, decl *css_ast.RDeclaration, minifyWhitespace bool) {
 	// Reset if we see a change in the "!important" flag
 	if box.important != decl.Important {
 		box.sides = [4]boxSide{}
@@ -118,17 +118,17 @@ func (box *boxTracker) mangleSides(rules []css_ast.Rule, decl *css_ast.RDeclarat
 			}
 			box.updateSide(rules, side, boxSide{
 				token:      t,
-				ruleIndex:  uint32(index),
+				ruleIndex:  uint32(len(rules) - 1),
 				unitSafety: unitSafety,
 			})
 		}
-		box.compactRules(rules, decl.KeyRange, removeWhitespace)
+		box.compactRules(rules, decl.KeyRange, minifyWhitespace)
 	} else {
 		box.sides = [4]boxSide{}
 	}
 }
 
-func (box *boxTracker) mangleSide(rules []css_ast.Rule, decl *css_ast.RDeclaration, index int, removeWhitespace bool, side int) {
+func (box *boxTracker) mangleSide(rules []css_ast.Rule, decl *css_ast.RDeclaration, minifyWhitespace bool, side int) {
 	// Reset if we see a change in the "!important" flag
 	if box.important != decl.Important {
 		box.sides = [4]boxSide{}
@@ -136,7 +136,7 @@ func (box *boxTracker) mangleSide(rules []css_ast.Rule, decl *css_ast.RDeclarati
 	}
 
 	if tokens := decl.Value; len(tokens) == 1 {
-		if t := tokens[0]; t.Kind.IsNumeric() || (t.Kind == css_lexer.TIdent && box.allowAuto && t.Text == "auto") {
+		if t := tokens[0]; t.Kind.IsNumeric() || (t.Kind == css_lexer.TIdent && box.allowAuto && strings.EqualFold(t.Text, "auto")) {
 			unitSafety := unitSafetyTracker{}
 			if !box.allowAuto || t.Kind.IsNumeric() {
 				unitSafety.includeUnitOf(t)
@@ -146,11 +146,11 @@ func (box *boxTracker) mangleSide(rules []css_ast.Rule, decl *css_ast.RDeclarati
 			}
 			box.updateSide(rules, side, boxSide{
 				token:         t,
-				ruleIndex:     uint32(index),
+				ruleIndex:     uint32(len(rules) - 1),
 				wasSingleRule: true,
 				unitSafety:    unitSafety,
 			})
-			box.compactRules(rules, decl.KeyRange, removeWhitespace)
+			box.compactRules(rules, decl.KeyRange, minifyWhitespace)
 			return
 		}
 	}
@@ -158,7 +158,12 @@ func (box *boxTracker) mangleSide(rules []css_ast.Rule, decl *css_ast.RDeclarati
 	box.sides = [4]boxSide{}
 }
 
-func (box *boxTracker) compactRules(rules []css_ast.Rule, keyRange logger.Range, removeWhitespace bool) {
+func (box *boxTracker) compactRules(rules []css_ast.Rule, keyRange logger.Range, minifyWhitespace bool) {
+	// Don't compact if the shorthand form is unsupported
+	if box.key == css_ast.DUnknown {
+		return
+	}
+
 	// All tokens must be present
 	if eof := css_lexer.TEndOfFile; box.sides[0].token.Kind == eof || box.sides[1].token.Kind == eof ||
 		box.sides[2].token.Kind == eof || box.sides[3].token.Kind == eof {
@@ -178,21 +183,24 @@ func (box *boxTracker) compactRules(rules []css_ast.Rule, keyRange logger.Range,
 		box.sides[1].token,
 		box.sides[2].token,
 		box.sides[3].token,
-		removeWhitespace,
+		minifyWhitespace,
 	)
 
 	// Remove all of the existing declarations
-	rules[box.sides[0].ruleIndex] = css_ast.Rule{}
-	rules[box.sides[1].ruleIndex] = css_ast.Rule{}
-	rules[box.sides[2].ruleIndex] = css_ast.Rule{}
-	rules[box.sides[3].ruleIndex] = css_ast.Rule{}
+	var minLoc logger.Loc
+	for i, side := range box.sides {
+		if loc := rules[side.ruleIndex].Loc; i == 0 || loc.Start < minLoc.Start {
+			minLoc = loc
+		}
+		rules[side.ruleIndex] = css_ast.Rule{}
+	}
 
 	// Insert the combined declaration where the last rule was
-	rules[box.sides[3].ruleIndex].Data = &css_ast.RDeclaration{
+	rules[box.sides[3].ruleIndex] = css_ast.Rule{Loc: minLoc, Data: &css_ast.RDeclaration{
 		Key:       box.key,
 		KeyText:   box.keyText,
 		Value:     tokens,
 		KeyRange:  keyRange,
 		Important: box.important,
-	}
+	}}
 }

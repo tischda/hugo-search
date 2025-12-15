@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 type Text struct {
@@ -14,7 +15,10 @@ type Text struct {
 	IsRaw   bool
 }
 
-type LineBreak struct{ Count int }
+type LineBreak struct {
+	Count                      int
+	BetweenMultibyteCharacters bool
+}
 type ExplicitLineBreak struct{}
 
 type StatisticToken struct{ Content string }
@@ -61,15 +65,15 @@ type Macro struct {
 
 var validURLCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;="
 var autolinkProtocols = regexp.MustCompile(`^(https?|ftp|file)$`)
-var imageExtensionRegexp = regexp.MustCompile(`^[.](png|gif|jpe?g|svg|tiff?)$`)
-var videoExtensionRegexp = regexp.MustCompile(`^[.](webm|mp4)$`)
+var imageExtensionRegexp = regexp.MustCompile(`(?i)^[.](png|gif|jpe?g|svg|tiff?|webp|x[bp]m|p[bgpn]m)$`)
+var videoExtensionRegexp = regexp.MustCompile(`(?i)^[.](webm|mp4)$`)
 
 var subScriptSuperScriptRegexp = regexp.MustCompile(`^([_^]){([^{}]+?)}`)
 var timestampRegexp = regexp.MustCompile(`^<(\d{4}-\d{2}-\d{2})( [A-Za-z]+)?( \d{2}:\d{2})?( \+\d+[dwmy])?>`)
 var footnoteRegexp = regexp.MustCompile(`^\[fn:([\w-]*?)(:(.*?))?\]`)
 var statisticsTokenRegexp = regexp.MustCompile(`^\[(\d+/\d+|\d+%)\]`)
 var latexFragmentRegexp = regexp.MustCompile(`(?s)^\\begin{(\w+)}(.*)\\end{(\w+)}`)
-var inlineBlockRegexp = regexp.MustCompile(`src_(\w+)(\[(.*)\])?{(.*)}`)
+var inlineBlockRegexp = regexp.MustCompile(`src_(\w+)(\[([^\]]*)\])?{([^}]*)}`)
 var inlineExportBlockRegexp = regexp.MustCompile(`@@(\w+):(.*?)@@`)
 var macroRegexp = regexp.MustCompile(`{{{(.*)\((.*)\)}}}`)
 
@@ -159,7 +163,9 @@ func (d *Document) parseLineBreak(input string, start int) (int, Node) {
 	i := start
 	for ; i < len(input) && input[i] == '\n'; i++ {
 	}
-	return i - start, LineBreak{i - start}
+	_, beforeLen := utf8.DecodeLastRuneInString(input[:start])
+	_, afterLen := utf8.DecodeRuneInString(input[i:])
+	return i - start, LineBreak{i - start, beforeLen > 1 && afterLen > 1}
 }
 
 func (d *Document) parseInlineBlock(input string, start int) (int, int, Node) {
@@ -323,7 +329,7 @@ func (d *Document) parseRegularLink(input string, start int) (int, Node) {
 	if len(linkParts) == 2 {
 		protocol = linkParts[0]
 	}
-	return consumed, RegularLink{protocol, description, link, false}
+	return consumed, d.ResolveLink(protocol, description, link)
 }
 
 func (d *Document) parseTimestamp(input string, start int) (int, Node) {
@@ -365,25 +371,36 @@ func (d *Document) parseEmphasis(input string, start int, isRaw bool) (int, Node
 // see org-emphasis-regexp-components (emacs elisp variable)
 
 func hasValidPreAndBorderChars(input string, i int) bool {
-	return (i+1 >= len(input) || isValidBorderChar(rune(input[i+1]))) && (i == 0 || isValidPreChar(rune(input[i-1])))
+	return isValidBorderChar(nextRune(input, i)) && isValidPreChar(prevRune(input, i))
 }
 
 func hasValidPostAndBorderChars(input string, i int) bool {
-	return (i == 0 || isValidBorderChar(rune(input[i-1]))) && (i+1 >= len(input) || isValidPostChar(rune(input[i+1])))
+	return (isValidPostChar(nextRune(input, i))) && isValidBorderChar(prevRune(input, i))
+}
+
+func prevRune(input string, i int) rune {
+	r, _ := utf8.DecodeLastRuneInString(input[:i])
+	return r
+}
+
+func nextRune(input string, i int) rune {
+	_, c := utf8.DecodeRuneInString(input[i:])
+	r, _ := utf8.DecodeRuneInString(input[i+c:])
+	return r
 }
 
 func isValidPreChar(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune(`-({'"`, r)
+	return r == utf8.RuneError || unicode.IsSpace(r) || strings.ContainsRune(`-({'"`, r)
 }
 
 func isValidPostChar(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune(`-.,:!?;'")}[`, r)
+	return r == utf8.RuneError || unicode.IsSpace(r) || strings.ContainsRune(`-.,:!?;'")}[\`, r)
 }
 
 func isValidBorderChar(r rune) bool { return !unicode.IsSpace(r) }
 
 func (l RegularLink) Kind() string {
-	description := String(l.Description)
+	description := String(l.Description...)
 	descProtocol, descExt := strings.SplitN(description, ":", 2)[0], path.Ext(description)
 	if ok := descProtocol == "file" || descProtocol == "http" || descProtocol == "https"; ok && imageExtensionRegexp.MatchString(descExt) {
 		return "image"
@@ -403,14 +420,14 @@ func (l RegularLink) Kind() string {
 	return "regular"
 }
 
-func (n Text) String() string              { return orgWriter.WriteNodesAsString(n) }
-func (n LineBreak) String() string         { return orgWriter.WriteNodesAsString(n) }
-func (n ExplicitLineBreak) String() string { return orgWriter.WriteNodesAsString(n) }
-func (n StatisticToken) String() string    { return orgWriter.WriteNodesAsString(n) }
-func (n Emphasis) String() string          { return orgWriter.WriteNodesAsString(n) }
-func (n InlineBlock) String() string       { return orgWriter.WriteNodesAsString(n) }
-func (n LatexFragment) String() string     { return orgWriter.WriteNodesAsString(n) }
-func (n FootnoteLink) String() string      { return orgWriter.WriteNodesAsString(n) }
-func (n RegularLink) String() string       { return orgWriter.WriteNodesAsString(n) }
-func (n Macro) String() string             { return orgWriter.WriteNodesAsString(n) }
-func (n Timestamp) String() string         { return orgWriter.WriteNodesAsString(n) }
+func (n Text) String() string              { return String(n) }
+func (n LineBreak) String() string         { return String(n) }
+func (n ExplicitLineBreak) String() string { return String(n) }
+func (n StatisticToken) String() string    { return String(n) }
+func (n Emphasis) String() string          { return String(n) }
+func (n InlineBlock) String() string       { return String(n) }
+func (n LatexFragment) String() string     { return String(n) }
+func (n FootnoteLink) String() string      { return String(n) }
+func (n RegularLink) String() string       { return String(n) }
+func (n Macro) String() string             { return String(n) }
+func (n Timestamp) String() string         { return String(n) }

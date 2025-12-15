@@ -20,7 +20,7 @@ var (
 
 // GetTranslator gets the Translator for the given locale, nil if not found.
 func GetTranslator(locale string) locales.Translator {
-	locale = strings.ToLower(locale)
+	locale = strings.ToLower(strings.ReplaceAll(locale, "-", "_"))
 
 	mu.RLock()
 	t, found := translators[locale]

@@ -16,39 +16,41 @@ package goldmark
 
 import (
 	"bytes"
-	"fmt"
-	"math/bits"
-	"path/filepath"
-	"runtime/debug"
 
+	"github.com/gohugoio/hugo-goldmark-extensions/extras"
+	"github.com/gohugoio/hugo/markup/goldmark/blockquotes"
+	"github.com/gohugoio/hugo/markup/goldmark/codeblocks"
+	"github.com/gohugoio/hugo/markup/goldmark/goldmark_config"
+	"github.com/gohugoio/hugo/markup/goldmark/hugocontext"
+	"github.com/gohugoio/hugo/markup/goldmark/images"
 	"github.com/gohugoio/hugo/markup/goldmark/internal/extensions/attributes"
-	"github.com/yuin/goldmark/ast"
+	"github.com/gohugoio/hugo/markup/goldmark/internal/render"
+	"github.com/gohugoio/hugo/markup/goldmark/passthrough"
+	"github.com/gohugoio/hugo/markup/goldmark/tables"
+	"github.com/yuin/goldmark/util"
 
-	"github.com/gohugoio/hugo/identity"
-
-	"github.com/pkg/errors"
-
-	"github.com/spf13/afero"
-
-	"github.com/gohugoio/hugo/hugofs"
-	"github.com/gohugoio/hugo/markup/converter"
-	"github.com/gohugoio/hugo/markup/highlight"
-	"github.com/gohugoio/hugo/markup/tableofcontents"
 	"github.com/yuin/goldmark"
-	hl "github.com/yuin/goldmark-highlighting"
+	emoji "github.com/yuin/goldmark-emoji"
+	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/renderer/html"
 	"github.com/yuin/goldmark/text"
-	"github.com/yuin/goldmark/util"
+
+	"github.com/gohugoio/hugo/markup/converter"
+	"github.com/gohugoio/hugo/markup/tableofcontents"
+)
+
+const (
+	// Don't change this. This pattern is lso used in the image render hooks.
+	internalAttrPrefix = "_h__"
 )
 
 // Provider is the package entry point.
 var Provider converter.ProviderProvider = provide{}
 
-type provide struct {
-}
+type provide struct{}
 
 func (p provide) New(cfg converter.ProviderConfig) (converter.Provider, error) {
 	md := newMarkdown(cfg)
@@ -59,7 +61,7 @@ func (p provide) New(cfg converter.ProviderConfig) (converter.Provider, error) {
 			cfg: cfg,
 			md:  md,
 			sanitizeAnchorName: func(s string) string {
-				return sanitizeAnchorNameString(s, cfg.MarkupConfig.Goldmark.Parser.AutoHeadingIDType)
+				return sanitizeAnchorNameString(s, cfg.MarkupConfig().Goldmark.Parser.AutoIDType)
 			},
 		}, nil
 	}), nil
@@ -80,8 +82,8 @@ func (c *goldmarkConverter) SanitizeAnchorName(s string) string {
 }
 
 func newMarkdown(pcfg converter.ProviderConfig) goldmark.Markdown {
-	mcfg := pcfg.MarkupConfig
-	cfg := pcfg.MarkupConfig.Goldmark
+	mcfg := pcfg.MarkupConfig()
+	cfg := mcfg.Goldmark
 	var rendererOptions []renderer.Option
 
 	if cfg.Renderer.HardWraps {
@@ -96,20 +98,59 @@ func newMarkdown(pcfg converter.ProviderConfig) goldmark.Markdown {
 		rendererOptions = append(rendererOptions, html.WithUnsafe())
 	}
 
+	tocRendererOptions := make([]renderer.Option, len(rendererOptions))
+	if rendererOptions != nil {
+		copy(tocRendererOptions, rendererOptions)
+	}
+
+	tocRendererOptions = append(tocRendererOptions,
+		renderer.WithNodeRenderers(util.Prioritized(extension.NewStrikethroughHTMLRenderer(), 500)),
+		renderer.WithNodeRenderers(util.Prioritized(emoji.NewHTMLRenderer(), 200)),
+	)
+
+	inlineTags := []extras.InlineTag{
+		extras.DeleteTag,
+		extras.InsertTag,
+		extras.MarkTag,
+		extras.SubscriptTag,
+		extras.SuperscriptTag,
+	}
+
+	for _, tag := range inlineTags {
+		tocRendererOptions = append(tocRendererOptions,
+			renderer.WithNodeRenderers(util.Prioritized(extras.NewInlineTagHTMLRenderer(tag), tag.RenderPriority)),
+		)
+	}
+
 	var (
 		extensions = []goldmark.Extender{
-			newLinks(),
-			newTocExtension(rendererOptions),
+			hugocontext.New(pcfg.Logger),
+			newLinks(cfg),
+			newTocExtension(tocRendererOptions),
+			blockquotes.New(),
 		}
 		parserOptions []parser.Option
 	)
 
+	extensions = append(extensions, images.New(cfg.Parser.WrapStandAloneImageWithinParagraph))
+
+	extensions = append(extensions, extras.New(
+		extras.Config{
+			Delete:      extras.DeleteConfig{Enable: cfg.Extensions.Extras.Delete.Enable},
+			Insert:      extras.InsertConfig{Enable: cfg.Extensions.Extras.Insert.Enable},
+			Mark:        extras.MarkConfig{Enable: cfg.Extensions.Extras.Mark.Enable},
+			Subscript:   extras.SubscriptConfig{Enable: cfg.Extensions.Extras.Subscript.Enable},
+			Superscript: extras.SuperscriptConfig{Enable: cfg.Extensions.Extras.Superscript.Enable},
+		},
+	))
+
 	if mcfg.Highlight.CodeFences {
-		extensions = append(extensions, newHighlighting(mcfg.Highlight))
+		extensions = append(extensions, codeblocks.New())
 	}
 
 	if cfg.Extensions.Table {
 		extensions = append(extensions, extension.Table)
+		extensions = append(extensions, tables.New())
 	}
 
 	if cfg.Extensions.Strikethrough {
@@ -124,28 +165,62 @@ func newMarkdown(pcfg converter.ProviderConfig) goldmark.Markdown {
 		extensions = append(extensions, extension.TaskList)
 	}
 
-	if cfg.Extensions.Typographer {
-		extensions = append(extensions, extension.Typographer)
+	if !cfg.Extensions.Typographer.Disable {
+		t := extension.NewTypographer(
+			extension.WithTypographicSubstitutions(toTypographicPunctuationMap(cfg.Extensions.Typographer)),
+		)
+		extensions = append(extensions, t)
 	}
 
 	if cfg.Extensions.DefinitionList {
 		extensions = append(extensions, extension.DefinitionList)
 	}
 
-	if cfg.Extensions.Footnote {
-		extensions = append(extensions, extension.Footnote)
+	if cfg.Extensions.Footnote.Enable {
+		opts := []extension.FootnoteOption{}
+		opts = append(opts, extension.WithFootnoteBacklinkHTML(cfg.Extensions.Footnote.BacklinkHTML))
+		if cfg.Extensions.Footnote.EnableAutoIDPrefix {
+			opts = append(opts,
+				extension.WithFootnoteIDPrefixFunction(func(n ast.Node) []byte {
+					documentID := n.OwnerDocument().Meta()["documentID"].(string)
+					return []byte("h" + documentID)
+				}))
+		}
+		f := extension.NewFootnote(opts...)
+		extensions = append(extensions, f)
 	}
 
-	if cfg.Parser.AutoHeadingID {
-		parserOptions = append(parserOptions, parser.WithAutoHeadingID())
+	if cfg.Extensions.CJK.Enable {
+		opts := []extension.CJKOption{}
+		if cfg.Extensions.CJK.EastAsianLineBreaks {
+			if cfg.Extensions.CJK.EastAsianLineBreaksStyle == "css3draft" {
+				opts = append(opts, extension.WithEastAsianLineBreaks(extension.EastAsianLineBreaksCSS3Draft))
+			} else {
+				opts = append(opts, extension.WithEastAsianLineBreaks())
+			}
+		}
+
+		if cfg.Extensions.CJK.EscapedSpace {
+			opts = append(opts, extension.WithEscapedSpace())
+		}
+		c := extension.NewCJK(opts...)
+		extensions = append(extensions, c)
+	}
+
+	if cfg.Extensions.Passthrough.Enable {
+		extensions = append(extensions, passthrough.New(cfg.Extensions.Passthrough))
+	}
+
+	if pcfg.Conf.EnableEmoji() {
+		extensions = append(extensions, emoji.Emoji)
 	}
 
 	if cfg.Parser.Attribute.Title {
 		parserOptions = append(parserOptions, parser.WithAttribute())
 	}
 
-	if cfg.Parser.Attribute.Block {
-		extensions = append(extensions, attributes.New())
+	if cfg.Parser.Attribute.Block || cfg.Parser.AutoHeadingID || cfg.Parser.AutoDefinitionTermID {
+		extensions = append(extensions, attributes.New(cfg.Parser))
 	}
 
 	md := goldmark.New(
@@ -163,86 +238,33 @@ func newMarkdown(pcfg converter.ProviderConfig) goldmark.Markdown {
 	return md
 }
 
-var _ identity.IdentitiesProvider = (*converterResult)(nil)
+type parserResult struct {
+	doc any
+	toc *tableofcontents.Fragments
+}
+
+func (p parserResult) Doc() any {
+	return p.doc
+}
+
+func (p parserResult) TableOfContents() *tableofcontents.Fragments {
+	return p.toc
+}
+
+type renderResult struct {
+	converter.ResultRender
+}
 
 type converterResult struct {
-	converter.Result
-	toc tableofcontents.Root
-	ids identity.Identities
+	converter.ResultRender
+	tableOfContentsProvider
 }
 
-func (c converterResult) TableOfContents() tableofcontents.Root {
-	return c.toc
+type tableOfContentsProvider interface {
+	TableOfContents() *tableofcontents.Fragments
 }
 
-func (c converterResult) GetIdentities() identity.Identities {
-	return c.ids
-}
-
-type bufWriter struct {
-	*bytes.Buffer
-}
-
-const maxInt = 1<<(bits.UintSize-1) - 1
-
-func (b *bufWriter) Available() int {
-	return maxInt
-}
-
-func (b *bufWriter) Buffered() int {
-	return b.Len()
-}
-
-func (b *bufWriter) Flush() error {
-	return nil
-}
-
-type renderContext struct {
-	*bufWriter
-	pos int
-	renderContextData
-}
-
-type renderContextData interface {
-	RenderContext() converter.RenderContext
-	DocumentContext() converter.DocumentContext
-	AddIdentity(id identity.Provider)
-}
-
-type renderContextDataHolder struct {
-	rctx converter.RenderContext
-	dctx converter.DocumentContext
-	ids  identity.Manager
-}
-
-func (ctx *renderContextDataHolder) RenderContext() converter.RenderContext {
-	return ctx.rctx
-}
-
-func (ctx *renderContextDataHolder) DocumentContext() converter.DocumentContext {
-	return ctx.dctx
-}
-
-func (ctx *renderContextDataHolder) AddIdentity(id identity.Provider) {
-	ctx.ids.Add(id)
-}
-
-var converterIdentity = identity.KeyValueIdentity{Key: "goldmark", Value: "converter"}
-
-func (c *goldmarkConverter) Convert(ctx converter.RenderContext) (result converter.Result, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			dir := afero.GetTempDir(hugofs.Os, "hugo_bugs")
-			name := fmt.Sprintf("goldmark_%s.txt", c.ctx.DocumentID)
-			filename := filepath.Join(dir, name)
-			afero.WriteFile(hugofs.Os, filename, ctx.Src, 07555)
-			fmt.Print(string(debug.Stack()))
-			err = errors.Errorf("[BUG] goldmark: %s: create an issue on GitHub attaching the file in: %s", r, filename)
-		}
-	}()
-
-	buf := &bufWriter{Buffer: &bytes.Buffer{}}
-	result = buf
+func (c *goldmarkConverter) Parse(ctx converter.RenderContext) (converter.ResultParse, error) {
 	pctx := c.newParserContext(ctx)
 	reader := text.NewReader(ctx.Src)
 
@@ -250,39 +272,54 @@ func (c *goldmarkConverter) Convert(ctx converter.RenderContext) (result convert
 		reader,
 		parser.WithContext(pctx),
 	)
+	doc.OwnerDocument().AddMeta("documentID", c.ctx.DocumentID)
 
-	rcx := &renderContextDataHolder{
-		rctx: ctx,
-		dctx: c.ctx,
-		ids:  identity.NewManager(converterIdentity),
-	}
-
-	w := &renderContext{
-		bufWriter:         buf,
-		renderContextData: rcx,
-	}
-
-	if err := c.md.Renderer().Render(w, ctx.Src, doc); err != nil {
-		return nil, err
-	}
-
-	return converterResult{
-		Result: buf,
-		ids:    rcx.ids.GetIdentities(),
-		toc:    pctx.TableOfContents(),
+	return parserResult{
+		doc: doc,
+		toc: pctx.TableOfContents(),
 	}, nil
 }
 
-var featureSet = map[identity.Identity]bool{
-	converter.FeatureRenderHooks: true,
+func (c *goldmarkConverter) Render(ctx converter.RenderContext, doc any) (converter.ResultRender, error) {
+	n := doc.(ast.Node)
+	buf := &render.BufWriter{Buffer: &bytes.Buffer{}}
+
+	rcx := &render.RenderContextDataHolder{
+		Rctx: ctx,
+		Dctx: c.ctx,
+	}
+
+	w := &render.Context{
+		BufWriter:   buf,
+		ContextData: rcx,
+	}
+
+	if err := c.md.Renderer().Render(w, ctx.Src, n); err != nil {
+		return nil, err
+	}
+
+	return renderResult{
+		ResultRender: buf,
+	}, nil
 }
 
-func (c *goldmarkConverter) Supports(feature identity.Identity) bool {
-	return featureSet[feature.GetIdentity()]
+func (c *goldmarkConverter) Convert(ctx converter.RenderContext) (converter.ResultRender, error) {
+	parseResult, err := c.Parse(ctx)
+	if err != nil {
+		return nil, err
+	}
+	renderResult, err := c.Render(ctx, parseResult.Doc())
+	if err != nil {
+		return nil, err
+	}
+	return converterResult{
+		ResultRender:            renderResult,
+		tableOfContentsProvider: parseResult,
+	}, nil
 }
 
 func (c *goldmarkConverter) newParserContext(rctx converter.RenderContext) *parserContext {
-	ctx := parser.NewContext(parser.WithIDs(newIDFactory(c.cfg.MarkupConfig.Goldmark.Parser.AutoHeadingIDType)))
+	ctx := parser.NewContext(parser.WithIDs(newIDFactory(c.cfg.MarkupConfig().Goldmark.Parser.AutoIDType)))
 	ctx.Set(tocEnableKey, rctx.RenderTOC)
 	return &parserContext{
 		Context: ctx,
@@ -293,69 +330,26 @@ type parserContext struct {
 	parser.Context
 }
 
-func (p *parserContext) TableOfContents() tableofcontents.Root {
+func (p *parserContext) TableOfContents() *tableofcontents.Fragments {
 	if v := p.Get(tocResultKey); v != nil {
-		return v.(tableofcontents.Root)
+		return v.(*tableofcontents.Fragments)
 	}
-	return tableofcontents.Root{}
+	return nil
 }
 
-func newHighlighting(cfg highlight.Config) goldmark.Extender {
-	return hl.NewHighlighting(
-		hl.WithStyle(cfg.Style),
-		hl.WithGuessLanguage(cfg.GuessSyntax),
-		hl.WithCodeBlockOptions(highlight.GetCodeBlockOptions()),
-		hl.WithFormatOptions(
-			cfg.ToHTMLOptions()...,
-		),
-
-		hl.WithWrapperRenderer(func(w util.BufWriter, ctx hl.CodeBlockContext, entering bool) {
-			var language string
-			if l, hasLang := ctx.Language(); hasLang {
-				language = string(l)
-			}
-
-			if ctx.Highlighted() {
-				if entering {
-					writeDivStart(w, ctx)
-				} else {
-					writeDivEnd(w)
-				}
-			} else {
-				if entering {
-					highlight.WritePreStart(w, language, "")
-				} else {
-					highlight.WritePreEnd(w)
-				}
-			}
-		}),
-	)
-}
-
-func writeDivStart(w util.BufWriter, ctx hl.CodeBlockContext) {
-	w.WriteString(`<div class="highlight`)
-
-	var attributes []ast.Attribute
-	if ctx.Attributes() != nil {
-		attributes = ctx.Attributes().All()
+// Note: It's tempting to put this in the config package, but that doesn't work.
+// TODO(bep) create upstream issue.
+func toTypographicPunctuationMap(t goldmark_config.Typographer) map[extension.TypographicPunctuation][]byte {
+	return map[extension.TypographicPunctuation][]byte{
+		extension.LeftSingleQuote:  []byte(t.LeftSingleQuote),
+		extension.RightSingleQuote: []byte(t.RightSingleQuote),
+		extension.LeftDoubleQuote:  []byte(t.LeftDoubleQuote),
+		extension.RightDoubleQuote: []byte(t.RightDoubleQuote),
+		extension.EnDash:           []byte(t.EnDash),
+		extension.EmDash:           []byte(t.EmDash),
+		extension.Ellipsis:         []byte(t.Ellipsis),
+		extension.LeftAngleQuote:   []byte(t.LeftAngleQuote),
+		extension.RightAngleQuote:  []byte(t.RightAngleQuote),
+		extension.Apostrophe:       []byte(t.Apostrophe),
 	}
-
-	if attributes != nil {
-		class, found := ctx.Attributes().GetString("class")
-		if found {
-			w.WriteString(" ")
-			w.Write(util.EscapeHTML(class.([]byte)))
-
-		}
-		_, _ = w.WriteString("\"")
-		renderAttributes(w, true, attributes...)
-	} else {
-		_, _ = w.WriteString("\"")
-	}
-
-	w.WriteString(">")
-}
-
-func writeDivEnd(w util.BufWriter) {
-	w.WriteString("</div>")
 }

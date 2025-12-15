@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -32,13 +33,15 @@ func newIndexEntry(p page.Page) *PageEntry {
 		author = strings.Join(str, ", ")
 	}
 
+	ctx := context.Background()
+
 	return &PageEntry{
 		Title:        p.Title(),
 		Type:         p.Type(),
 		Section:      p.Section(),
-		Content:      p.Plain(),
-		WordCount:    float64(p.WordCount()),
-		ReadingTime:  float64(p.ReadingTime()),
+		Content:      p.Plain(ctx),
+		WordCount:    float64(p.WordCount(ctx)),
+		ReadingTime:  float64(p.ReadingTime(ctx)),
 		Keywords:     p.Keywords(),
 		Date:         p.Date(),
 		LastModified: p.Lastmod(),

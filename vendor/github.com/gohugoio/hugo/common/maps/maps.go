@@ -24,12 +24,12 @@ import (
 )
 
 // ToStringMapE converts in to map[string]interface{}.
-func ToStringMapE(in interface{}) (map[string]interface{}, error) {
+func ToStringMapE(in any) (map[string]any, error) {
 	switch vv := in.(type) {
 	case Params:
 		return vv, nil
 	case map[string]string:
-		var m = map[string]interface{}{}
+		m := map[string]any{}
 		for k, v := range vv {
 			m[k] = v
 		}
@@ -43,35 +43,35 @@ func ToStringMapE(in interface{}) (map[string]interface{}, error) {
 // ToParamsAndPrepare converts in to Params and prepares it for use.
 // If in is nil, an empty map is returned.
 // See PrepareParams.
-func ToParamsAndPrepare(in interface{}) (Params, bool) {
+func ToParamsAndPrepare(in any) (Params, error) {
 	if types.IsNil(in) {
-		return Params{}, true
+		return Params{}, nil
 	}
 	m, err := ToStringMapE(in)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	PrepareParams(m)
-	return m, true
+	return m, nil
 }
 
 // MustToParamsAndPrepare calls ToParamsAndPrepare and panics if it fails.
-func MustToParamsAndPrepare(in interface{}) Params {
-	if p, ok := ToParamsAndPrepare(in); ok {
-		return p
-	} else {
-		panic(fmt.Sprintf("cannot convert %T to maps.Params", in))
+func MustToParamsAndPrepare(in any) Params {
+	p, err := ToParamsAndPrepare(in)
+	if err != nil {
+		panic(fmt.Sprintf("cannot convert %T to maps.Params: %s", in, err))
 	}
+	return p
 }
 
 // ToStringMap converts in to map[string]interface{}.
-func ToStringMap(in interface{}) map[string]interface{} {
+func ToStringMap(in any) map[string]any {
 	m, _ := ToStringMapE(in)
 	return m
 }
 
 // ToStringMapStringE converts in to map[string]string.
-func ToStringMapStringE(in interface{}) (map[string]string, error) {
+func ToStringMapStringE(in any) (map[string]string, error) {
 	m, err := ToStringMapE(in)
 	if err != nil {
 		return nil, err
@@ -80,32 +80,65 @@ func ToStringMapStringE(in interface{}) (map[string]string, error) {
 }
 
 // ToStringMapString converts in to map[string]string.
-func ToStringMapString(in interface{}) map[string]string {
+func ToStringMapString(in any) map[string]string {
 	m, _ := ToStringMapStringE(in)
 	return m
 }
 
 // ToStringMapBool converts in to bool.
-func ToStringMapBool(in interface{}) map[string]bool {
+func ToStringMapBool(in any) map[string]bool {
 	m, _ := ToStringMapE(in)
 	return cast.ToStringMapBool(m)
 }
 
 // ToSliceStringMap converts in to []map[string]interface{}.
-func ToSliceStringMap(in interface{}) ([]map[string]interface{}, error) {
+func ToSliceStringMap(in any) ([]map[string]any, error) {
 	switch v := in.(type) {
-	case []map[string]interface{}:
+	case []map[string]any:
 		return v, nil
-	case []interface{}:
-		var s []map[string]interface{}
+	case Params:
+		return []map[string]any{v}, nil
+	case []any:
+		var s []map[string]any
 		for _, entry := range v {
-			if vv, ok := entry.(map[string]interface{}); ok {
+			if vv, ok := entry.(map[string]any); ok {
 				s = append(s, vv)
 			}
 		}
 		return s, nil
 	default:
 		return nil, fmt.Errorf("unable to cast %#v of type %T to []map[string]interface{}", in, in)
+	}
+}
+
+// LookupEqualFold finds key in m with case insensitive equality checks.
+func LookupEqualFold[T any | string](m map[string]T, key string) (T, string, bool) {
+	if v, found := m[key]; found {
+		return v, key, true
+	}
+	for k, v := range m {
+		if strings.EqualFold(k, key) {
+			return v, k, true
+		}
+	}
+	var s T
+	return s, "", false
+}
+
+// MergeShallow merges src into dst, but only if the key does not already exist in dst.
+// The keys are compared case insensitively.
+func MergeShallow(dst, src map[string]any) {
+	for k, v := range src {
+		found := false
+		for dk := range dst {
+			if strings.EqualFold(dk, k) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			dst[k] = v
+		}
 	}
 }
 
@@ -146,7 +179,7 @@ func (r KeyRenamer) getNewKey(keyPath string) string {
 
 // Rename renames the keys in the given map according
 // to the patterns in the current KeyRenamer.
-func (r KeyRenamer) Rename(m map[string]interface{}) {
+func (r KeyRenamer) Rename(m map[string]any) {
 	r.renamePath("", m)
 }
 
@@ -158,22 +191,46 @@ func (KeyRenamer) keyPath(k1, k2 string) string {
 	return k1 + "/" + k2
 }
 
-func (r KeyRenamer) renamePath(parentKeyPath string, m map[string]interface{}) {
-	for key, val := range m {
-		keyPath := r.keyPath(parentKeyPath, key)
-		switch val.(type) {
-		case map[interface{}]interface{}:
-			val = cast.ToStringMap(val)
-			r.renamePath(keyPath, val.(map[string]interface{}))
-		case map[string]interface{}:
-			r.renamePath(keyPath, val.(map[string]interface{}))
+func (r KeyRenamer) renamePath(parentKeyPath string, m map[string]any) {
+	for k, v := range m {
+		keyPath := r.keyPath(parentKeyPath, k)
+		switch vv := v.(type) {
+		case map[any]any:
+			r.renamePath(keyPath, cast.ToStringMap(vv))
+		case map[string]any:
+			r.renamePath(keyPath, vv)
 		}
 
 		newKey := r.getNewKey(keyPath)
 
 		if newKey != "" {
-			delete(m, key)
-			m[newKey] = val
+			delete(m, k)
+			m[newKey] = v
+		}
+	}
+}
+
+// ConvertFloat64WithNoDecimalsToInt converts float64 values with no decimals to int recursively.
+func ConvertFloat64WithNoDecimalsToInt(m map[string]any) {
+	for k, v := range m {
+		switch vv := v.(type) {
+		case float64:
+			if v == float64(int64(vv)) {
+				m[k] = int64(vv)
+			}
+		case map[string]any:
+			ConvertFloat64WithNoDecimalsToInt(vv)
+		case []any:
+			for i, vvv := range vv {
+				switch vvvv := vvv.(type) {
+				case float64:
+					if vvv == float64(int64(vvvv)) {
+						vv[i] = int64(vvvv)
+					}
+				case map[string]any:
+					ConvertFloat64WithNoDecimalsToInt(vvvv)
+				}
+			}
 		}
 	}
 }

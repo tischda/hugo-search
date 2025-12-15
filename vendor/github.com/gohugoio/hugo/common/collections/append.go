@@ -21,29 +21,64 @@ import (
 // Append appends from to a slice to and returns the resulting slice.
 // If length of from is one and the only element is a slice of same type as to,
 // it will be appended.
-func Append(to interface{}, from ...interface{}) (interface{}, error) {
+func Append(to any, from ...any) (any, error) {
+	if len(from) == 0 {
+		return to, nil
+	}
 	tov, toIsNil := indirect(reflect.ValueOf(to))
 
 	toIsNil = toIsNil || to == nil
 	var tot reflect.Type
 
 	if !toIsNil {
+		if tov.Kind() == reflect.Slice {
+			// Create a copy of tov, so we don't modify the original.
+			c := reflect.MakeSlice(tov.Type(), tov.Len(), tov.Len()+len(from))
+			reflect.Copy(c, tov)
+			tov = c
+		}
+
 		if tov.Kind() != reflect.Slice {
 			return nil, fmt.Errorf("expected a slice, got %T", to)
 		}
 
 		tot = tov.Type().Elem()
+		if tot.Kind() == reflect.Slice {
+			totvt := tot.Elem()
+			fromvs := make([]reflect.Value, len(from))
+			for i, f := range from {
+				fromv := reflect.ValueOf(f)
+				fromt := fromv.Type()
+				if fromt.Kind() == reflect.Slice {
+					fromt = fromt.Elem()
+				}
+				if totvt != fromt {
+					return nil, fmt.Errorf("cannot append slice of %s to slice of %s", fromt, totvt)
+				} else {
+					fromvs[i] = fromv
+				}
+			}
+			return reflect.Append(tov, fromvs...).Interface(), nil
+
+		}
+
 		toIsNil = tov.Len() == 0
 
 		if len(from) == 1 {
 			fromv := reflect.ValueOf(from[0])
+			if !fromv.IsValid() {
+				// from[0] is nil
+				return appendToInterfaceSliceFromValues(tov, fromv)
+			}
+			fromt := fromv.Type()
+			if fromt.Kind() == reflect.Slice {
+				fromt = fromt.Elem()
+			}
 			if fromv.Kind() == reflect.Slice {
 				if toIsNil {
 					// If we get nil []string, we just return the []string
 					return from[0], nil
 				}
-
-				fromt := reflect.TypeOf(from[0]).Elem()
 
 				// If we get []string []string, we append the from slice to to
 				if tot == fromt {
@@ -52,6 +87,7 @@ func Append(to interface{}, from ...interface{}) (interface{}, error) {
 					// Fall back to a []interface{} slice.
 					return appendToInterfaceSliceFromValues(tov, fromv)
 				}
+
 			}
 		}
 	}
@@ -62,7 +98,7 @@ func Append(to interface{}, from ...interface{}) (interface{}, error) {
 
 	for _, f := range from {
 		fv := reflect.ValueOf(f)
-		if !fv.Type().AssignableTo(tot) {
+		if !fv.IsValid() || !fv.Type().AssignableTo(tot) {
 			// Fall back to a []interface{} slice.
 			tov, _ := indirect(reflect.ValueOf(to))
 			return appendToInterfaceSlice(tov, from...)
@@ -73,11 +109,15 @@ func Append(to interface{}, from ...interface{}) (interface{}, error) {
 	return tov.Interface(), nil
 }
 
-func appendToInterfaceSliceFromValues(slice1, slice2 reflect.Value) ([]interface{}, error) {
-	var tos []interface{}
+func appendToInterfaceSliceFromValues(slice1, slice2 reflect.Value) ([]any, error) {
+	var tos []any
 
 	for _, slice := range []reflect.Value{slice1, slice2} {
-		for i := 0; i < slice.Len(); i++ {
+		if !slice.IsValid() {
+			tos = append(tos, nil)
+			continue
+		}
+		for i := range slice.Len() {
 			tos = append(tos, slice.Index(i).Interface())
 		}
 	}
@@ -85,10 +125,10 @@ func appendToInterfaceSliceFromValues(slice1, slice2 reflect.Value) ([]interface
 	return tos, nil
 }
 
-func appendToInterfaceSlice(tov reflect.Value, from ...interface{}) ([]interface{}, error) {
-	var tos []interface{}
+func appendToInterfaceSlice(tov reflect.Value, from ...any) ([]any, error) {
+	var tos []any
 
-	for i := 0; i < tov.Len(); i++ {
+	for i := range tov.Len() {
 		tos = append(tos, tov.Index(i).Interface())
 	}
 

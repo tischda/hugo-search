@@ -14,6 +14,9 @@
 package hugolib
 
 import (
+	"context"
+
+	"github.com/gohugoio/hugo/common/hugo"
 	"github.com/gohugoio/hugo/lazy"
 	"github.com/gohugoio/hugo/resources/page"
 )
@@ -33,12 +36,12 @@ type nextPrev struct {
 }
 
 func (n *nextPrev) next() page.Page {
-	n.init.Do()
+	n.init.Do(context.Background())
 	return n.nextPage
 }
 
 func (n *nextPrev) prev() page.Page {
-	n.init.Do()
+	n.init.Do(context.Background())
 	return n.prevPage
 }
 
@@ -50,7 +53,9 @@ func (p pagePosition) Next() page.Page {
 	return p.next()
 }
 
+// Deprecated: Use Next instead.
 func (p pagePosition) NextPage() page.Page {
+	hugo.Deprecate(".Page.NextPage", "Use .Page.Next instead.", "v0.123.0")
 	return p.Next()
 }
 
@@ -58,7 +63,9 @@ func (p pagePosition) Prev() page.Page {
 	return p.prev()
 }
 
+// Deprecated: Use Prev instead.
 func (p pagePosition) PrevPage() page.Page {
+	hugo.Deprecate(".Page.PrevPage", "Use .Page.Prev instead.", "v0.123.0")
 	return p.Prev()
 }
 

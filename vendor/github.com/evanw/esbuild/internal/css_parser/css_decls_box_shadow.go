@@ -1,11 +1,13 @@
 package css_parser
 
 import (
+	"strings"
+
 	"github.com/evanw/esbuild/internal/css_ast"
 	"github.com/evanw/esbuild/internal/css_lexer"
 )
 
-func (p *parser) mangleBoxShadow(tokens []css_ast.Token) []css_ast.Token {
+func (p *parser) lowerAndMangleBoxShadow(tokens []css_ast.Token, wouldClipColor *bool) []css_ast.Token {
 	insetCount := 0
 	colorCount := 0
 	numbersBegin := 0
@@ -19,7 +21,7 @@ func (p *parser) mangleBoxShadow(tokens []css_ast.Token) []css_ast.Token {
 				// Track if we found a non-number in between two numbers
 				foundUnexpectedToken = true
 			}
-			if t.TurnLengthIntoNumberIfZero() {
+			if p.options.minifySyntax && t.TurnLengthIntoNumberIfZero() {
 				// "0px" => "0"
 				tokens[i] = t
 			}
@@ -33,10 +35,11 @@ func (p *parser) mangleBoxShadow(tokens []css_ast.Token) []css_ast.Token {
 				// Track when we find a non-number after a number
 				numbersDone = true
 			}
-			if hex, ok := parseColor(t); ok {
+
+			if looksLikeColor(t) {
 				colorCount++
-				tokens[i] = p.mangleColor(t, hex)
-			} else if t.Kind == css_lexer.TIdent && t.Text == "inset" {
+				tokens[i] = p.lowerAndMinifyColor(t, wouldClipColor)
+			} else if t.Kind == css_lexer.TIdent && strings.EqualFold(t.Text, "inset") {
 				insetCount++
 			} else {
 				// Track if we found a token other than a number, a color, or "inset"
@@ -53,7 +56,7 @@ func (p *parser) mangleBoxShadow(tokens []css_ast.Token) []css_ast.Token {
 	//   offset-x | offset-y | blur-radius | spread-radius
 	//
 	// If omitted, blur-radius and spread-radius are implied to be zero.
-	if insetCount <= 1 && colorCount <= 1 && numbersCount > 2 && numbersCount <= 4 && !foundUnexpectedToken {
+	if p.options.minifySyntax && insetCount <= 1 && colorCount <= 1 && numbersCount > 2 && numbersCount <= 4 && !foundUnexpectedToken {
 		numbersEnd := numbersBegin + numbersCount
 		for numbersCount > 2 && tokens[numbersBegin+numbersCount-1].IsZero() {
 			numbersCount--
@@ -64,7 +67,7 @@ func (p *parser) mangleBoxShadow(tokens []css_ast.Token) []css_ast.Token {
 	// Set the whitespace flags
 	for i := range tokens {
 		var whitespace css_ast.WhitespaceFlags
-		if i > 0 || !p.options.RemoveWhitespace {
+		if i > 0 || !p.options.minifyWhitespace {
 			whitespace |= css_ast.WhitespaceBefore
 		}
 		if i+1 < len(tokens) {
@@ -75,7 +78,7 @@ func (p *parser) mangleBoxShadow(tokens []css_ast.Token) []css_ast.Token {
 	return tokens
 }
 
-func (p *parser) mangleBoxShadows(tokens []css_ast.Token) []css_ast.Token {
+func (p *parser) lowerAndMangleBoxShadows(tokens []css_ast.Token, wouldClipColor *bool) []css_ast.Token {
 	n := len(tokens)
 	end := 0
 	i := 0
@@ -88,7 +91,7 @@ func (p *parser) mangleBoxShadows(tokens []css_ast.Token) []css_ast.Token {
 		}
 
 		// Mangle this individual shadow
-		end += copy(tokens[end:], p.mangleBoxShadow(tokens[i:comma]))
+		end += copy(tokens[end:], p.lowerAndMangleBoxShadow(tokens[i:comma], wouldClipColor))
 
 		// Skip over the comma
 		if comma < n {

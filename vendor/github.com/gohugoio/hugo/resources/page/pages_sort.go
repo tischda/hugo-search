@@ -14,9 +14,11 @@
 package page
 
 import (
+	"context"
 	"sort"
 
 	"github.com/gohugoio/hugo/common/collections"
+	"github.com/gohugoio/hugo/langs"
 
 	"github.com/gohugoio/hugo/resources/resource"
 
@@ -52,6 +54,19 @@ func getOrdinals(p1, p2 Page) (int, int) {
 	return p1o.Ordinal(), p2o.Ordinal()
 }
 
+func getWeight0s(p1, p2 Page) (int, int) {
+	p1w, ok1 := p1.(resource.Weight0Provider)
+	if !ok1 {
+		return -1, -1
+	}
+	p2w, ok2 := p2.(resource.Weight0Provider)
+	if !ok2 {
+		return -1, -1
+	}
+
+	return p1w.Weight0(), p2w.Weight0()
+}
+
 // Sort stable sorts the pages given the receiver's sort order.
 func (by pageBy) Sort(pages Pages) {
 	ps := &pageSorter{
@@ -70,14 +85,19 @@ var (
 		if o1 != o2 && o1 != -1 && o2 != -1 {
 			return o1 < o2
 		}
+		// Weight0, as by the weight of the taxonomy entrie in the front matter.
+		w01, w02 := getWeight0s(p1, p2)
+		if w01 != w02 && w01 != -1 && w02 != -1 {
+			return w01 < w02
+		}
+
 		if p1.Weight() == p2.Weight() {
 			if p1.Date().Unix() == p2.Date().Unix() {
-				c := compare.Strings(p1.LinkTitle(), p2.LinkTitle())
+				c := collatorStringCompare(func(p Page) string { return p.LinkTitle() }, p1, p2)
 				if c == 0 {
-					if p1.File().IsZero() || p2.File().IsZero() {
-						return p1.File().IsZero()
-					}
-					return compare.LessStrings(p1.File().Filename(), p2.File().Filename())
+					// This is the full normalized path, which will contain extension and any language code preserved,
+					// which is what we want for sorting.
+					return compare.LessStrings(p1.PathInfo().Path(), p2.PathInfo().Path())
 				}
 				return c < 0
 			}
@@ -100,7 +120,7 @@ var (
 			if p1.Date().Unix() == p2.Date().Unix() {
 				c := compare.Strings(p1.LinkTitle(), p2.LinkTitle())
 				if c == 0 {
-					if !p1.File().IsZero() && !p2.File().IsZero() {
+					if p1.File() != nil && p2.File() != nil {
 						return compare.LessStrings(p1.File().Filename(), p2.File().Filename())
 					}
 				}
@@ -121,11 +141,11 @@ var (
 	}
 
 	lessPageTitle = func(p1, p2 Page) bool {
-		return compare.LessStrings(p1.Title(), p2.Title())
+		return collatorStringCompare(func(p Page) string { return p.Title() }, p1, p2) < 0
 	}
 
 	lessPageLinkTitle = func(p1, p2 Page) bool {
-		return compare.LessStrings(p1.LinkTitle(), p2.LinkTitle())
+		return collatorStringCompare(func(p Page) string { return p.LinkTitle() }, p1, p2) < 0
 	}
 
 	lessPageDate = func(p1, p2 Page) bool {
@@ -149,6 +169,47 @@ func (p Pages) Limit(n int) Pages {
 		return p[0:n]
 	}
 	return p
+}
+
+var collatorStringSort = func(getString func(Page) string) func(p Pages) {
+	return func(p Pages) {
+		if len(p) == 0 {
+			return
+		}
+		// Pages may be a mix of multiple languages, so we need to use the language
+		// for the currently rendered Site.
+		currentSite := p[0].Site().Current()
+		coll := langs.GetCollator1(currentSite.Language())
+		coll.Lock()
+		defer coll.Unlock()
+
+		sort.SliceStable(p, func(i, j int) bool {
+			return coll.CompareStrings(getString(p[i]), getString(p[j])) < 0
+		})
+	}
+}
+
+var collatorStringCompare = func(getString func(Page) string, p1, p2 Page) int {
+	currentSite := p1.Site().Current()
+	coll := langs.GetCollator1(currentSite.Language())
+	coll.Lock()
+	c := coll.CompareStrings(getString(p1), getString(p2))
+	coll.Unlock()
+	return c
+}
+
+var collatorStringLess = func(p Page) (less func(s1, s2 string) bool, close func()) {
+	currentSite := p.Site().Current()
+	// Make sure to use the second collator to prevent deadlocks.
+	// See issue 11039.
+	coll := langs.GetCollator2(currentSite.Language())
+	coll.Lock()
+	return func(s1, s2 string) bool {
+			return coll.CompareStrings(s1, s2) < 1
+		},
+		func() {
+			coll.Unlock()
+		}
 }
 
 // ByWeight sorts the Pages by weight and returns a copy.
@@ -175,7 +236,8 @@ func SortByDefault(pages Pages) {
 func (p Pages) ByTitle() Pages {
 	const key = "pageSort.ByTitle"
 
-	pages, _ := spc.get(key, pageBy(lessPageTitle).Sort, p)
+	pages, _ := spc.get(key, collatorStringSort(func(p Page) string { return p.Title() }), p)
+
 	return pages
 }
 
@@ -187,7 +249,7 @@ func (p Pages) ByTitle() Pages {
 func (p Pages) ByLinkTitle() Pages {
 	const key = "pageSort.ByLinkTitle"
 
-	pages, _ := spc.get(key, pageBy(lessPageLinkTitle).Sort, p)
+	pages, _ := spc.get(key, collatorStringSort(func(p Page) string { return p.LinkTitle() }), p)
 
 	return pages
 }
@@ -257,7 +319,7 @@ func (p Pages) ByLastmod() Pages {
 // Adjacent invocations on the same receiver will return a cached result.
 //
 // This may safely be executed  in parallel.
-func (p Pages) ByLength() Pages {
+func (p Pages) ByLength(ctx context.Context) Pages {
 	const key = "pageSort.ByLength"
 
 	length := func(p1, p2 Page) bool {
@@ -272,7 +334,7 @@ func (p Pages) ByLength() Pages {
 			return false
 		}
 
-		return p1l.Len() < p2l.Len()
+		return p1l.Len(ctx) < p2l.Len(ctx)
 	}
 
 	pages, _ := spc.get(key, pageBy(length).Sort, p)
@@ -322,9 +384,15 @@ func (p Pages) Reverse() Pages {
 // Adjacent invocations on the same receiver with the same paramsKey will return a cached result.
 //
 // This may safely be executed  in parallel.
-func (p Pages) ByParam(paramsKey interface{}) Pages {
+func (p Pages) ByParam(paramsKey any) Pages {
+	if len(p) < 2 {
+		return p
+	}
 	paramsKeyStr := cast.ToString(paramsKey)
 	key := "pageSort.ByParam." + paramsKeyStr
+
+	stringLess, close := collatorStringLess(p[0])
+	defer close()
 
 	paramsKeyComparator := func(p1, p2 Page) bool {
 		v1, _ := p1.Param(paramsKeyStr)
@@ -338,7 +406,7 @@ func (p Pages) ByParam(paramsKey interface{}) Pages {
 			return true
 		}
 
-		isNumeric := func(v interface{}) bool {
+		isNumeric := func(v any) bool {
 			switch v.(type) {
 			case uint8, uint16, uint32, uint64, int, int8, int16, int32, int64, float32, float64:
 				return true
@@ -354,7 +422,7 @@ func (p Pages) ByParam(paramsKey interface{}) Pages {
 		s1 := cast.ToString(v1)
 		s2 := cast.ToString(v2)
 
-		return compare.LessStrings(s1, s2)
+		return stringLess(s1, s2)
 	}
 
 	pages, _ := spc.get(key, pageBy(paramsKeyComparator).Sort, p)

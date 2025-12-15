@@ -14,19 +14,21 @@
 package partials
 
 import (
+	"context"
+
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/tpl/internal"
 )
 
-const name = "partials"
+const namespaceName = "partials"
 
 func init() {
 	f := func(d *deps.Deps) *internal.TemplateFuncsNamespace {
 		ctx := New(d)
 
 		ns := &internal.TemplateFuncsNamespace{
-			Name:    name,
-			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
+			Name:    namespaceName,
+			Context: func(cctx context.Context, args ...any) (any, error) { return ctx, nil },
 		}
 
 		ns.AddMethodMapping(ctx.Include,
@@ -36,7 +38,7 @@ func init() {
 			},
 		)
 
-		// TODO(bep) we need the return to be a valid identifier, but
+		// TODO(bep) we need the return to be a valid identifiers, but
 		// should consider another way of adding it.
 		ns.AddMethodMapping(func() string { return "" },
 			[]string{"return"},

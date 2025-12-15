@@ -18,11 +18,11 @@ var (
 // Epsilon is the closest number to zero that is not considered to be zero.
 var Epsilon = 0.00001
 
-// Mediatype minifies a given mediatype by removing all whitespace.
+// Mediatype minifies a given mediatype by removing all whitespace and lowercasing all parts except strings (which may be case sensitive).
 func Mediatype(b []byte) []byte {
 	j := 0
-	start := 0
 	inString := false
+	start, lastString := 0, 0
 	for i, c := range b {
 		if !inString && parse.IsWhitespace(c) {
 			if start != 0 {
@@ -33,13 +33,22 @@ func Mediatype(b []byte) []byte {
 			start = i + 1
 		} else if c == '"' {
 			inString = !inString
+			if inString {
+				if i-lastString < 1024 { // ToLower may otherwise slow down minification greatly
+					parse.ToLower(b[lastString:i])
+				}
+			} else {
+				lastString = j + (i + 1 - start)
+			}
 		}
 	}
 	if start != 0 {
 		j += copy(b[j:], b[start:])
-		return parse.ToLower(b[:j])
+		parse.ToLower(b[lastString:j])
+		return b[:j]
 	}
-	return parse.ToLower(b)
+	parse.ToLower(b[lastString:])
+	return b
 }
 
 // DataURI minifies a data URI and calls a minifier by the specified mediatype. Specifications: https://www.ietf.org/rfc/rfc2397.txt.
@@ -319,7 +328,9 @@ func Number(num []byte, prec int) []byte {
 	// normExp would be the exponent if it were normalised (0.1 <= f < 1)
 	n := 0
 	normExp := 0
-	if dot == start {
+	if start == end {
+		return num // no number before exponent
+	} else if dot == start {
 		for i = dot + 1; i < end; i++ {
 			if num[i] != '0' {
 				n = end - i
@@ -395,24 +406,24 @@ func Number(num []byte, prec int) []byte {
 		} else if zeroes < 0 {
 			copy(num[start+1:], num[start:dot])
 			num[start] = '.'
+		} else {
+			return num
 		}
 		num[end] = 'e'
 		num[end+1] = '-'
 		end += 2
-		for i := end + lenNormExp - 1; end <= i; i-- {
+		for i := end + lenNormExp - 2; end <= i; i-- {
 			num[i] = -byte(normExp%10) + '0'
 			normExp /= 10
 		}
-		end += lenNormExp
-	} else if -lenIntExp-1 <= normExp {
+		end += lenNormExp - 1
+	} else if -lenIntExp <= normExp {
 		// case 3: print number without exponent
 		zeroes := -normExp
 		if 0 < zeroes {
-			// dot placed at the front and negative exponent, adding zeroes
-			newDot := end - n - zeroes - 1
-			if newDot != dot {
-				d := start - newDot
-				if 0 < d {
+			// place dot at the front, adding zeroes after the dot
+			if newDot := end - n - zeroes - 1; newDot != dot {
+				if d := start - newDot; 0 < d {
 					if dot < end {
 						// copy original digits after the dot towards the end
 						copy(num[dot+1+d:], num[dot+1:end])
@@ -435,18 +446,18 @@ func Number(num []byte, prec int) []byte {
 				}
 			}
 		} else {
-			// dot placed in the middle of the number
-			if dot == start {
-				// when there are zeroes after the dot
-				dot = end - n - 1
-				start = dot
-			} else if end <= dot {
+			// place dot in the middle of the number
+			if end <= dot {
 				// when input has no dot in it
 				dot = end
 				end++
+			} else if dot == start {
+				// when there are zeroes after the dot
+				dot = end - n - 1
+				start = dot
 			}
-			newDot := start + normExp
 			// move digits between dot and newDot towards the end
+			newDot := start + normExp
 			if dot < newDot {
 				copy(num[dot:], num[dot+1:newDot+1])
 			} else if newDot < dot {
@@ -459,11 +470,11 @@ func Number(num []byte, prec int) []byte {
 		// find new end, considering moving numbers to the front, removing the dot and increasing the length of the exponent
 		newEnd := end
 		if dot == start {
-			newEnd = start + n
+			newEnd = dot + n
 		} else {
 			newEnd--
 		}
-		newEnd += 2 + lenIntExp
+		newEnd += 1 + lenIntExp
 
 		exp := intExp
 		lenExp := lenIntExp
@@ -481,19 +492,16 @@ func Number(num []byte, prec int) []byte {
 		} else {
 			// it does not save space and will panic, so we revert to the original representation
 			exp = origExp
-			lenExp = 1
-			if origExp <= -10 || 10 <= origExp {
-				lenExp = strconv.LenInt(int64(origExp))
-			}
+			lenExp = strconv.LenInt(int64(origExp))
 		}
 		num[end] = 'e'
 		num[end+1] = '-'
 		end += 2
-		for i := end + lenExp - 1; end <= i; i-- {
+		for i := end + lenExp - 2; end <= i; i-- {
 			num[i] = -byte(exp%10) + '0'
 			exp /= 10
 		}
-		end += lenExp
+		end += lenExp - 1
 	}
 
 	if neg {

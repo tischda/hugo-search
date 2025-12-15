@@ -1,4 +1,4 @@
-// Copyright 2020 The Hugo Authors. All rights reserved.
+// Copyright 2024 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,42 +16,38 @@ package dartsass
 import (
 	"fmt"
 	"io"
-	"net/url"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/cli/safeexec"
-
-	"github.com/gohugoio/hugo/common/herrors"
+	"github.com/gohugoio/hugo/common/hugo"
+	"github.com/gohugoio/hugo/common/paths"
 	"github.com/gohugoio/hugo/htesting"
+	"github.com/gohugoio/hugo/identity"
 	"github.com/gohugoio/hugo/media"
 
 	"github.com/gohugoio/hugo/resources"
 
 	"github.com/gohugoio/hugo/resources/internal"
+	"github.com/gohugoio/hugo/resources/resource_transformers/tocss/sass"
 
 	"github.com/spf13/afero"
 
 	"github.com/gohugoio/hugo/hugofs"
 
-	"github.com/bep/godartsass"
+	"github.com/bep/godartsass/v2"
 )
 
-// See https://github.com/sass/dart-sass-embedded/issues/24
-const stdinPlaceholder = "HUGOSTDIN"
-
-// Supports returns whether dart-sass-embedded is found in $PATH.
+// Supports returns whether sass, dart-sass, or dart-sass-embedded is found in $PATH.
 func Supports() bool {
 	if htesting.SupportsAll() {
 		return true
 	}
-	p, err := safeexec.LookPath("dart-sass-embedded")
-	return err == nil && p != ""
+	return hugo.DartSassBinaryName != ""
 }
 
 type transform struct {
-	optsm map[string]interface{}
+	optsm map[string]any
 	c     *Client
 }
 
@@ -60,7 +56,7 @@ func (t *transform) Key() internal.ResourceTransformationKey {
 }
 
 func (t *transform) Transform(ctx *resources.ResourceTransformationCtx) error {
-	ctx.OutMediaType = media.CSSType
+	ctx.OutMediaType = media.Builtin.CSSType
 
 	opts, err := decodeOptions(t.optsm)
 	if err != nil {
@@ -74,16 +70,27 @@ func (t *transform) Transform(ctx *resources.ResourceTransformationCtx) error {
 	}
 
 	baseDir := path.Dir(ctx.SourcePath)
+	filename := dartSassStdinPrefix
+
+	if ctx.SourcePath != "" {
+		filename += t.c.sfs.RealFilename(ctx.SourcePath)
+	}
 
 	args := godartsass.Args{
-		URL:          stdinPlaceholder,
+		URL:          filename,
 		IncludePaths: t.c.sfs.RealDirs(baseDir),
 		ImportResolver: importResolver{
-			baseDir: baseDir,
-			c:       t.c,
+			baseDir:           baseDir,
+			c:                 t.c,
+			dependencyManager: ctx.DependencyManager,
+
+			varsStylesheet: godartsass.Import{Content: sass.CreateVarsStyleSheet(sass.TranspilerDart, opts.Vars)},
 		},
-		OutputStyle:     godartsass.ParseOutputStyle(opts.OutputStyle),
-		EnableSourceMap: opts.EnableSourceMap,
+		OutputStyle:                   godartsass.ParseOutputStyle(opts.OutputStyle),
+		EnableSourceMap:               opts.EnableSourceMap,
+		SourceMapIncludeSources:       opts.SourceMapIncludeSources,
+		SilenceDeprecations:           opts.SilenceDeprecations,
+		SilenceDependencyDeprecations: opts.SilenceDependencyDeprecations,
 	}
 
 	// Append any workDir relative include paths
@@ -95,40 +102,12 @@ func (t *transform) Transform(ctx *resources.ResourceTransformationCtx) error {
 		}
 	}
 
-	if ctx.InMediaType.SubType == media.SASSType.SubType {
+	if ctx.InMediaType.SubType == media.Builtin.SASSType.SubType {
 		args.SourceSyntax = godartsass.SourceSyntaxSASS
 	}
 
 	res, err := t.c.toCSS(args, ctx.From)
 	if err != nil {
-		if sassErr, ok := err.(godartsass.SassError); ok {
-			start := sassErr.Span.Start
-			context := strings.TrimSpace(sassErr.Span.Context)
-			filename, _ := urlToFilename(sassErr.Span.Url)
-			if filename == stdinPlaceholder {
-				if ctx.SourcePath == "" {
-					return sassErr
-				}
-				filename = t.c.sfs.RealFilename(ctx.SourcePath)
-			}
-
-			offsetMatcher := func(m herrors.LineMatcher) bool {
-				return m.Offset+len(m.Line) >= start.Offset && strings.Contains(m.Line, context)
-			}
-
-			ferr, ok := herrors.WithFileContextForFile(
-				herrors.NewFileError("scss", -1, -1, start.Column, sassErr),
-				filename,
-				filename,
-				hugofs.Os,
-				offsetMatcher)
-
-			if !ok {
-				return sassErr
-			}
-
-			return ferr
-		}
 		return err
 	}
 
@@ -150,17 +129,23 @@ func (t *transform) Transform(ctx *resources.ResourceTransformationCtx) error {
 }
 
 type importResolver struct {
-	baseDir string
-	c       *Client
+	baseDir           string
+	c                 *Client
+	dependencyManager identity.Manager
+	varsStylesheet    godartsass.Import
 }
 
 func (t importResolver) CanonicalizeURL(url string) (string, error) {
-	filePath, isURL := urlToFilename(url)
+	if url == sass.HugoVarsNamespace {
+		return url, nil
+	}
+
+	filePath, isURL := paths.UrlStringToFilename(url)
 	var prevDir string
 	var pathDir string
 	if isURL {
 		var found bool
-		prevDir, found = t.c.sfs.MakePathRelative(filepath.Dir(filePath))
+		prevDir, found = t.c.sfs.MakePathRelative(filepath.Dir(filePath), true)
 
 		if !found {
 			// Not a member of this filesystem, let Dart Sass handle it.
@@ -179,9 +164,15 @@ func (t importResolver) CanonicalizeURL(url string) (string, error) {
 	if strings.Contains(name, ".") {
 		namePatterns = []string{"_%s", "%s"}
 	} else if strings.HasPrefix(name, "_") {
-		namePatterns = []string{"_%s.scss", "_%s.sass"}
+		namePatterns = []string{"_%s.scss", "_%s.sass", "_%s.css"}
 	} else {
-		namePatterns = []string{"_%s.scss", "%s.scss", "_%s.sass", "%s.sass"}
+		namePatterns = []string{
+			"_%s.scss", "%s.scss",
+			"_%s.sass", "%s.sass",
+			"_%s.css", "%s.css",
+			"%s/_index.scss", "%s/_index.sass",
+			"%s/index.scss", "%s/index.sass",
+		}
 	}
 
 	name = strings.TrimPrefix(name, "_")
@@ -191,33 +182,29 @@ func (t importResolver) CanonicalizeURL(url string) (string, error) {
 		fi, err := t.c.sfs.Fs.Stat(filenameToCheck)
 		if err == nil {
 			if fim, ok := fi.(hugofs.FileMetaInfo); ok {
+				t.dependencyManager.AddIdentity(identity.CleanStringIdentity(filenameToCheck))
 				return "file://" + filepath.ToSlash(fim.Meta().Filename), nil
 			}
 		}
 	}
 
-	// Not found, let Dart Dass handle it
+	// Not found, let Dart Sass handle it
 	return "", nil
 }
 
-func (t importResolver) Load(url string) (string, error) {
-	filename, _ := urlToFilename(url)
+func (t importResolver) Load(url string) (godartsass.Import, error) {
+	if url == sass.HugoVarsNamespace {
+		return t.varsStylesheet, nil
+	}
+	filename, _ := paths.UrlStringToFilename(url)
 	b, err := afero.ReadFile(hugofs.Os, filename)
-	return string(b), err
-}
 
-// TODO(bep) add tests
-func urlToFilename(urls string) (string, bool) {
-	u, err := url.ParseRequestURI(urls)
-	if err != nil {
-		return filepath.FromSlash(urls), false
-	}
-	p := filepath.FromSlash(u.Path)
-
-	if u.Host != "" {
-		// C:\data\file.txt
-		p = strings.ToUpper(u.Host) + ":" + p
+	sourceSyntax := godartsass.SourceSyntaxSCSS
+	if strings.HasSuffix(filename, ".sass") {
+		sourceSyntax = godartsass.SourceSyntaxSASS
+	} else if strings.HasSuffix(filename, ".css") {
+		sourceSyntax = godartsass.SourceSyntaxCSS
 	}
 
-	return p, true
+	return godartsass.Import{Content: string(b), SourceSyntax: sourceSyntax}, err
 }

@@ -33,8 +33,6 @@ const (
 )
 
 type LinkerFile struct {
-	InputFile InputFile
-
 	// This holds all entry points that can reach this file. It will be used to
 	// assign the parts in this file to a chunk.
 	EntryBits helpers.BitSet
@@ -42,6 +40,8 @@ type LinkerFile struct {
 	// This is lazily-allocated because it's only needed if there are warnings
 	// logged, which should be relatively rare.
 	lazyLineColumnTracker *logger.LineColumnTracker
+
+	InputFile InputFile
 
 	// The minimum number of links in the module graph to get from an entry point
 	// to this file
@@ -100,7 +100,13 @@ type EntryPoint struct {
 type LinkerGraph struct {
 	Files       []LinkerFile
 	entryPoints []EntryPoint
-	Symbols     js_ast.SymbolMap
+	Symbols     ast.SymbolMap
+
+	// This is for cross-module inlining of TypeScript enum constants
+	TSEnums map[ast.Ref]map[string]js_ast.TSEnumValue
+
+	// This is for cross-module inlining of detected inlinable constants
+	ConstValues map[ast.Ref]js_ast.ConstValue
 
 	// We should avoid traversing all files in the bundle, because the linker
 	// should be able to run a linking operation on a large bundle where only
@@ -113,7 +119,7 @@ type LinkerGraph struct {
 
 	// This maps from unstable source index to stable reachable file index. This
 	// is useful as a deterministic key for sorting if you need to sort something
-	// containing a source index (such as "js_ast.Ref" symbol references).
+	// containing a source index (such as "ast.Ref" symbol references).
 	StableSourceIndices []uint32
 }
 
@@ -124,7 +130,7 @@ func CloneLinkerGraph(
 	codeSplitting bool,
 ) LinkerGraph {
 	entryPoints := append([]EntryPoint{}, originalEntryPoints...)
-	symbols := js_ast.NewSymbolMap(len(inputFiles))
+	symbols := ast.NewSymbolMap(len(inputFiles))
 	files := make([]LinkerFile, len(inputFiles))
 
 	// Mark all entry points so we don't add them again for import() expressions
@@ -158,7 +164,7 @@ func CloneLinkerGraph(
 				}
 
 				// Clone the symbol map
-				fileSymbols := append([]js_ast.Symbol{}, repr.AST.Symbols...)
+				fileSymbols := append([]ast.Symbol{}, repr.AST.Symbols...)
 				symbols.SymbolsForSource[sourceIndex] = fileSymbols
 				repr.AST.Symbols = nil
 
@@ -166,12 +172,11 @@ func CloneLinkerGraph(
 				repr.AST.Parts = append([]js_ast.Part{}, repr.AST.Parts...)
 				for i := range repr.AST.Parts {
 					part := &repr.AST.Parts[i]
-					clone := make(map[js_ast.Ref]js_ast.SymbolUse, len(part.SymbolUses))
+					clone := make(map[ast.Ref]js_ast.SymbolUse, len(part.SymbolUses))
 					for ref, uses := range part.SymbolUses {
 						clone[ref] = uses
 					}
 					part.SymbolUses = clone
-					part.Dependencies = append([]js_ast.Dependency{}, part.Dependencies...)
 				}
 
 				// Clone the import records
@@ -184,12 +189,19 @@ func CloneLinkerGraph(
 							dynamicImportEntryPointsMutex.Lock()
 							dynamicImportEntryPoints = append(dynamicImportEntryPoints, record.SourceIndex.GetIndex())
 							dynamicImportEntryPointsMutex.Unlock()
+
+							// Remove import assertions for dynamic imports of additional
+							// entry points so that they don't mess with the run-time behavior.
+							// For example, "import('./foo.json', { assert: { type: 'json' } })"
+							// will likely be converted into an import of a JavaScript file and
+							// leaving the import assertion there will prevent it from working.
+							record.AssertOrWith = nil
 						}
 					}
 				}
 
 				// Clone the import map
-				namedImports := make(map[js_ast.Ref]js_ast.NamedImport, len(repr.AST.NamedImports))
+				namedImports := make(map[ast.Ref]js_ast.NamedImport, len(repr.AST.NamedImports))
 				for k, v := range repr.AST.NamedImports {
 					namedImports[k] = v
 				}
@@ -209,14 +221,14 @@ func CloneLinkerGraph(
 				{
 					new := &js_ast.Scope{}
 					*new = *repr.AST.ModuleScope
-					new.Generated = append([]js_ast.Ref{}, new.Generated...)
+					new.Generated = append([]ast.Ref{}, new.Generated...)
 					repr.AST.ModuleScope = new
 				}
 
 				// Also associate some default metadata with the file
 				repr.Meta.ResolvedExports = resolvedExports
-				repr.Meta.IsProbablyTypeScriptType = make(map[js_ast.Ref]bool)
-				repr.Meta.ImportsToBind = make(map[js_ast.Ref]ImportData)
+				repr.Meta.IsProbablyTypeScriptType = make(map[ast.Ref]bool)
+				repr.Meta.ImportsToBind = make(map[ast.Ref]ImportData)
 
 			case *CSSRepr:
 				// Clone the representation
@@ -225,6 +237,11 @@ func CloneLinkerGraph(
 					repr = &clone
 					file.InputFile.Repr = repr
 				}
+
+				// Clone the symbol map
+				fileSymbols := append([]ast.Symbol{}, repr.AST.Symbols...)
+				symbols.SymbolsForSource[sourceIndex] = fileSymbols
+				repr.AST.Symbols = nil
 
 				// Clone the import records
 				repr.AST.ImportRecords = append([]ast.ImportRecord{}, repr.AST.ImportRecords...)
@@ -252,14 +269,43 @@ func CloneLinkerGraph(
 		entryPoints = append(entryPoints, EntryPoint{SourceIndex: reachableFiles[stableIndex]})
 	}
 
-	// Allocate the entry bit set now that the number of entry points is known
+	// Do a final quick pass over all files
+	var tsEnums map[ast.Ref]map[string]js_ast.TSEnumValue
+	var constValues map[ast.Ref]js_ast.ConstValue
 	bitCount := uint(len(entryPoints))
 	for _, sourceIndex := range reachableFiles {
-		files[sourceIndex].EntryBits = helpers.NewBitSet(bitCount)
+		file := &files[sourceIndex]
+
+		// Allocate the entry bit set now that the number of entry points is known
+		file.EntryBits = helpers.NewBitSet(bitCount)
+
+		// Merge TypeScript enums together into one big map. There likely aren't
+		// too many enum definitions relative to the overall size of the code so
+		// it should be fine to just merge them together in serial.
+		if repr, ok := file.InputFile.Repr.(*JSRepr); ok && repr.AST.TSEnums != nil {
+			if tsEnums == nil {
+				tsEnums = make(map[ast.Ref]map[string]js_ast.TSEnumValue)
+			}
+			for ref, enum := range repr.AST.TSEnums {
+				tsEnums[ref] = enum
+			}
+		}
+
+		// Also merge const values into one big map as well
+		if repr, ok := file.InputFile.Repr.(*JSRepr); ok && repr.AST.ConstValues != nil {
+			if constValues == nil {
+				constValues = make(map[ast.Ref]js_ast.ConstValue)
+			}
+			for ref, value := range repr.AST.ConstValues {
+				constValues[ref] = value
+			}
+		}
 	}
 
 	return LinkerGraph{
 		Symbols:             symbols,
+		TSEnums:             tsEnums,
+		ConstValues:         constValues,
 		entryPoints:         entryPoints,
 		Files:               files,
 		ReachableFiles:      reachableFiles,
@@ -275,7 +321,7 @@ func (g *LinkerGraph) EntryPoints() []EntryPoint {
 func (g *LinkerGraph) AddPartToFile(sourceIndex uint32, part js_ast.Part) uint32 {
 	// Invariant: this map is never null
 	if part.SymbolUses == nil {
-		part.SymbolUses = make(map[js_ast.Ref]js_ast.SymbolUse)
+		part.SymbolUses = make(map[ast.Ref]js_ast.SymbolUse)
 	}
 
 	repr := g.Files[sourceIndex].InputFile.Repr.(*JSRepr)
@@ -296,7 +342,7 @@ func (g *LinkerGraph) AddPartToFile(sourceIndex uint32, part js_ast.Part) uint32
 			// Add this part to the overlay
 			partIndices = append(partIndices, partIndex)
 			if repr.Meta.TopLevelSymbolToPartsOverlay == nil {
-				repr.Meta.TopLevelSymbolToPartsOverlay = make(map[js_ast.Ref][]uint32)
+				repr.Meta.TopLevelSymbolToPartsOverlay = make(map[ast.Ref][]uint32)
 			}
 			repr.Meta.TopLevelSymbolToPartsOverlay[declaredSymbol.Ref] = partIndices
 		}
@@ -305,18 +351,18 @@ func (g *LinkerGraph) AddPartToFile(sourceIndex uint32, part js_ast.Part) uint32
 	return partIndex
 }
 
-func (g *LinkerGraph) GenerateNewSymbol(sourceIndex uint32, kind js_ast.SymbolKind, originalName string) js_ast.Ref {
+func (g *LinkerGraph) GenerateNewSymbol(sourceIndex uint32, kind ast.SymbolKind, originalName string) ast.Ref {
 	sourceSymbols := &g.Symbols.SymbolsForSource[sourceIndex]
 
-	ref := js_ast.Ref{
+	ref := ast.Ref{
 		SourceIndex: sourceIndex,
 		InnerIndex:  uint32(len(*sourceSymbols)),
 	}
 
-	*sourceSymbols = append(*sourceSymbols, js_ast.Symbol{
+	*sourceSymbols = append(*sourceSymbols, ast.Symbol{
 		Kind:         kind,
 		OriginalName: originalName,
-		Link:         js_ast.InvalidRef,
+		Link:         ast.InvalidRef,
 	})
 
 	generated := &g.Files[sourceIndex].InputFile.Repr.(*JSRepr).AST.ModuleScope.Generated
@@ -327,7 +373,7 @@ func (g *LinkerGraph) GenerateNewSymbol(sourceIndex uint32, kind js_ast.SymbolKi
 func (g *LinkerGraph) GenerateSymbolImportAndUse(
 	sourceIndex uint32,
 	partIndex uint32,
-	ref js_ast.Ref,
+	ref ast.Ref,
 	useCount uint32,
 	sourceIndexToImportFrom uint32,
 ) {

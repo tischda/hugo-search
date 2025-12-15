@@ -2,7 +2,6 @@
 //
 // Use of this source code is governed by an MIT-style
 // license that can be found in the LICENSE file.
-//
 package libsass
 
 // #include <stdint.h>
@@ -19,6 +18,7 @@ package libsass
 //   return BridgeImport(currPath, prev_path, ci);
 // }
 import "C"
+
 import (
 	"sync"
 	"unsafe"
@@ -33,11 +33,12 @@ var importsStore = &idMap{
 
 // AddImportResolver adds a function to resolve imports in LibSASS.
 // Make sure to run call DeleteImportResolver when done.
+//
 //go:nocheckptr
 func AddImportResolver(opts SassOptions, resolver ImportResolver) int {
 	i := importsStore.Set(resolver)
 	// This looks unsafe, but LibSass is using void* to store an int.
-	// TODO(bep) this prevents us from "fail on go vet errors" in Travis.
+	// TODO(bep) this prevents us from "fail on go vet errors" in GitHub action.
 	id := unsafe.Pointer(uintptr(i))
 
 	importers := C.sass_make_importer_list(1)

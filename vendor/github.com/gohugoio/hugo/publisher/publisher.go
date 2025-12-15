@@ -15,6 +15,7 @@ package publisher
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"sync/atomic"
@@ -80,8 +81,8 @@ func NewDestinationPublisher(rs *resources.Spec, outputFormats output.Formats, m
 	fs := rs.BaseFs.PublishFs
 	cfg := rs.Cfg
 	var classCollector *htmlElementsCollector
-	if rs.BuildConfig.WriteStats {
-		classCollector = newHTMLElementsCollector()
+	if rs.BuildConfig().BuildStats.Enabled() {
+		classCollector = newHTMLElementsCollector(rs.BuildConfig().BuildStats)
 	}
 	pub = DestinationPublisher{fs: fs, htmlElementsCollector: classCollector}
 	pub.min, err = minifiers.New(mediaTypes, outputFormats, cfg)
@@ -104,7 +105,7 @@ func (p DestinationPublisher) Publish(d Descriptor) error {
 		defer bp.PutBuffer(b)
 
 		if err := transformers.Apply(b, d.Src); err != nil {
-			return err
+			return fmt.Errorf("failed to process %q: %w", d.TargetPath, err)
 		}
 
 		// This is now what we write to disk.
@@ -168,7 +169,7 @@ func (p DestinationPublisher) createTransformerChain(f Descriptor) transform.Cha
 
 	if isHTML {
 		if f.LiveReloadBaseURL != nil {
-			transformers = append(transformers, livereloadinject.New(*f.LiveReloadBaseURL))
+			transformers = append(transformers, livereloadinject.New(f.LiveReloadBaseURL))
 		}
 
 		// This is only injected on the home page.

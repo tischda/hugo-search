@@ -22,7 +22,7 @@ import (
 
 	toml "github.com/pelletier/go-toml/v2"
 
-	yaml "gopkg.in/yaml.v2"
+	xml "github.com/clbanning/mxj/v2"
 )
 
 const (
@@ -30,14 +30,14 @@ const (
 	tomlDelimLf = "+++\n"
 )
 
-func InterfaceToConfig(in interface{}, format metadecoders.Format, w io.Writer) error {
+func InterfaceToConfig(in any, format metadecoders.Format, w io.Writer) error {
 	if in == nil {
 		return errors.New("input was nil")
 	}
 
 	switch format {
 	case metadecoders.YAML:
-		b, err := yaml.Marshal(in)
+		b, err := metadecoders.MarshalYAML(in)
 		if err != nil {
 			return err
 		}
@@ -62,13 +62,20 @@ func InterfaceToConfig(in interface{}, format metadecoders.Format, w io.Writer) 
 
 		_, err = w.Write([]byte{'\n'})
 		return err
+	case metadecoders.XML:
+		b, err := xml.AnyXmlIndent(in, "", "\t", "root")
+		if err != nil {
+			return err
+		}
 
+		_, err = w.Write(b)
+		return err
 	default:
 		return errors.New("unsupported Format provided")
 	}
 }
 
-func InterfaceToFrontMatter(in interface{}, format metadecoders.Format, w io.Writer) error {
+func InterfaceToFrontMatter(in any, format metadecoders.Format, w io.Writer) error {
 	if in == nil {
 		return errors.New("input was nil")
 	}
@@ -95,12 +102,11 @@ func InterfaceToFrontMatter(in interface{}, format metadecoders.Format, w io.Wri
 		}
 
 		err = InterfaceToConfig(in, format, w)
-
 		if err != nil {
 			return err
 		}
 
-		_, err = w.Write([]byte("\n" + tomlDelimLf))
+		_, err = w.Write([]byte(tomlDelimLf))
 		return err
 
 	default:

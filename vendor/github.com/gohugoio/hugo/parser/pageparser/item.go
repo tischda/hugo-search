@@ -18,23 +18,63 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+
+	"github.com/yuin/goldmark/util"
 )
 
+type lowHigh struct {
+	Low  int
+	High int
+}
+
 type Item struct {
-	Type     ItemType
-	Pos      int
-	Val      []byte
+	Type ItemType
+	Err  error
+
+	// The common case is a single segment.
+	low  int
+	high int
+
+	// This is the uncommon case.
+	segments []lowHigh
+
+	// Used for validation.
+	firstByte byte
+
 	isString bool
 }
 
 type Items []Item
 
-func (i Item) ValStr() string {
-	return string(i.Val)
+func (i Item) Pos() int {
+	if len(i.segments) > 0 {
+		return i.segments[0].Low
+	}
+	return i.low
 }
 
-func (i Item) ValTyped() interface{} {
-	str := i.ValStr()
+func (i Item) Val(source []byte) []byte {
+	if len(i.segments) == 0 {
+		return source[i.low:i.high]
+	}
+
+	if len(i.segments) == 1 {
+		return source[i.segments[0].Low:i.segments[0].High]
+	}
+
+	var b bytes.Buffer
+	for _, s := range i.segments {
+		b.Write(source[s.Low:s.High])
+	}
+	return b.Bytes()
+}
+
+func (i Item) ValStr(source []byte) string {
+	return string(i.Val(source))
+}
+
+func (i Item) ValTyped(source []byte) any {
+	str := i.ValStr(source)
 	if i.isString {
 		// A quoted value that is a string even if it looks like a number etc.
 		return str
@@ -64,11 +104,15 @@ func (i Item) ValTyped() interface{} {
 }
 
 func (i Item) IsText() bool {
-	return i.Type == tText
+	return i.Type == tText || i.IsIndentation()
 }
 
-func (i Item) IsNonWhitespace() bool {
-	return len(bytes.TrimSpace(i.Val)) > 0
+func (i Item) IsIndentation() bool {
+	return i.Type == tIndentation
+}
+
+func (i Item) IsNonWhitespace(source []byte) bool {
+	return len(bytes.TrimSpace(i.Val(source))) > 0
 }
 
 func (i Item) IsShortcodeName() bool {
@@ -108,7 +152,7 @@ func (i Item) IsFrontMatter() bool {
 }
 
 func (i Item) IsDone() bool {
-	return i.Type == tError || i.Type == tEOF
+	return i.IsError() || i.IsEOF()
 }
 
 func (i Item) IsEOF() bool {
@@ -119,18 +163,22 @@ func (i Item) IsError() bool {
 	return i.Type == tError
 }
 
-func (i Item) String() string {
+func (i Item) ToString(source []byte) string {
+	val := i.Val(source)
 	switch {
-	case i.Type == tEOF:
+	case i.IsEOF():
 		return "EOF"
-	case i.Type == tError:
-		return string(i.Val)
+	case i.IsError():
+		return string(val)
+	case i.IsIndentation():
+		return fmt.Sprintf("%s:[%s]", i.Type, util.VisualizeSpaces(val))
 	case i.Type > tKeywordMarker:
-		return fmt.Sprintf("<%s>", i.Val)
-	case len(i.Val) > 50:
-		return fmt.Sprintf("%v:%.20q...", i.Type, i.Val)
+		return fmt.Sprintf("<%s>", val)
+	case len(val) > 50:
+		return fmt.Sprintf("%v:%.20q...", i.Type, val)
+	default:
+		return fmt.Sprintf("%v:[%s]", i.Type, val)
 	}
-	return fmt.Sprintf("%v:[%s]", i.Type, i.Val)
 }
 
 type ItemType int
@@ -145,7 +193,6 @@ const (
 	TypeFrontMatterTOML
 	TypeFrontMatterJSON
 	TypeFrontMatterORG
-	TypeEmoji
 	TypeIgnore // // The BOM Unicode byte order marker and possibly others
 
 	// shortcode items
@@ -159,6 +206,8 @@ const (
 	tScParam
 	tScParamVal
 
+	tIndentation
+
 	tText // plain text
 
 	// preserved for later - keywords come after this
@@ -166,7 +215,7 @@ const (
 )
 
 var (
-	boolRe  = regexp.MustCompile(`^(true$)|(false$)`)
+	boolRe  = regexp.MustCompile(`^(true|false)$`)
 	intRe   = regexp.MustCompile(`^[-+]?\d+$`)
 	floatRe = regexp.MustCompile(`^[-+]?\d*\.\d+$`)
 )

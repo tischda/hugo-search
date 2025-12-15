@@ -14,6 +14,8 @@
 package templates
 
 import (
+	"context"
+
 	"github.com/gohugoio/hugo/deps"
 	"github.com/gohugoio/hugo/tpl/internal"
 )
@@ -26,7 +28,7 @@ func init() {
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
+			Context: func(cctx context.Context, args ...any) (any, error) { return ctx, nil },
 		}
 
 		ns.AddMethodMapping(ctx.Exists,
@@ -35,6 +37,16 @@ func init() {
 				{`{{ if (templates.Exists "partials/header.html") }}Yes!{{ end }}`, `Yes!`},
 				{`{{ if not (templates.Exists "partials/doesnotexist.html") }}No!{{ end }}`, `No!`},
 			},
+		)
+
+		ns.AddMethodMapping(ctx.Defer,
+			nil, // No aliases to keep the AST parsing simple.
+			[][2]string{},
+		)
+
+		ns.AddMethodMapping(ctx.DoDefer,
+			[]string{"doDefer"},
+			[][2]string{},
 		)
 
 		return ns

@@ -105,7 +105,6 @@ type (
 //
 // Any src that isn't one of *image.RGBA, *image.NRGBA, or *image.Gray
 // will be converted to *image.NRGBA using draw.Draw first.
-//
 func Encode(w io.Writer, src image.Image, o webpoptions.EncodingOptions) error {
 	config, err := encodingOptionsToCConfig(o)
 	if err != nil {

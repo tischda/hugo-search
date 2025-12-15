@@ -15,19 +15,18 @@
 package pandoc
 
 import (
-	"github.com/cli/safeexec"
+	"github.com/gohugoio/hugo/common/hexec"
 	"github.com/gohugoio/hugo/htesting"
 	"github.com/gohugoio/hugo/identity"
-	"github.com/gohugoio/hugo/markup/internal"
 
 	"github.com/gohugoio/hugo/markup/converter"
+	"github.com/gohugoio/hugo/markup/internal"
 )
 
 // Provider is the package entry point.
 var Provider converter.ProviderProvider = provider{}
 
-type provider struct {
-}
+type provider struct{}
 
 func (p provider) New(cfg converter.ProviderConfig) (converter.Provider, error) {
 	return converter.NewProvider("pandoc", func(ctx converter.DocumentContext) (converter.Converter, error) {
@@ -43,8 +42,12 @@ type pandocConverter struct {
 	cfg converter.ProviderConfig
 }
 
-func (c *pandocConverter) Convert(ctx converter.RenderContext) (converter.Result, error) {
-	return converter.Bytes(c.getPandocContent(ctx.Src, c.ctx)), nil
+func (c *pandocConverter) Convert(ctx converter.RenderContext) (converter.ResultRender, error) {
+	b, err := c.getPandocContent(ctx.Src, c.ctx)
+	if err != nil {
+		return nil, err
+	}
+	return converter.Bytes(b), nil
 }
 
 func (c *pandocConverter) Supports(feature identity.Identity) bool {
@@ -52,31 +55,35 @@ func (c *pandocConverter) Supports(feature identity.Identity) bool {
 }
 
 // getPandocContent calls pandoc as an external helper to convert pandoc markdown to HTML.
-func (c *pandocConverter) getPandocContent(src []byte, ctx converter.DocumentContext) []byte {
+func (c *pandocConverter) getPandocContent(src []byte, ctx converter.DocumentContext) ([]byte, error) {
 	logger := c.cfg.Logger
-	path := getPandocExecPath()
-	if path == "" {
+	binaryName := getPandocBinaryName()
+	if binaryName == "" {
 		logger.Println("pandoc not found in $PATH: Please install.\n",
 			"                 Leaving pandoc content unrendered.")
-		return src
+		return src, nil
 	}
 	args := []string{"--mathjax"}
-	return internal.ExternallyRenderContent(c.cfg, ctx, src, path, args)
+	return internal.ExternallyRenderContent(c.cfg, ctx, src, binaryName, args)
 }
 
-func getPandocExecPath() string {
-	path, err := safeexec.LookPath("pandoc")
-	if err != nil {
-		return ""
-	}
+const pandocBinary = "pandoc"
 
-	return path
+func getPandocBinaryName() string {
+	if hexec.InPath(pandocBinary) {
+		return pandocBinary
+	}
+	return ""
 }
 
 // Supports returns whether Pandoc is installed on this computer.
 func Supports() bool {
+	hasBin := getPandocBinaryName() != ""
 	if htesting.SupportsAll() {
+		if !hasBin {
+			panic("pandoc not installed")
+		}
 		return true
 	}
-	return getPandocExecPath() != ""
+	return hasBin
 }

@@ -17,9 +17,6 @@ var (
 
 ////////////////////////////////////////////////////////////////
 
-// DefaultMinifier is the default minifier.
-var DefaultMinifier = &Minifier{}
-
 // Minifier is an XML minifier.
 type Minifier struct {
 	KeepWhitespace bool
@@ -27,7 +24,7 @@ type Minifier struct {
 
 // Minify minifies XML data, it reads from r and writes to w.
 func Minify(m *minify.M, w io.Writer, r io.Reader, params map[string]string) error {
-	return DefaultMinifier.Minify(m, w, r, params)
+	return (&Minifier{}).Minify(m, w, r, params)
 }
 
 // Minify minifies XML data, it reads from r and writes to w.
@@ -44,11 +41,10 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 	for {
 		t := *tb.Shift()
 		if t.TokenType == xml.CDATAToken {
+			// convert CDATA to regular text if smaller
 			if len(t.Text) == 0 {
 				continue
-			}
-			if text, useText := xml.EscapeCDATAVal(&attrByteBuffer, t.Text); useText {
-				t.TokenType = xml.TextToken
+			} else if text, useText := xml.EscapeCDATAVal(&attrByteBuffer, t.Text); useText {
 				t.Data = text
 			}
 		}
@@ -116,10 +112,10 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 			}
 			w.Write(t.Data)
 		case xml.StartTagToken:
+			w.Write(t.Data)
 			if o.KeepWhitespace {
 				omitSpace = false
 			}
-			w.Write(t.Data)
 		case xml.StartTagPIToken:
 			w.Write(t.Data)
 		case xml.AttributeToken:
@@ -127,7 +123,7 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 			w.Write(t.Text)
 			w.Write(isBytes)
 
-			if len(t.AttrVal) < 2 {
+			if len(t.AttrVal) < 2 || t.AttrVal[0] != '"' || t.AttrVal[len(t.AttrVal)-1] != '"' {
 				w.Write(t.AttrVal)
 			} else {
 				val := t.AttrVal[1 : len(t.AttrVal)-1]
@@ -157,14 +153,14 @@ func (o *Minifier) Minify(m *minify.M, w io.Writer, r io.Reader, _ map[string]st
 		case xml.StartTagClosePIToken:
 			w.Write(t.Data)
 		case xml.EndTagToken:
-			if o.KeepWhitespace {
-				omitSpace = false
-			}
 			if len(t.Data) > 3+len(t.Text) {
 				t.Data[2+len(t.Text)] = '>'
 				t.Data = t.Data[:3+len(t.Text)]
 			}
 			w.Write(t.Data)
+			if o.KeepWhitespace {
+				omitSpace = false
+			}
 		}
 	}
 }

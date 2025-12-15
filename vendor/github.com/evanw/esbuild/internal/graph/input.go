@@ -18,29 +18,30 @@ import (
 )
 
 type InputFile struct {
-	Source         logger.Source
 	Repr           InputFileRepr
 	InputSourceMap *sourcemap.SourceMap
 
 	// If this file ends up being used in the bundle, these are additional files
-	// that must be written to the output directory. It's used by the "file"
-	// loader.
-	AdditionalFiles        []OutputFile
-	UniqueKeyForFileLoader string
+	// that must be written to the output directory. It's used by the "file" and
+	// "copy" loaders.
+	AdditionalFiles            []OutputFile
+	UniqueKeyForAdditionalFile string
 
 	SideEffects SideEffects
+	Source      logger.Source
 	Loader      config.Loader
+
+	OmitFromSourceMapsAndMetafile bool
 }
 
 type OutputFile struct {
-	AbsPath  string
-	Contents []byte
-
 	// If "AbsMetadataFile" is present, this will be filled out with information
 	// about this file in JSON format. This is a partial JSON file that will be
 	// fully assembled later.
 	JSONMetadataChunk string
 
+	AbsPath      string
+	Contents     []byte
 	IsExecutable bool
 }
 
@@ -80,8 +81,8 @@ type InputFileRepr interface {
 }
 
 type JSRepr struct {
-	AST  js_ast.AST
 	Meta JSReprMeta
+	AST  js_ast.AST
 
 	// If present, this is the CSS file that this JavaScript stub corresponds to.
 	// A JavaScript stub is automatically generated for a CSS file when it's
@@ -93,7 +94,7 @@ func (repr *JSRepr) ImportRecords() *[]ast.ImportRecord {
 	return &repr.AST.ImportRecords
 }
 
-func (repr *JSRepr) TopLevelSymbolToParts(ref js_ast.Ref) []uint32 {
+func (repr *JSRepr) TopLevelSymbolToParts(ref ast.Ref) []uint32 {
 	// Overlay the mutable map from the linker
 	if parts, ok := repr.Meta.TopLevelSymbolToPartsOverlay[ref]; ok {
 		return parts
@@ -114,4 +115,13 @@ type CSSRepr struct {
 
 func (repr *CSSRepr) ImportRecords() *[]ast.ImportRecord {
 	return &repr.AST.ImportRecords
+}
+
+type CopyRepr struct {
+	// The URL that replaces the contents of any import record paths for this file
+	URLForCode string
+}
+
+func (repr *CopyRepr) ImportRecords() *[]ast.ImportRecord {
+	return nil
 }

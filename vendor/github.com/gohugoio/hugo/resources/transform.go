@@ -15,6 +15,7 @@ package resources
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"io"
@@ -22,10 +23,12 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gohugoio/hugo/common/constants"
+	"github.com/gohugoio/hugo/common/hashing"
 	"github.com/gohugoio/hugo/common/paths"
+	"github.com/gohugoio/hugo/identity"
 
-	"github.com/pkg/errors"
-
+	"github.com/gohugoio/hugo/resources/images"
 	"github.com/gohugoio/hugo/resources/images/exif"
 	"github.com/spf13/afero"
 
@@ -34,7 +37,6 @@ import (
 	"github.com/gohugoio/hugo/common/herrors"
 	"github.com/gohugoio/hugo/common/hugio"
 	"github.com/gohugoio/hugo/common/maps"
-	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/resources/internal"
 	"github.com/gohugoio/hugo/resources/resource"
 
@@ -42,12 +44,24 @@ import (
 )
 
 var (
-	_ resource.ContentResource        = (*resourceAdapter)(nil)
-	_ resource.ReadSeekCloserResource = (*resourceAdapter)(nil)
-	_ resource.Resource               = (*resourceAdapter)(nil)
-	_ resource.Source                 = (*resourceAdapter)(nil)
-	_ resource.Identifier             = (*resourceAdapter)(nil)
-	_ resource.ResourceMetaProvider   = (*resourceAdapter)(nil)
+	_ resource.ContentResource           = (*resourceAdapter)(nil)
+	_ resourceCopier                     = (*resourceAdapter)(nil)
+	_ resource.ReadSeekCloserResource    = (*resourceAdapter)(nil)
+	_ resource.Resource                  = (*resourceAdapter)(nil)
+	_ resource.Staler                    = (*resourceAdapterInner)(nil)
+	_ identity.IdentityGroupProvider     = (*resourceAdapterInner)(nil)
+	_ resource.Source                    = (*resourceAdapter)(nil)
+	_ resource.Identifier                = (*resourceAdapter)(nil)
+	_ resource.TransientIdentifier       = (*resourceAdapter)(nil)
+	_ targetPathProvider                 = (*resourceAdapter)(nil)
+	_ sourcePathProvider                 = (*resourceAdapter)(nil)
+	_ resource.Identifier                = (*resourceAdapter)(nil)
+	_ resource.ResourceNameTitleProvider = (*resourceAdapter)(nil)
+	_ resource.WithResourceMetaProvider  = (*resourceAdapter)(nil)
+	_ identity.DependencyManagerProvider = (*resourceAdapter)(nil)
+	_ identity.IdentityGroupProvider     = (*resourceAdapter)(nil)
+	_ resource.NameNormalizedProvider    = (*resourceAdapter)(nil)
+	_ isPublishedProvider                = (*resourceAdapter)(nil)
 )
 
 // These are transformations that need special support in Hugo that may not
@@ -67,10 +81,13 @@ func newResourceAdapter(spec *Spec, lazyPublish bool, target transformableResour
 	}
 	return &resourceAdapter{
 		resourceTransformations: &resourceTransformations{},
+		metaProvider:            target,
 		resourceAdapterInner: &resourceAdapterInner{
+			ctx:         context.Background(),
 			spec:        spec,
 			publishOnce: po,
 			target:      target,
+			Staler:      &AtomicStaler{},
 		},
 	}
 }
@@ -83,6 +100,12 @@ type ResourceTransformation interface {
 }
 
 type ResourceTransformationCtx struct {
+	// The context that started the transformation.
+	Ctx context.Context
+
+	// The dependency manager to use for dependency tracking.
+	DependencyManager identity.Manager
+
 	// The content to transform.
 	From io.Reader
 
@@ -108,7 +131,7 @@ type ResourceTransformationCtx struct {
 
 	// Data data can be set on the transformed Resource. Not that this need
 	// to be simple types, as it needs to be serialized to JSON and back.
-	Data map[string]interface{}
+	Data map[string]any
 
 	// This is used to publish additional artifacts, e.g. source maps.
 	// We may improve this.
@@ -157,44 +180,119 @@ type resourceAdapter struct {
 	commonResource
 	*resourceTransformations
 	*resourceAdapterInner
+	metaProvider resource.ResourceMetaProvider
 }
 
-func (r *resourceAdapter) Content() (interface{}, error) {
+var _ identity.ForEeachIdentityByNameProvider = (*resourceAdapter)(nil)
+
+func (r *resourceAdapter) Content(ctx context.Context) (any, error) {
 	r.init(false, true)
 	if r.transformationsErr != nil {
 		return nil, r.transformationsErr
 	}
-	return r.target.Content()
+	return r.target.Content(ctx)
 }
 
-func (r *resourceAdapter) Data() interface{} {
+func (r *resourceAdapter) GetIdentity() identity.Identity {
+	return identity.FirstIdentity(r.target)
+}
+
+func (r *resourceAdapter) Data() any {
 	r.init(false, false)
 	return r.target.Data()
 }
 
-func (r *resourceAdapter) Fill(spec string) (resource.Image, error) {
+func (r *resourceAdapter) ForEeachIdentityByName(name string, f func(identity.Identity) bool) {
+	if constants.IsFieldRelOrPermalink(name) && !r.resourceTransformations.hasTransformationPermalinkHash() {
+		// Special case for links without any content hash in the URL.
+		// We don't need to rebuild all pages that use this resource,
+		// but we want to make sure that the resource is accessed at least once.
+		f(identity.NewFindFirstManagerIdentityProvider(r.target.GetDependencyManager(), r.target.GetIdentityGroup()))
+		return
+	}
+	f(r.target.GetIdentityGroup())
+	f(r.target.GetDependencyManager())
+}
+
+func (r *resourceAdapter) GetIdentityGroup() identity.Identity {
+	return r.target.GetIdentityGroup()
+}
+
+func (r *resourceAdapter) GetDependencyManager() identity.Manager {
+	return r.target.GetDependencyManager()
+}
+
+func (r resourceAdapter) cloneTo(targetPath string) resource.Resource {
+	newtTarget := r.target.cloneTo(targetPath)
+	newInner := &resourceAdapterInner{
+		ctx:    r.ctx,
+		spec:   r.spec,
+		Staler: r.Staler,
+		target: newtTarget.(transformableResource),
+	}
+	if r.resourceAdapterInner.publishOnce != nil {
+		newInner.publishOnce = &publishOnce{}
+	}
+	r.resourceAdapterInner = newInner
+	return &r
+}
+
+func (r *resourceAdapter) Process(spec string) (images.ImageResource, error) {
+	return r.getImageOps().Process(spec)
+}
+
+func (r *resourceAdapter) Crop(spec string) (images.ImageResource, error) {
+	return r.getImageOps().Crop(spec)
+}
+
+func (r *resourceAdapter) Fill(spec string) (images.ImageResource, error) {
 	return r.getImageOps().Fill(spec)
 }
 
-func (r *resourceAdapter) Fit(spec string) (resource.Image, error) {
+func (r *resourceAdapter) Fit(spec string) (images.ImageResource, error) {
 	return r.getImageOps().Fit(spec)
 }
 
-func (r *resourceAdapter) Filter(filters ...interface{}) (resource.Image, error) {
+func (r *resourceAdapter) Filter(filters ...any) (images.ImageResource, error) {
 	return r.getImageOps().Filter(filters...)
+}
+
+func (r *resourceAdapter) Resize(spec string) (images.ImageResource, error) {
+	return r.getImageOps().Resize(spec)
 }
 
 func (r *resourceAdapter) Height() int {
 	return r.getImageOps().Height()
 }
 
-func (r *resourceAdapter) Exif() *exif.Exif {
+func (r *resourceAdapter) Exif() *exif.ExifInfo {
 	return r.getImageOps().Exif()
+}
+
+func (r *resourceAdapter) Colors() ([]images.Color, error) {
+	return r.getImageOps().Colors()
 }
 
 func (r *resourceAdapter) Key() string {
 	r.init(false, false)
 	return r.target.(resource.Identifier).Key()
+}
+
+func (r *resourceAdapter) TransientKey() string {
+	return r.Key()
+}
+
+func (r *resourceAdapter) targetPath() string {
+	r.init(false, false)
+	return r.target.(targetPathProvider).targetPath()
+}
+
+func (r *resourceAdapter) sourcePath() string {
+	r.init(false, false)
+	if sp, ok := r.target.(sourcePathProvider); ok {
+		return sp.sourcePath()
+	}
+	return ""
 }
 
 func (r *resourceAdapter) MediaType() media.Type {
@@ -204,12 +302,17 @@ func (r *resourceAdapter) MediaType() media.Type {
 
 func (r *resourceAdapter) Name() string {
 	r.init(false, false)
-	return r.target.Name()
+	return r.metaProvider.Name()
+}
+
+func (r *resourceAdapter) NameNormalized() string {
+	r.init(false, false)
+	return r.target.(resource.NameNormalizedProvider).NameNormalized()
 }
 
 func (r *resourceAdapter) Params() maps.Params {
 	r.init(false, false)
-	return r.target.Params()
+	return r.metaProvider.Params()
 }
 
 func (r *resourceAdapter) Permalink() string {
@@ -223,6 +326,11 @@ func (r *resourceAdapter) Publish() error {
 	return r.target.Publish()
 }
 
+func (r *resourceAdapter) isPublished() bool {
+	r.init(false, false)
+	return r.target.isPublished()
+}
+
 func (r *resourceAdapter) ReadSeekCloser() (hugio.ReadSeekCloser, error) {
 	r.init(false, false)
 	return r.target.ReadSeekCloser()
@@ -231,10 +339,6 @@ func (r *resourceAdapter) ReadSeekCloser() (hugio.ReadSeekCloser, error) {
 func (r *resourceAdapter) RelPermalink() string {
 	r.init(true, false)
 	return r.target.RelPermalink()
-}
-
-func (r *resourceAdapter) Resize(spec string) (resource.Image, error) {
-	return r.getImageOps().Resize(spec)
 }
 
 func (r *resourceAdapter) ResourceType() string {
@@ -248,16 +352,22 @@ func (r *resourceAdapter) String() string {
 
 func (r *resourceAdapter) Title() string {
 	r.init(false, false)
-	return r.target.Title()
+	return r.metaProvider.Title()
 }
 
 func (r resourceAdapter) Transform(t ...ResourceTransformation) (ResourceTransformer, error) {
+	return r.TransformWithContext(context.Background(), t...)
+}
+
+func (r resourceAdapter) TransformWithContext(ctx context.Context, t ...ResourceTransformation) (ResourceTransformer, error) {
 	r.resourceTransformations = &resourceTransformations{
 		transformations: append(r.transformations, t...),
 	}
 
 	r.resourceAdapterInner = &resourceAdapterInner{
+		ctx:         ctx,
 		spec:        r.spec,
+		Staler:      r.Staler,
 		publishOnce: &publishOnce{},
 		target:      r.target,
 	}
@@ -273,21 +383,21 @@ func (r *resourceAdapter) DecodeImage() (image.Image, error) {
 	return r.getImageOps().DecodeImage()
 }
 
-func (r *resourceAdapter) getImageOps() resource.ImageOps {
-	img, ok := r.target.(resource.ImageOps)
+func (r resourceAdapter) WithResourceMeta(mp resource.ResourceMetaProvider) resource.Resource {
+	r.metaProvider = mp
+	return &r
+}
+
+func (r *resourceAdapter) getImageOps() images.ImageResourceOps {
+	img, ok := r.target.(images.ImageResourceOps)
 	if !ok {
-		panic(fmt.Sprintf("%T is not an image", r.target))
+		if r.MediaType().SubType == "svg" {
+			panic("this method is only available for raster images. To determine if an image is SVG, you can do {{ if eq .MediaType.SubType \"svg\" }}{{ end }}")
+		}
+		panic("this method is only available for image resources")
 	}
 	r.init(false, false)
 	return img
-}
-
-func (r *resourceAdapter) getMetaAssigner() metaAssigner {
-	return r.target
-}
-
-func (r *resourceAdapter) getSpec() *Spec {
-	return r.spec
 }
 
 func (r *resourceAdapter) publish() {
@@ -305,41 +415,28 @@ func (r *resourceAdapter) publish() {
 }
 
 func (r *resourceAdapter) TransformationKey() string {
-	// Files with a suffix will be stored in cache (both on disk and in memory)
-	// partitioned by their suffix.
 	var key string
 	for _, tr := range r.transformations {
 		key = key + "_" + tr.Key().Value()
 	}
-
-	base := ResourceCacheKey(r.target.Key())
-	return r.spec.ResourceCache.cleanKey(base) + "_" + helpers.MD5String(key)
+	return r.spec.ResourceCache.cleanKey(r.target.Key()) + "_" + hashing.MD5FromStringHexEncoded(key)
 }
 
-func (r *resourceAdapter) transform(publish, setContent bool) error {
-	cache := r.spec.ResourceCache
-
+func (r *resourceAdapter) getOrTransform(publish, setContent bool) error {
 	key := r.TransformationKey()
-
-	cached, found := cache.get(key)
-
-	if found {
-		r.resourceAdapterInner = cached.(*resourceAdapterInner)
-		return nil
+	res, err := r.spec.ResourceCache.cacheResourceTransformation.GetOrCreate(key, func(string) (*resourceAdapterInner, error) {
+		return r.transform(key, publish, setContent)
+	})
+	if err != nil {
+		return err
 	}
 
-	// Acquire a write lock for the named transformation.
-	cache.nlocker.Lock(key)
-	// Check the cache again.
-	cached, found = cache.get(key)
-	if found {
-		r.resourceAdapterInner = cached.(*resourceAdapterInner)
-		cache.nlocker.Unlock(key)
-		return nil
-	}
+	r.resourceAdapterInner = res
+	return nil
+}
 
-	defer cache.nlocker.Unlock(key)
-	defer cache.set(key, r.resourceAdapterInner)
+func (r *resourceAdapter) transform(key string, publish, setContent bool) (*resourceAdapterInner, error) {
+	cache := r.spec.ResourceCache
 
 	b1 := bp.GetBuffer()
 	b2 := bp.GetBuffer()
@@ -347,8 +444,10 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 	defer bp.PutBuffer(b2)
 
 	tctx := &ResourceTransformationCtx{
-		Data:                  make(map[string]interface{}),
+		Ctx:                   r.ctx,
+		Data:                  make(map[string]any),
 		OpenResourcePublisher: r.target.openPublishFileForWriting,
+		DependencyManager:     r.target.GetDependencyManager(),
 	}
 
 	tctx.InMediaType = r.target.MediaType()
@@ -361,7 +460,7 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 
 	contentrc, err := contentReadSeekerCloser(r.target)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	defer contentrc.Close()
@@ -370,7 +469,7 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 	tctx.To = b1
 
 	tctx.InPath = r.target.TargetPath()
-	tctx.SourcePath = tctx.InPath
+	tctx.SourcePath = strings.TrimPrefix(tctx.InPath, "/")
 
 	counter := 0
 	writeToFileCache := false
@@ -405,44 +504,47 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 		}
 
 		newErr := func(err error) error {
-			msg := fmt.Sprintf("%s: failed to transform %q (%s)", strings.ToUpper(tr.Key().Name), tctx.InPath, tctx.InMediaType.Type())
+			msg := fmt.Sprintf("%s: failed to transform %q (%s)", strings.ToUpper(tr.Key().Name), tctx.InPath, tctx.InMediaType.Type)
 
-			if err == herrors.ErrFeatureNotAvailable {
+			if herrors.IsFeatureNotAvailableError(err) {
 				var errMsg string
-				if tr.Key().Name == "postcss" {
+				switch strings.ToLower(tr.Key().Name) {
+				case "postcss":
 					// This transformation is not available in this
 					// Most likely because PostCSS is not installed.
-					errMsg = ". Check your PostCSS installation; install with \"npm install postcss-cli\". See https://gohugo.io/hugo-pipes/postcss/"
-				} else if tr.Key().Name == "tocss" {
-					errMsg = ". Check your Hugo installation; you need the extended version to build SCSS/SASS."
-				} else if tr.Key().Name == "tocss-dart" {
-					errMsg = ". You need dart-sass-embedded in your system $PATH."
+					errMsg = ". You need to install PostCSS. See https://gohugo.io/functions/css/postcss/"
+				case "tailwindcss":
+					errMsg = ". You need to install TailwindCSS CLI. See https://gohugo.io/functions/css/tailwindcss/"
+				case "tocss":
+					errMsg = ". Check your Hugo installation; you need the extended version to build SCSS/SASS with transpiler set to 'libsass'."
+				case "tocss-dart":
+					errMsg = ". You need to install Dart Sass, see https://gohugo.io//functions/css/sass/#dart-sass"
+				case "babel":
+					errMsg = ". You need to install Babel, see https://gohugo.io/functions/js/babel/"
 
-				} else if tr.Key().Name == "babel" {
-					errMsg = ". You need to install Babel, see https://gohugo.io/hugo-pipes/babel/"
 				}
 
-				return errors.Wrap(err, msg+errMsg)
+				return fmt.Errorf(msg+errMsg+": %w", err)
 			}
 
-			return errors.Wrap(err, msg)
+			return fmt.Errorf(msg+": %w", err)
 		}
 
+		bcfg := r.spec.BuildConfig()
 		var tryFileCache bool
-
-		if mayBeCachedOnDisk && r.spec.BuildConfig.UseResourceCache(nil) {
+		if mayBeCachedOnDisk && bcfg.UseResourceCache(nil) {
 			tryFileCache = true
 		} else {
 			err = tr.Transform(tctx)
 			if err != nil && err != herrors.ErrFeatureNotAvailable {
-				return newErr(err)
+				return nil, newErr(err)
 			}
 
 			if mayBeCachedOnDisk {
-				tryFileCache = r.spec.BuildConfig.UseResourceCache(err)
+				tryFileCache = bcfg.UseResourceCache(err)
 			}
 			if err != nil && !tryFileCache {
-				return newErr(err)
+				return nil, newErr(err)
 			}
 		}
 
@@ -450,9 +552,9 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 			f := r.target.tryTransformedFileCache(key, updates)
 			if f == nil {
 				if err != nil {
-					return newErr(err)
+					return nil, newErr(err)
 				}
-				return newErr(errors.Errorf("resource %q not found in file cache", key))
+				return nil, newErr(fmt.Errorf("resource %q not found in file cache", key))
 			}
 			transformedContentr = f
 			updates.sourceFs = cache.fileCache.Fs
@@ -477,7 +579,7 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 	if publish {
 		publicw, err := r.target.openPublishFileForWriting(updates.targetPath)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		publishwriters = append(publishwriters, publicw)
 	}
@@ -487,7 +589,7 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 			// Also write it to the cache
 			fi, metaw, err := cache.writeMeta(key, updates.toTransformedResourceMetadata())
 			if err != nil {
-				return err
+				return nil, err
 			}
 			updates.sourceFilename = &fi.Name
 			updates.sourceFs = cache.fileCache.Fs
@@ -518,7 +620,7 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 	publishw := hugio.NewMultiWriteCloser(publishwriters...)
 	_, err = io.Copy(publishw, transformedContentr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	publishw.Close()
 
@@ -529,11 +631,11 @@ func (r *resourceAdapter) transform(publish, setContent bool) error {
 
 	newTarget, err := r.target.cloneWithUpdates(updates)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	r.target = newTarget
 
-	return nil
+	return r.resourceAdapterInner, nil
 }
 
 func (r *resourceAdapter) init(publish, setContent bool) {
@@ -553,7 +655,7 @@ func (r *resourceAdapter) initTransform(publish, setContent bool) {
 			r.publishOnce = nil
 		}
 
-		r.transformationsErr = r.transform(publish, setContent)
+		r.transformationsErr = r.getOrTransform(publish, setContent)
 		if r.transformationsErr != nil {
 			if r.spec.ErrorSender != nil {
 				r.spec.ErrorSender.SendError(r.transformationsErr)
@@ -569,12 +671,26 @@ func (r *resourceAdapter) initTransform(publish, setContent bool) {
 }
 
 type resourceAdapterInner struct {
+	// The context that started this transformation.
+	ctx context.Context
+
 	target transformableResource
+
+	resource.Staler
 
 	spec *Spec
 
 	// Handles publishing (to /public) if needed.
 	*publishOnce
+}
+
+func (r *resourceAdapterInner) GetIdentityGroup() identity.Identity {
+	return r.target.GetIdentityGroup()
+}
+
+func (r *resourceAdapterInner) StaleVersion() uint32 {
+	// Both of these are incremented on change.
+	return r.Staler.StaleVersion() + r.target.StaleVersion()
 }
 
 type resourceTransformations struct {
@@ -583,12 +699,25 @@ type resourceTransformations struct {
 	transformations     []ResourceTransformation
 }
 
+// hasTransformationPermalinkHash reports whether any of the transformations
+// in the chain creates a permalink that's based on the content, e.g. fingerprint.
+func (r *resourceTransformations) hasTransformationPermalinkHash() bool {
+	for _, t := range r.transformations {
+		if constants.IsResourceTransformationPermalinkHash(t.Key().Name) {
+			return true
+		}
+	}
+	return false
+}
+
 type transformableResource interface {
 	baseResourceInternal
 
 	resource.ContentProvider
 	resource.Resource
 	resource.Identifier
+	resource.Staler
+	resourceCopier
 }
 
 type transformationUpdate struct {
@@ -597,7 +726,7 @@ type transformationUpdate struct {
 	sourceFs       afero.Fs
 	targetPath     string
 	mediaType      media.Type
-	data           map[string]interface{}
+	data           map[string]any
 
 	startCtx ResourceTransformationCtx
 }
@@ -608,7 +737,7 @@ func (u *transformationUpdate) isContentChanged() bool {
 
 func (u *transformationUpdate) toTransformedResourceMetadata() transformedResourceMetadata {
 	return transformedResourceMetadata{
-		MediaTypeV: u.mediaType.Type(),
+		MediaTypeV: u.mediaType.Type,
 		Target:     u.targetPath,
 		MetaData:   u.data,
 	}
@@ -623,9 +752,9 @@ func (u *transformationUpdate) updateFromCtx(ctx *ResourceTransformationCtx) {
 
 // We will persist this information to disk.
 type transformedResourceMetadata struct {
-	Target     string                 `json:"Target"`
-	MediaTypeV string                 `json:"MediaType"`
-	MetaData   map[string]interface{} `json:"Data"`
+	Target     string         `json:"Target"`
+	MediaTypeV string         `json:"MediaType"`
+	MetaData   map[string]any `json:"Data"`
 }
 
 // contentReadSeekerCloser returns a ReadSeekerCloser if possible for a given Resource.

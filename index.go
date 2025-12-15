@@ -15,7 +15,7 @@ func buildIndexFromSite(theHugoPath string, theIndexPath string) {
 	index := createIndex(theIndexPath)
 	defer index.Close()
 	for _, page := range pages {
-		if pageHasTitle(page) && page.Type() != "search" {
+		if pageHasTitle(page, false) && page.Type() != "search" {
 			addPageToIndex(index, page)
 		}
 	}
@@ -38,6 +38,14 @@ func createIndex(path string) bleve.Index {
 	index, err := bleve.New(path, bleve.NewIndexMapping())
 	exitOnError(err)
 	return index
+}
+
+func pageHasTitle(p page.Page, verbose bool) bool {
+	found := len(p.Title()) > 0
+	if !found && verbose {
+		log.Println("WARN: Title is missing in file metadata:", p.File().Path())
+	}
+	return found
 }
 
 // adds a hugo page to the bleve search index

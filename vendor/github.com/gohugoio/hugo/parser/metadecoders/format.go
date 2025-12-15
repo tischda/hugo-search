@@ -16,21 +16,30 @@ package metadecoders
 import (
 	"path/filepath"
 	"strings"
-
-	"github.com/gohugoio/hugo/media"
 )
 
 type Format string
 
 const (
-	// These are the supported metdata  formats in Hugo. Most of these are also
+	// These are the supported metadata  formats in Hugo. Most of these are also
 	// supported as /data formats.
 	ORG  Format = "org"
 	JSON Format = "json"
 	TOML Format = "toml"
 	YAML Format = "yaml"
 	CSV  Format = "csv"
+	XML  Format = "xml"
 )
+
+// FormatFromStrings returns the first non-empty Format from the given strings.
+func FormatFromStrings(ss ...string) Format {
+	for _, s := range ss {
+		if f := FormatFromString(s); f != "" {
+			return f
+		}
+	}
+	return ""
+}
 
 // FormatFromString turns formatStr, typically a file extension without any ".",
 // into a Format. It returns an empty string for unknown formats.
@@ -51,42 +60,37 @@ func FormatFromString(formatStr string) Format {
 		return ORG
 	case "csv":
 		return CSV
+	case "xml":
+		return XML
 	}
 
 	return ""
 }
 
-// FormatFromMediaType gets the Format given a MIME type, empty string
-// if unknown.
-func FormatFromMediaType(m media.Type) Format {
-	for _, suffix := range m.Suffixes() {
-		if f := FormatFromString(suffix); f != "" {
-			return f
-		}
-	}
-
-	return ""
-}
-
-// FormatFromContentString tries to detect the format (JSON, YAML or TOML)
+// FormatFromContentString tries to detect the format (JSON, YAML, TOML or XML)
 // in the given string.
 // It return an empty string if no format could be detected.
 func (d Decoder) FormatFromContentString(data string) Format {
 	csvIdx := strings.IndexRune(data, d.Delimiter)
 	jsonIdx := strings.Index(data, "{")
 	yamlIdx := strings.Index(data, ":")
+	xmlIdx := strings.Index(data, "<")
 	tomlIdx := strings.Index(data, "=")
 
-	if isLowerIndexThan(csvIdx, jsonIdx, yamlIdx, tomlIdx) {
+	if isLowerIndexThan(csvIdx, jsonIdx, yamlIdx, xmlIdx, tomlIdx) {
 		return CSV
 	}
 
-	if isLowerIndexThan(jsonIdx, yamlIdx, tomlIdx) {
+	if isLowerIndexThan(jsonIdx, yamlIdx, xmlIdx, tomlIdx) {
 		return JSON
 	}
 
-	if isLowerIndexThan(yamlIdx, tomlIdx) {
+	if isLowerIndexThan(yamlIdx, xmlIdx, tomlIdx) {
 		return YAML
+	}
+
+	if isLowerIndexThan(xmlIdx, tomlIdx) {
+		return XML
 	}
 
 	if tomlIdx != -1 {

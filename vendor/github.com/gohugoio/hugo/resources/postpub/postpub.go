@@ -14,6 +14,7 @@
 package postpub
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/spf13/cast"
 
+	"github.com/gohugoio/hugo/common/hreflect"
 	"github.com/gohugoio/hugo/common/maps"
 	"github.com/gohugoio/hugo/media"
 	"github.com/gohugoio/hugo/resources/resource"
@@ -29,12 +31,12 @@ import (
 type PostPublishedResource interface {
 	resource.ResourceTypeProvider
 	resource.ResourceLinksProvider
-	resource.ResourceMetaProvider
+	resource.ResourceNameTitleProvider
 	resource.ResourceParamsProvider
 	resource.ResourceDataProvider
 	resource.OriginProvider
 
-	MediaType() map[string]interface{}
+	MediaType() map[string]any
 }
 
 const (
@@ -53,7 +55,7 @@ func NewPostPublishResource(id int, r resource.Resource) PostPublishedResource {
 	}
 }
 
-// postPublishResource holds a Resource to be transformed post publishing.
+// PostPublishResource holds a Resource to be transformed post publishing.
 type PostPublishResource struct {
 	prefix   string
 	delegate resource.Resource
@@ -100,7 +102,7 @@ func (r *PostPublishResource) GetFieldString(pattern string) (string, bool) {
 	case fieldAccessor == "ResourceType":
 		return d.ResourceType(), true
 	case fieldAccessor == "Content":
-		content, err := d.(resource.ContentProvider).Content()
+		content, err := d.(resource.ContentProvider).Content(context.Background())
 		if err != nil {
 			return "", true
 		}
@@ -108,13 +110,13 @@ func (r *PostPublishResource) GetFieldString(pattern string) (string, bool) {
 	case strings.HasPrefix(fieldAccessor, "MediaType"):
 		return r.fieldToString(d.MediaType(), fieldAccessor), true
 	case fieldAccessor == "Data.Integrity":
-		return cast.ToString((d.Data().(map[string]interface{})["Integrity"])), true
+		return cast.ToString((d.Data().(map[string]any)["Integrity"])), true
 	default:
 		panic(fmt.Sprintf("unknown field accessor %q", fieldAccessor))
 	}
 }
 
-func (r *PostPublishResource) fieldToString(receiver interface{}, path string) string {
+func (r *PostPublishResource) fieldToString(receiver any, path string) string {
 	fieldname := strings.Split(path, ".")[1]
 
 	receiverv := reflect.ValueOf(receiver)
@@ -125,7 +127,7 @@ func (r *PostPublishResource) fieldToString(receiver interface{}, path string) s
 	default:
 		v := receiverv.FieldByName(fieldname)
 		if !v.IsValid() {
-			method := receiverv.MethodByName(fieldname)
+			method := hreflect.GetMethodByName(receiverv, fieldname)
 			if method.IsValid() {
 				vals := method.Call(nil)
 				if len(vals) > 0 {
@@ -142,15 +144,15 @@ func (r *PostPublishResource) fieldToString(receiver interface{}, path string) s
 	}
 }
 
-func (r *PostPublishResource) Data() interface{} {
-	m := map[string]interface{}{
+func (r *PostPublishResource) Data() any {
+	m := map[string]any{
 		"Integrity": "",
 	}
 	insertFieldPlaceholders("Data", m, r.field)
 	return m
 }
 
-func (r *PostPublishResource) MediaType() map[string]interface{} {
+func (r *PostPublishResource) MediaType() map[string]any {
 	m := structToMapWithPlaceholders("MediaType", media.Type{}, r.field)
 	return m
 }
@@ -171,7 +173,7 @@ func (r *PostPublishResource) Params() maps.Params {
 	panic(r.fieldNotSupported("Params"))
 }
 
-func (r *PostPublishResource) Content() (interface{}, error) {
+func (r *PostPublishResource) Content(context.Context) (any, error) {
 	return r.field("Content"), nil
 }
 

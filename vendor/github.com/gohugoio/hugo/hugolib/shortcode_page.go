@@ -14,12 +14,48 @@
 package hugolib
 
 import (
+	"context"
 	"html/template"
 
+	"github.com/gohugoio/hugo/common/types"
 	"github.com/gohugoio/hugo/resources/page"
 )
 
-var tocShortcodePlaceholder = createShortcodePlaceholder("TOC", 0)
+// A placeholder for the TableOfContents markup. This is what we pass to the Goldmark etc. renderers.
+var tocShortcodePlaceholder = createShortcodePlaceholder("TOC", 0, 0)
+
+// shortcodeRenderer is typically used to delay rendering of inner shortcodes
+// marked with placeholders in the content.
+type shortcodeRenderer interface {
+	renderShortcode(context.Context) ([]byte, bool, error)
+	renderShortcodeString(context.Context) (string, bool, error)
+}
+
+type shortcodeRenderFunc func(context.Context) ([]byte, bool, error)
+
+func (f shortcodeRenderFunc) renderShortcode(ctx context.Context) ([]byte, bool, error) {
+	return f(ctx)
+}
+
+func (f shortcodeRenderFunc) renderShortcodeString(ctx context.Context) (string, bool, error) {
+	b, has, err := f(ctx)
+	return string(b), has, err
+}
+
+type prerenderedShortcode struct {
+	s           string
+	hasVariants bool
+}
+
+func (p prerenderedShortcode) renderShortcode(context.Context) ([]byte, bool, error) {
+	return []byte(p.s), p.hasVariants, nil
+}
+
+func (p prerenderedShortcode) renderShortcodeString(context.Context) (string, bool, error) {
+	return p.s, p.hasVariants, nil
+}
+
+var zeroShortcode = prerenderedShortcode{}
 
 // This is sent to the shortcodes. They cannot access the content
 // they're a part of. It would cause an infinite regress.
@@ -28,6 +64,8 @@ var tocShortcodePlaceholder = createShortcodePlaceholder("TOC", 0)
 // the best we can do.
 type pageForShortcode struct {
 	page.PageWithoutContent
+	page.TableOfContentsProvider
+	page.MarkupProvider
 	page.ContentProvider
 
 	// We need to replace it after we have rendered it, so provide a
@@ -37,39 +75,57 @@ type pageForShortcode struct {
 	p *pageState
 }
 
+var _ types.Unwrapper = (*pageForShortcode)(nil)
+
 func newPageForShortcode(p *pageState) page.Page {
 	return &pageForShortcode{
-		PageWithoutContent: p,
-		ContentProvider:    page.NopPage,
-		toc:                template.HTML(tocShortcodePlaceholder),
-		p:                  p,
+		PageWithoutContent:      p,
+		TableOfContentsProvider: p,
+		MarkupProvider:          page.NopPage,
+		ContentProvider:         page.NopPage,
+		toc:                     template.HTML(tocShortcodePlaceholder),
+		p:                       p,
 	}
 }
 
-func (p *pageForShortcode) page() page.Page {
+// For internal use.
+func (p *pageForShortcode) Unwrapv() any {
 	return p.PageWithoutContent.(page.Page)
 }
 
-func (p *pageForShortcode) TableOfContents() template.HTML {
-	p.p.enablePlaceholders()
+func (p *pageForShortcode) String() string {
+	return p.p.String()
+}
+
+func (p *pageForShortcode) TableOfContents(context.Context) template.HTML {
 	return p.toc
 }
+
+var _ types.Unwrapper = (*pageForRenderHooks)(nil)
 
 // This is what is sent into the content render hooks (link, image).
 type pageForRenderHooks struct {
 	page.PageWithoutContent
 	page.TableOfContentsProvider
+	page.MarkupProvider
 	page.ContentProvider
+	p *pageState
 }
 
 func newPageForRenderHook(p *pageState) page.Page {
 	return &pageForRenderHooks{
 		PageWithoutContent:      p,
+		MarkupProvider:          page.NopPage,
 		ContentProvider:         page.NopPage,
-		TableOfContentsProvider: page.NopPage,
+		TableOfContentsProvider: p,
+		p:                       p,
 	}
 }
 
-func (p *pageForRenderHooks) page() page.Page {
-	return p.PageWithoutContent.(page.Page)
+func (p *pageForRenderHooks) Unwrapv() any {
+	return p.p
+}
+
+func (p *pageForRenderHooks) String() string {
+	return p.p.String()
 }

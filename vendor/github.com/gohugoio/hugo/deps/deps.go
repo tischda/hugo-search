@@ -1,46 +1,51 @@
 package deps
 
 import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/pkg/errors"
-
+	"github.com/bep/logg"
+	"github.com/gohugoio/hugo/cache/dynacache"
 	"github.com/gohugoio/hugo/cache/filecache"
+	"github.com/gohugoio/hugo/common/hexec"
 	"github.com/gohugoio/hugo/common/loggers"
+	"github.com/gohugoio/hugo/common/maps"
+	"github.com/gohugoio/hugo/common/types"
 	"github.com/gohugoio/hugo/config"
+	"github.com/gohugoio/hugo/config/allconfig"
+	"github.com/gohugoio/hugo/config/security"
 	"github.com/gohugoio/hugo/helpers"
 	"github.com/gohugoio/hugo/hugofs"
-	"github.com/gohugoio/hugo/langs"
+	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/internal/js"
+	"github.com/gohugoio/hugo/internal/warpc"
 	"github.com/gohugoio/hugo/media"
 	"github.com/gohugoio/hugo/resources/page"
+	"github.com/gohugoio/hugo/resources/postpub"
+	"github.com/gohugoio/hugo/tpl/tplimpl"
 
 	"github.com/gohugoio/hugo/metrics"
-	"github.com/gohugoio/hugo/output"
 	"github.com/gohugoio/hugo/resources"
 	"github.com/gohugoio/hugo/source"
 	"github.com/gohugoio/hugo/tpl"
-	"github.com/spf13/cast"
-	jww "github.com/spf13/jwalterweatherman"
+	"github.com/spf13/afero"
 )
 
 // Deps holds dependencies used by many.
 // There will be normally only one instance of deps in play
 // at a given time, i.e. one per Site built.
 type Deps struct {
-
 	// The logger to use.
 	Log loggers.Logger `json:"-"`
 
-	// Used to log errors that may repeat itself many times.
-	LogDistinct loggers.Logger
-
-	// The templates to use. This will usually implement the full tpl.TemplateManager.
-	tmpl tpl.TemplateHandler
-
-	// We use this to parse and execute ad-hoc text templates.
-	textTmpl tpl.TemplateParseFinder
+	ExecHelper *hexec.Exec
 
 	// The file systems to use.
 	Fs *hugofs.Fs `json:"-"`
@@ -58,87 +63,287 @@ type Deps struct {
 	ResourceSpec *resources.Spec
 
 	// The configuration to use
-	Cfg config.Provider `json:"-"`
+	Conf config.AllProvider `json:"-"`
 
-	// The file cache to use.
-	FileCaches filecache.Caches
+	// The memory cache to use.
+	MemCache *dynacache.Cache
 
 	// The translation func to use
-	Translate func(translationID string, templateData interface{}) string `json:"-"`
-
-	// The language in use. TODO(bep) consolidate with site
-	Language *langs.Language
+	Translate func(ctx context.Context, translationID string, templateData any) string `json:"-"`
 
 	// The site building.
 	Site page.Site
 
-	// All the output formats available for the current site.
-	OutputFormatsConfig output.Formats
-
-	templateProvider ResourceProvider
-	WithTemplate     func(templ tpl.TemplateManager) error `json:"-"`
+	TemplateStore *tplimpl.TemplateStore
 
 	// Used in tests
-	OverloadedTemplateFuncs map[string]interface{}
+	OverloadedTemplateFuncs map[string]any
 
-	translationProvider ResourceProvider
+	TranslationProvider ResourceProvider
 
 	Metrics metrics.Provider
 
-	// Timeout is configurable in site config.
-	Timeout time.Duration
-
 	// BuildStartListeners will be notified before a build starts.
-	BuildStartListeners *Listeners
+	BuildStartListeners *Listeners[any]
+
+	// BuildEndListeners will be notified after a build finishes.
+	BuildEndListeners *Listeners[any]
+
+	// OnChangeListeners will be notified when something changes.
+	OnChangeListeners *Listeners[identity.Identity]
 
 	// Resources that gets closed when the build is done or the server shuts down.
-	BuildClosers *Closers
+	BuildClosers *types.Closers
 
-	// Atomic values set during a build.
 	// This is common/global for all sites.
 	BuildState *BuildState
 
-	// Whether we are in running (server) mode
-	Running bool
+	// Misc counters.
+	Counters *Counters
+
+	// Holds RPC dispatchers for Katex etc.
+	// TODO(bep) rethink this re. a plugin setup, but this will have to do for now.
+	WasmDispatchers *warpc.Dispatchers
+
+	// The JS batcher client.
+	JSBatcherClient js.BatcherClient
+
+	isClosed bool
 
 	*globalErrHandler
 }
 
-type globalErrHandler struct {
-	// Channel for some "hard to get to" build errors
-	buildErrors chan error
+func (d Deps) Clone(s page.Site, conf config.AllProvider) (*Deps, error) {
+	d.Conf = conf
+	d.Site = s
+	d.ExecHelper = nil
+	d.ContentSpec = nil
+
+	if err := d.Init(); err != nil {
+		return nil, err
+	}
+
+	return &d, nil
 }
 
-// SendErr sends the error on a channel to be handled later.
+func (d *Deps) GetTemplateStore() *tplimpl.TemplateStore {
+	return d.TemplateStore
+}
+
+func (d *Deps) Init() error {
+	if d.Conf == nil {
+		panic("conf is nil")
+	}
+
+	if d.Fs == nil {
+		// For tests.
+		d.Fs = hugofs.NewFrom(afero.NewMemMapFs(), d.Conf.BaseConfig())
+	}
+
+	if d.Log == nil {
+		d.Log = loggers.NewDefault()
+	}
+
+	if d.globalErrHandler == nil {
+		d.globalErrHandler = &globalErrHandler{
+			logger: d.Log,
+		}
+	}
+	if d.BuildState == nil {
+		d.BuildState = &BuildState{}
+	}
+	if d.Counters == nil {
+		d.Counters = &Counters{}
+	}
+	if d.BuildState.DeferredExecutions == nil {
+		if d.BuildState.DeferredExecutionsGroupedByRenderingContext == nil {
+			d.BuildState.DeferredExecutionsGroupedByRenderingContext = make(map[tpl.RenderingContext]*DeferredExecutions)
+		}
+		d.BuildState.DeferredExecutions = &DeferredExecutions{
+			Executions:              maps.NewCache[string, *tpl.DeferredExecution](),
+			FilenamesWithPostPrefix: maps.NewCache[string, bool](),
+		}
+	}
+
+	if d.BuildStartListeners == nil {
+		d.BuildStartListeners = &Listeners[any]{}
+	}
+
+	if d.BuildEndListeners == nil {
+		d.BuildEndListeners = &Listeners[any]{}
+	}
+
+	if d.BuildClosers == nil {
+		d.BuildClosers = &types.Closers{}
+	}
+
+	if d.OnChangeListeners == nil {
+		d.OnChangeListeners = &Listeners[identity.Identity]{}
+	}
+
+	if d.Metrics == nil && d.Conf.TemplateMetrics() {
+		d.Metrics = metrics.NewProvider(d.Conf.TemplateMetricsHints())
+	}
+
+	if d.ExecHelper == nil {
+		d.ExecHelper = hexec.New(d.Conf.GetConfigSection("security").(security.Config), d.Conf.WorkingDir(), d.Log)
+	}
+
+	if d.MemCache == nil {
+		d.MemCache = dynacache.New(dynacache.Options{Watching: d.Conf.Watching(), Log: d.Log})
+	}
+
+	if d.PathSpec == nil {
+		hashBytesReceiverFunc := func(name string, match []byte) {
+			s := string(match)
+			switch s {
+			case postpub.PostProcessPrefix:
+				d.BuildState.AddFilenameWithPostPrefix(name)
+			case tpl.HugoDeferredTemplatePrefix:
+				d.BuildState.DeferredExecutions.FilenamesWithPostPrefix.Set(name, true)
+			}
+		}
+
+		// Skip binary files.
+		mediaTypes := d.Conf.GetConfigSection("mediaTypes").(media.Types)
+		hashBytesShouldCheck := func(name string) bool {
+			ext := strings.TrimPrefix(filepath.Ext(name), ".")
+			return mediaTypes.IsTextSuffix(ext)
+		}
+		d.Fs.PublishDir = hugofs.NewHasBytesReceiver(
+			d.Fs.PublishDir,
+			hashBytesShouldCheck,
+			hashBytesReceiverFunc,
+			[]byte(tpl.HugoDeferredTemplatePrefix),
+			[]byte(postpub.PostProcessPrefix))
+
+		pathSpec, err := helpers.NewPathSpec(d.Fs, d.Conf, d.Log)
+		if err != nil {
+			return err
+		}
+		d.PathSpec = pathSpec
+	} else {
+		var err error
+		d.PathSpec, err = helpers.NewPathSpecWithBaseBaseFsProvided(d.Fs, d.Conf, d.Log, d.PathSpec.BaseFs)
+		if err != nil {
+			return err
+		}
+	}
+
+	if d.ContentSpec == nil {
+		contentSpec, err := helpers.NewContentSpec(d.Conf, d.Log, d.Content.Fs, d.ExecHelper)
+		if err != nil {
+			return err
+		}
+		d.ContentSpec = contentSpec
+	}
+
+	if d.SourceSpec == nil {
+		d.SourceSpec = source.NewSourceSpec(d.PathSpec, nil, d.Fs.Source)
+	}
+
+	var common *resources.SpecCommon
+	if d.ResourceSpec != nil {
+		common = d.ResourceSpec.SpecCommon
+	}
+
+	fileCaches, err := filecache.NewCaches(d.PathSpec)
+	if err != nil {
+		return fmt.Errorf("failed to create file caches from configuration: %w", err)
+	}
+
+	resourceSpec, err := resources.NewSpec(d.PathSpec, common, fileCaches, d.MemCache, d.BuildState, d.Log, d, d.ExecHelper, d.BuildClosers, d.BuildState)
+	if err != nil {
+		return fmt.Errorf("failed to create resource spec: %w", err)
+	}
+	d.ResourceSpec = resourceSpec
+
+	return nil
+}
+
+// TODO(bep) rework this to get it in line with how we manage templates.
+func (d *Deps) Compile(prototype *Deps) error {
+	var err error
+	if prototype == nil {
+
+		if err = d.TranslationProvider.NewResource(d); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	if err = d.TranslationProvider.CloneResource(d, prototype); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// MkdirTemp returns a temporary directory path that will be cleaned up on exit.
+func (d Deps) MkdirTemp(pattern string) (string, error) {
+	filename, err := os.MkdirTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	d.BuildClosers.Add(
+		types.CloserFunc(
+			func() error {
+				return os.RemoveAll(filename)
+			},
+		),
+	)
+
+	return filename, nil
+}
+
+type globalErrHandler struct {
+	logger loggers.Logger
+
+	// Channel for some "hard to get to" build errors
+	buildErrors chan error
+	// Used to signal that the build is done.
+	quit chan struct{}
+}
+
+// SendError sends the error on a channel to be handled later.
 // This can be used in situations where returning and aborting the current
 // operation isn't practical.
 func (e *globalErrHandler) SendError(err error) {
 	if e.buildErrors != nil {
 		select {
+		case <-e.quit:
 		case e.buildErrors <- err:
 		default:
 		}
 		return
 	}
-
-	jww.ERROR.Println(err)
+	e.logger.Errorln(err)
 }
 
 func (e *globalErrHandler) StartErrorCollector() chan error {
+	e.quit = make(chan struct{})
 	e.buildErrors = make(chan error, 10)
 	return e.buildErrors
 }
 
+func (e *globalErrHandler) StopErrorCollector() {
+	if e.buildErrors != nil {
+		close(e.quit)
+		close(e.buildErrors)
+	}
+}
+
 // Listeners represents an event listener.
-type Listeners struct {
+type Listeners[T any] struct {
 	sync.Mutex
 
 	// A list of funcs to be notified about an event.
-	listeners []func()
+	// If the return value is true, the listener will be removed.
+	listeners []func(...T) bool
 }
 
 // Add adds a function to a Listeners instance.
-func (b *Listeners) Add(f func()) {
+func (b *Listeners[T]) Add(f func(...T) bool) {
 	if b == nil {
 		return
 	}
@@ -148,284 +353,146 @@ func (b *Listeners) Add(f func()) {
 }
 
 // Notify executes all listener functions.
-func (b *Listeners) Notify() {
+func (b *Listeners[T]) Notify(vs ...T) {
 	b.Lock()
 	defer b.Unlock()
+	temp := b.listeners[:0]
 	for _, notify := range b.listeners {
-		notify()
+		if !notify(vs...) {
+			temp = append(temp, notify)
+		}
 	}
+	b.listeners = temp
 }
 
 // ResourceProvider is used to create and refresh, and clone resources needed.
 type ResourceProvider interface {
-	Update(deps *Deps) error
-	Clone(deps *Deps) error
-}
-
-func (d *Deps) Tmpl() tpl.TemplateHandler {
-	return d.tmpl
-}
-
-func (d *Deps) TextTmpl() tpl.TemplateParseFinder {
-	return d.textTmpl
-}
-
-func (d *Deps) SetTmpl(tmpl tpl.TemplateHandler) {
-	d.tmpl = tmpl
-}
-
-func (d *Deps) SetTextTmpl(tmpl tpl.TemplateParseFinder) {
-	d.textTmpl = tmpl
-}
-
-// LoadResources loads translations and templates.
-func (d *Deps) LoadResources() error {
-	// Note that the translations need to be loaded before the templates.
-	if err := d.translationProvider.Update(d); err != nil {
-		return errors.Wrap(err, "loading translations")
-	}
-
-	if err := d.templateProvider.Update(d); err != nil {
-		return errors.Wrap(err, "loading templates")
-	}
-
-	return nil
-}
-
-// New initializes a Dep struct.
-// Defaults are set for nil values,
-// but TemplateProvider, TranslationProvider and Language are always required.
-func New(cfg DepsCfg) (*Deps, error) {
-	var (
-		logger = cfg.Logger
-		fs     = cfg.Fs
-	)
-
-	if cfg.TemplateProvider == nil {
-		panic("Must have a TemplateProvider")
-	}
-
-	if cfg.TranslationProvider == nil {
-		panic("Must have a TranslationProvider")
-	}
-
-	if cfg.Language == nil {
-		panic("Must have a Language")
-	}
-
-	if logger == nil {
-		logger = loggers.NewErrorLogger()
-	}
-
-	if fs == nil {
-		// Default to the production file system.
-		fs = hugofs.NewDefault(cfg.Language)
-	}
-
-	if cfg.MediaTypes == nil {
-		cfg.MediaTypes = media.DefaultTypes
-	}
-
-	if cfg.OutputFormats == nil {
-		cfg.OutputFormats = output.DefaultFormats
-	}
-
-	ps, err := helpers.NewPathSpec(fs, cfg.Language, logger)
-	if err != nil {
-		return nil, errors.Wrap(err, "create PathSpec")
-	}
-
-	fileCaches, err := filecache.NewCaches(ps)
-	if err != nil {
-		return nil, errors.WithMessage(err, "failed to create file caches from configuration")
-	}
-
-	errorHandler := &globalErrHandler{}
-	buildState := &BuildState{}
-
-	resourceSpec, err := resources.NewSpec(ps, fileCaches, buildState, logger, errorHandler, cfg.OutputFormats, cfg.MediaTypes)
-	if err != nil {
-		return nil, err
-	}
-
-	contentSpec, err := helpers.NewContentSpec(cfg.Language, logger, ps.BaseFs.Content.Fs)
-	if err != nil {
-		return nil, err
-	}
-
-	sp := source.NewSourceSpec(ps, nil, fs.Source)
-
-	timeoutms := cfg.Language.GetInt("timeout")
-	if timeoutms <= 0 {
-		timeoutms = 3000
-	}
-
-	ignoreErrors := cast.ToStringSlice(cfg.Cfg.Get("ignoreErrors"))
-	ignorableLogger := loggers.NewIgnorableLogger(logger, ignoreErrors...)
-
-	logDistinct := helpers.NewDistinctLogger(logger)
-
-	d := &Deps{
-		Fs:                      fs,
-		Log:                     ignorableLogger,
-		LogDistinct:             logDistinct,
-		templateProvider:        cfg.TemplateProvider,
-		translationProvider:     cfg.TranslationProvider,
-		WithTemplate:            cfg.WithTemplate,
-		OverloadedTemplateFuncs: cfg.OverloadedTemplateFuncs,
-		PathSpec:                ps,
-		ContentSpec:             contentSpec,
-		SourceSpec:              sp,
-		ResourceSpec:            resourceSpec,
-		Cfg:                     cfg.Language,
-		Language:                cfg.Language,
-		Site:                    cfg.Site,
-		FileCaches:              fileCaches,
-		BuildStartListeners:     &Listeners{},
-		BuildClosers:            &Closers{},
-		BuildState:              buildState,
-		Running:                 cfg.Running,
-		Timeout:                 time.Duration(timeoutms) * time.Millisecond,
-		globalErrHandler:        errorHandler,
-	}
-
-	if cfg.Cfg.GetBool("templateMetrics") {
-		d.Metrics = metrics.NewProvider(cfg.Cfg.GetBool("templateMetricsHints"))
-	}
-
-	return d, nil
+	NewResource(dst *Deps) error
+	CloneResource(dst, src *Deps) error
 }
 
 func (d *Deps) Close() error {
+	if d.isClosed {
+		return nil
+	}
+	d.isClosed = true
+
+	if d.MemCache != nil {
+		d.MemCache.Stop()
+	}
+	if d.WasmDispatchers != nil {
+		d.WasmDispatchers.Close()
+	}
 	return d.BuildClosers.Close()
-}
-
-// ForLanguage creates a copy of the Deps with the language dependent
-// parts switched out.
-func (d Deps) ForLanguage(cfg DepsCfg, onCreated func(d *Deps) error) (*Deps, error) {
-	l := cfg.Language
-	var err error
-
-	d.PathSpec, err = helpers.NewPathSpecWithBaseBaseFsProvided(d.Fs, l, d.Log, d.BaseFs)
-	if err != nil {
-		return nil, err
-	}
-
-	d.ContentSpec, err = helpers.NewContentSpec(l, d.Log, d.BaseFs.Content.Fs)
-	if err != nil {
-		return nil, err
-	}
-
-	d.Site = cfg.Site
-
-	// These are common for all sites, so reuse.
-	// TODO(bep) clean up these inits.
-	resourceCache := d.ResourceSpec.ResourceCache
-	postBuildAssets := d.ResourceSpec.PostBuildAssets
-	d.ResourceSpec, err = resources.NewSpec(d.PathSpec, d.ResourceSpec.FileCaches, d.BuildState, d.Log, d.globalErrHandler, cfg.OutputFormats, cfg.MediaTypes)
-	if err != nil {
-		return nil, err
-	}
-	d.ResourceSpec.ResourceCache = resourceCache
-	d.ResourceSpec.PostBuildAssets = postBuildAssets
-
-	d.Cfg = l
-	d.Language = l
-
-	if onCreated != nil {
-		if err = onCreated(&d); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := d.translationProvider.Clone(&d); err != nil {
-		return nil, err
-	}
-
-	if err := d.templateProvider.Clone(&d); err != nil {
-		return nil, err
-	}
-
-	d.BuildStartListeners = &Listeners{}
-
-	return &d, nil
 }
 
 // DepsCfg contains configuration options that can be used to configure Hugo
 // on a global level, i.e. logging etc.
 // Nil values will be given default values.
 type DepsCfg struct {
+	// The logger to use. Only set in some tests.
+	// TODO(bep) get rid of this.
+	TestLogger loggers.Logger
 
-	// The Logger to use.
-	Logger loggers.Logger
+	// The logging level to use.
+	LogLevel logg.Level
+
+	// Logging output.
+	StdErr io.Writer
+
+	// The console output.
+	StdOut io.Writer
 
 	// The file systems to use
 	Fs *hugofs.Fs
 
-	// The language to use.
-	Language *langs.Language
-
 	// The Site in use
 	Site page.Site
 
-	// The configuration to use.
-	Cfg config.Provider
-
-	// The media types configured.
-	MediaTypes media.Types
-
-	// The output formats configured.
-	OutputFormats output.Formats
+	Configs *allconfig.Configs
 
 	// Template handling.
 	TemplateProvider ResourceProvider
-	WithTemplate     func(templ tpl.TemplateManager) error
-	// Used in tests
-	OverloadedTemplateFuncs map[string]interface{}
 
 	// i18n handling.
 	TranslationProvider ResourceProvider
 
-	// Whether we are in running (server) mode
-	Running bool
+	// ChangesFromBuild for changes passed back to the server/watch process.
+	ChangesFromBuild chan []identity.Identity
 }
 
-// BuildState are flags that may be turned on during a build.
+// BuildState are state used during a build.
 type BuildState struct {
 	counter uint64
+
+	mu sync.Mutex // protects state below.
+
+	OnSignalRebuild func(ids ...identity.Identity)
+
+	// A set of filenames in /public that
+	// contains a post-processing prefix.
+	filenamesWithPostPrefix map[string]bool
+
+	DeferredExecutions *DeferredExecutions
+
+	// Deferred executions grouped by rendering context.
+	DeferredExecutionsGroupedByRenderingContext map[tpl.RenderingContext]*DeferredExecutions
+}
+
+// Misc counters.
+type Counters struct {
+	// Counter for the math.Counter function.
+	MathCounter atomic.Uint64
+}
+
+type DeferredExecutions struct {
+	// A set of filenames in /public that
+	// contains a post-processing prefix.
+	FilenamesWithPostPrefix *maps.Cache[string, bool]
+
+	// Maps a placeholder to a deferred execution.
+	Executions *maps.Cache[string, *tpl.DeferredExecution]
+}
+
+var _ identity.SignalRebuilder = (*BuildState)(nil)
+
+// StartStageRender will be called before a stage is rendered.
+func (b *BuildState) StartStageRender(stage tpl.RenderingContext) {
+}
+
+// StopStageRender will be called after a stage is rendered.
+func (b *BuildState) StopStageRender(stage tpl.RenderingContext) {
+	b.DeferredExecutionsGroupedByRenderingContext[stage] = b.DeferredExecutions
+	b.DeferredExecutions = &DeferredExecutions{
+		Executions:              maps.NewCache[string, *tpl.DeferredExecution](),
+		FilenamesWithPostPrefix: maps.NewCache[string, bool](),
+	}
+}
+
+func (b *BuildState) SignalRebuild(ids ...identity.Identity) {
+	b.OnSignalRebuild(ids...)
+}
+
+func (b *BuildState) AddFilenameWithPostPrefix(filename string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.filenamesWithPostPrefix == nil {
+		b.filenamesWithPostPrefix = make(map[string]bool)
+	}
+	b.filenamesWithPostPrefix[filename] = true
+}
+
+func (b *BuildState) GetFilenamesWithPostPrefix() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var filenames []string
+	for filename := range b.filenamesWithPostPrefix {
+		filenames = append(filenames, filename)
+	}
+	sort.Strings(filenames)
+	return filenames
 }
 
 func (b *BuildState) Incr() int {
 	return int(atomic.AddUint64(&b.counter, uint64(1)))
-}
-
-func NewBuildState() BuildState {
-	return BuildState{}
-}
-
-type Closer interface {
-	Close() error
-}
-
-type Closers struct {
-	mu sync.Mutex
-	cs []Closer
-}
-
-func (cs *Closers) Add(c Closer) {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	cs.cs = append(cs.cs, c)
-}
-
-func (cs *Closers) Close() error {
-	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	for _, c := range cs.cs {
-		c.Close()
-	}
-
-	cs.cs = cs.cs[:0]
-
-	return nil
 }

@@ -30,9 +30,10 @@ type Config struct {
 	Disqus          Disqus
 	GoogleAnalytics GoogleAnalytics
 	Instagram       Instagram
-	Twitter         Twitter
+	Twitter         Twitter // deprecated in favor of X in v0.141.0
 	Vimeo           Vimeo
 	YouTube         YouTube
+	X               X
 }
 
 // Disqus holds the privacy configuration settings related to the Disqus template.
@@ -44,15 +45,9 @@ type Disqus struct {
 type GoogleAnalytics struct {
 	Service `mapstructure:",squash"`
 
-	// Enabling this will disable the use of Cookies and use Session Storage to Store the GA Client ID.
-	UseSessionStorage bool
-
 	// Enabling this will make the GA templates respect the
 	// "Do Not Track" HTTP header. See  https://www.paulfurley.com/google-analytics-dnt/.
 	RespectDoNotTrack bool
-
-	// Enabling this will make it so the users' IP addresses are anonymized within Google Analytics.
-	AnonymizeIP bool
 }
 
 // Instagram holds the privacy configuration settings related to the Instagram shortcode.
@@ -64,7 +59,8 @@ type Instagram struct {
 	Simple bool
 }
 
-// Twitter holds the privacy configuration settingsrelated to the Twitter shortcode.
+// Twitter holds the privacy configuration settings related to the Twitter shortcode.
+// Deprecated in favor of X in v0.141.0.
 type Twitter struct {
 	Service `mapstructure:",squash"`
 
@@ -76,7 +72,7 @@ type Twitter struct {
 	Simple bool
 }
 
-// Vimeo holds the privacy configuration settingsrelated to the Vimeo shortcode.
+// Vimeo holds the privacy configuration settings related to the Vimeo shortcode.
 type Vimeo struct {
 	Service `mapstructure:",squash"`
 
@@ -90,7 +86,7 @@ type Vimeo struct {
 	Simple bool
 }
 
-// YouTube holds the privacy configuration settingsrelated to the YouTube shortcode.
+// YouTube holds the privacy configuration settings related to the YouTube shortcode.
 type YouTube struct {
 	Service `mapstructure:",squash"`
 
@@ -98,6 +94,20 @@ type YouTube struct {
 	// YouTube won’t store information about visitors on your website
 	// unless the user plays the embedded video.
 	PrivacyEnhanced bool
+}
+
+// X holds the privacy configuration settings related to the X shortcode.
+type X struct {
+	Service `mapstructure:",squash"`
+
+	// When set to true, the X post and its embedded page on your site are not
+	// used for purposes that include personalized suggestions and personalized
+	// ads.
+	EnableDNT bool
+
+	// If simple mode is enabled, a static and no-JS version of the X post will
+	// be built.
+	Simple bool
 }
 
 // DecodeConfig creates a privacy Config from a given Hugo configuration.

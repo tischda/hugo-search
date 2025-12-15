@@ -17,20 +17,29 @@ package time
 import (
 	"fmt"
 	"time"
-	_time "time"
 
+	"github.com/gohugoio/hugo/cache/dynacache"
 	"github.com/gohugoio/hugo/common/htime"
-
-	"github.com/gohugoio/locales"
+	"github.com/gohugoio/hugo/deps"
 
 	"github.com/spf13/cast"
 )
 
 // New returns a new instance of the time-namespaced template functions.
-func New(translator locales.Translator, location *time.Location) *Namespace {
+func New(timeFormatter htime.TimeFormatter, location *time.Location, deps *deps.Deps) *Namespace {
+	if deps.MemCache == nil {
+		panic("must provide MemCache")
+	}
+
 	return &Namespace{
-		timeFormatter: htime.NewTimeFormatter(translator),
+		timeFormatter: timeFormatter,
 		location:      location,
+		deps:          deps,
+		cacheIn: dynacache.GetOrCreatePartition[string, *time.Location](
+			deps.MemCache,
+			"/tmpl/time/in",
+			dynacache.OptionsPartition{Weight: 30, ClearWhen: dynacache.ClearNever},
+		),
 	}
 }
 
@@ -38,31 +47,31 @@ func New(translator locales.Translator, location *time.Location) *Namespace {
 type Namespace struct {
 	timeFormatter htime.TimeFormatter
 	location      *time.Location
+	deps          *deps.Deps
+	cacheIn       *dynacache.Partition[string, *time.Location]
 }
 
 // AsTime converts the textual representation of the datetime string into
 // a time.Time interface.
-func (ns *Namespace) AsTime(v interface{}, args ...interface{}) (interface{}, error) {
+func (ns *Namespace) AsTime(v any, args ...any) (any, error) {
 	loc := ns.location
 	if len(args) > 0 {
 		locStr, err := cast.ToStringE(args[0])
 		if err != nil {
 			return nil, err
 		}
-		loc, err = _time.LoadLocation(locStr)
+		loc, err = time.LoadLocation(locStr)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	return htime.ToTimeInDefaultLocationE(v, loc)
-
 }
 
-// Format converts the textual representation of the datetime string into
-// the other form or returns it of the time.Time value. These are formatted
-// with the layout string
-func (ns *Namespace) Format(layout string, v interface{}) (string, error) {
+// Format converts the textual representation of the datetime string in v into
+// time.Time if needed and formats it with the given layout.
+func (ns *Namespace) Format(layout string, v any) (string, error) {
 	t, err := htime.ToTimeInDefaultLocationE(v, ns.location)
 	if err != nil {
 		return "", err
@@ -71,45 +80,60 @@ func (ns *Namespace) Format(layout string, v interface{}) (string, error) {
 	return ns.timeFormatter.Format(t, layout), nil
 }
 
-// Now returns the current local time.
-func (ns *Namespace) Now() _time.Time {
-	return _time.Now()
+// Now returns the current local time or `clock` time
+func (ns *Namespace) Now() time.Time {
+	return htime.Now()
 }
 
-// ParseDuration parses a duration string.
+// In returns the time t in the IANA time zone specified by timeZoneName.
+// If timeZoneName is "" or "UTC", the time is returned in UTC.
+// If timeZoneName is "Local", the time is returned in the system's local time zone.
+// Otherwise, timeZoneName must be a valid IANA location name (e.g., "Europe/Oslo").
+func (ns *Namespace) In(timeZoneName string, t time.Time) (time.Time, error) {
+	location, err := ns.cacheIn.GetOrCreate(dynacache.CleanKey(timeZoneName), func(string) (*time.Location, error) {
+		return time.LoadLocation(timeZoneName)
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return t.In(location), nil
+}
+
+// ParseDuration parses the duration string s.
 // A duration string is a possibly signed sequence of
 // decimal numbers, each with optional fraction and a unit suffix,
 // such as "300ms", "-1.5h" or "2h45m".
 // Valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h".
 // See https://golang.org/pkg/time/#ParseDuration
-func (ns *Namespace) ParseDuration(in interface{}) (_time.Duration, error) {
-	s, err := cast.ToStringE(in)
+func (ns *Namespace) ParseDuration(s any) (time.Duration, error) {
+	ss, err := cast.ToStringE(s)
 	if err != nil {
 		return 0, err
 	}
 
-	return _time.ParseDuration(s)
+	return time.ParseDuration(ss)
 }
 
-var durationUnits = map[string]_time.Duration{
-	"nanosecond":  _time.Nanosecond,
-	"ns":          _time.Nanosecond,
-	"microsecond": _time.Microsecond,
-	"us":          _time.Microsecond,
-	"µs":          _time.Microsecond,
-	"millisecond": _time.Millisecond,
-	"ms":          _time.Millisecond,
-	"second":      _time.Second,
-	"s":           _time.Second,
-	"minute":      _time.Minute,
-	"m":           _time.Minute,
-	"hour":        _time.Hour,
-	"h":           _time.Hour,
+var durationUnits = map[string]time.Duration{
+	"nanosecond":  time.Nanosecond,
+	"ns":          time.Nanosecond,
+	"microsecond": time.Microsecond,
+	"us":          time.Microsecond,
+	"µs":          time.Microsecond,
+	"millisecond": time.Millisecond,
+	"ms":          time.Millisecond,
+	"second":      time.Second,
+	"s":           time.Second,
+	"minute":      time.Minute,
+	"m":           time.Minute,
+	"hour":        time.Hour,
+	"h":           time.Hour,
 }
 
 // Duration converts the given number to a time.Duration.
 // Unit is one of nanosecond/ns, microsecond/us/µs, millisecond/ms, second/s, minute/m or hour/h.
-func (ns *Namespace) Duration(unit interface{}, number interface{}) (_time.Duration, error) {
+func (ns *Namespace) Duration(unit any, number any) (time.Duration, error) {
 	unitStr, err := cast.ToStringE(unit)
 	if err != nil {
 		return 0, err
@@ -122,5 +146,5 @@ func (ns *Namespace) Duration(unit interface{}, number interface{}) (_time.Durat
 	if err != nil {
 		return 0, err
 	}
-	return _time.Duration(n) * unitDuration, nil
+	return time.Duration(n) * unitDuration, nil
 }

@@ -3,8 +3,9 @@ package tracker
 import (
 	"bytes"
 	"fmt"
+	"sync"
 
-	"github.com/pelletier/go-toml/v2/internal/ast"
+	"github.com/pelletier/go-toml/v2/unstable"
 )
 
 type keyKind uint8
@@ -54,80 +55,130 @@ func (k keyKind) String() string {
 type SeenTracker struct {
 	entries    []entry
 	currentIdx int
-	nextID     int
+}
+
+var pool = sync.Pool{
+	New: func() interface{} {
+		return &SeenTracker{}
+	},
+}
+
+func (s *SeenTracker) reset() {
+	// Always contains a root element at index 0.
+	s.currentIdx = 0
+	if len(s.entries) == 0 {
+		s.entries = make([]entry, 1, 2)
+	} else {
+		s.entries = s.entries[:1]
+	}
+	s.entries[0].child = -1
+	s.entries[0].next = -1
 }
 
 type entry struct {
-	id       int
-	parent   int
+	// Use -1 to indicate no child or no sibling.
+	child int
+	next  int
+
 	name     []byte
 	kind     keyKind
 	explicit bool
+	kv       bool
 }
 
-// Remove all descendent of node at position idx.
-func (s *SeenTracker) clear(idx int) {
-	p := s.entries[idx].id
-	rest := clear(p, s.entries[idx+1:])
-	s.entries = s.entries[:idx+1+len(rest)]
-}
-
-func clear(parentID int, entries []entry) []entry {
-	for i := 0; i < len(entries); {
-		if entries[i].parent == parentID {
-			id := entries[i].id
-			copy(entries[i:], entries[i+1:])
-			entries = entries[:len(entries)-1]
-			rest := clear(id, entries[i:])
-			entries = entries[:i+len(rest)]
-		} else {
-			i++
+// Find the index of the child of parentIdx with key k. Returns -1 if
+// it does not exist.
+func (s *SeenTracker) find(parentIdx int, k []byte) int {
+	for i := s.entries[parentIdx].child; i >= 0; i = s.entries[i].next {
+		if bytes.Equal(s.entries[i].name, k) {
+			return i
 		}
 	}
-	return entries
+	return -1
 }
 
-func (s *SeenTracker) create(parentIdx int, name []byte, kind keyKind, explicit bool) int {
-	parentID := s.id(parentIdx)
+// Remove all descendants of node at position idx.
+func (s *SeenTracker) clear(idx int) {
+	if idx >= len(s.entries) {
+		return
+	}
 
-	idx := len(s.entries)
-	s.entries = append(s.entries, entry{
-		id:       s.nextID,
-		parent:   parentID,
+	for i := s.entries[idx].child; i >= 0; {
+		next := s.entries[i].next
+		n := s.entries[0].next
+		s.entries[0].next = i
+		s.entries[i].next = n
+		s.entries[i].name = nil
+		s.clear(i)
+		i = next
+	}
+
+	s.entries[idx].child = -1
+}
+
+func (s *SeenTracker) create(parentIdx int, name []byte, kind keyKind, explicit bool, kv bool) int {
+	e := entry{
+		child: -1,
+		next:  s.entries[parentIdx].child,
+
 		name:     name,
 		kind:     kind,
 		explicit: explicit,
-	})
-	s.nextID++
+		kv:       kv,
+	}
+	var idx int
+	if s.entries[0].next >= 0 {
+		idx = s.entries[0].next
+		s.entries[0].next = s.entries[idx].next
+		s.entries[idx] = e
+	} else {
+		idx = len(s.entries)
+		s.entries = append(s.entries, e)
+	}
+
+	s.entries[parentIdx].child = idx
+
 	return idx
 }
 
-// CheckExpression takes a top-level node and checks that it does not contain keys
-// that have been seen in previous calls, and validates that types are consistent.
-func (s *SeenTracker) CheckExpression(node *ast.Node) error {
+func (s *SeenTracker) setExplicitFlag(parentIdx int) {
+	for i := s.entries[parentIdx].child; i >= 0; i = s.entries[i].next {
+		if s.entries[i].kv {
+			s.entries[i].explicit = true
+			s.entries[i].kv = false
+		}
+		s.setExplicitFlag(i)
+	}
+}
+
+// CheckExpression takes a top-level node and checks that it does not contain
+// keys that have been seen in previous calls, and validates that types are
+// consistent. It returns true if it is the first time this node's key is seen.
+// Useful to clear array tables on first use.
+func (s *SeenTracker) CheckExpression(node *unstable.Node) (bool, error) {
 	if s.entries == nil {
-		// Skip ID = 0 to remove the confusion between nodes whose parent has
-		// id 0 and root nodes (parent id is 0 because it's the zero value).
-		s.nextID = 1
-		// Start unscoped, so idx is negative.
-		s.currentIdx = -1
+		s.reset()
 	}
 	switch node.Kind {
-	case ast.KeyValue:
+	case unstable.KeyValue:
 		return s.checkKeyValue(node)
-	case ast.Table:
+	case unstable.Table:
 		return s.checkTable(node)
-	case ast.ArrayTable:
+	case unstable.ArrayTable:
 		return s.checkArrayTable(node)
 	default:
 		panic(fmt.Errorf("this should not be a top level node type: %s", node.Kind))
 	}
 }
 
-func (s *SeenTracker) checkTable(node *ast.Node) error {
+func (s *SeenTracker) checkTable(node *unstable.Node) (bool, error) {
+	if s.currentIdx >= 0 {
+		s.setExplicitFlag(s.currentIdx)
+	}
+
 	it := node.Key()
 
-	parentIdx := -1
+	parentIdx := 0
 
 	// This code is duplicated in checkArrayTable. This is because factoring
 	// it in a function requires to copy the iterator, or allocate it to the
@@ -142,7 +193,12 @@ func (s *SeenTracker) checkTable(node *ast.Node) error {
 		idx := s.find(parentIdx, k)
 
 		if idx < 0 {
-			idx = s.create(parentIdx, k, tableKind, false)
+			idx = s.create(parentIdx, k, tableKind, false, false)
+		} else {
+			entry := s.entries[idx]
+			if entry.kind == valueKind {
+				return false, fmt.Errorf("toml: expected %s to be a table, not a %s", string(k), entry.kind)
+			}
 		}
 		parentIdx = idx
 	}
@@ -150,28 +206,34 @@ func (s *SeenTracker) checkTable(node *ast.Node) error {
 	k := it.Node().Data
 	idx := s.find(parentIdx, k)
 
+	first := false
 	if idx >= 0 {
 		kind := s.entries[idx].kind
 		if kind != tableKind {
-			return fmt.Errorf("toml: key %s should be a table, not a %s", string(k), kind)
+			return false, fmt.Errorf("toml: key %s should be a table, not a %s", string(k), kind)
 		}
 		if s.entries[idx].explicit {
-			return fmt.Errorf("toml: table %s already exists", string(k))
+			return false, fmt.Errorf("toml: table %s already exists", string(k))
 		}
 		s.entries[idx].explicit = true
 	} else {
-		idx = s.create(parentIdx, k, tableKind, true)
+		idx = s.create(parentIdx, k, tableKind, true, false)
+		first = true
 	}
 
 	s.currentIdx = idx
 
-	return nil
+	return first, nil
 }
 
-func (s *SeenTracker) checkArrayTable(node *ast.Node) error {
+func (s *SeenTracker) checkArrayTable(node *unstable.Node) (bool, error) {
+	if s.currentIdx >= 0 {
+		s.setExplicitFlag(s.currentIdx)
+	}
+
 	it := node.Key()
 
-	parentIdx := -1
+	parentIdx := 0
 
 	for it.Next() {
 		if it.IsLast() {
@@ -183,77 +245,114 @@ func (s *SeenTracker) checkArrayTable(node *ast.Node) error {
 		idx := s.find(parentIdx, k)
 
 		if idx < 0 {
-			idx = s.create(parentIdx, k, tableKind, false)
+			idx = s.create(parentIdx, k, tableKind, false, false)
+		} else {
+			entry := s.entries[idx]
+			if entry.kind == valueKind {
+				return false, fmt.Errorf("toml: expected %s to be a table, not a %s", string(k), entry.kind)
+			}
 		}
+
 		parentIdx = idx
 	}
 
 	k := it.Node().Data
 	idx := s.find(parentIdx, k)
 
-	if idx >= 0 {
+	firstTime := idx < 0
+	if firstTime {
+		idx = s.create(parentIdx, k, arrayTableKind, true, false)
+	} else {
 		kind := s.entries[idx].kind
 		if kind != arrayTableKind {
-			return fmt.Errorf("toml: key %s already exists as a %s,  but should be an array table", kind, string(k))
+			return false, fmt.Errorf("toml: key %s already exists as a %s,  but should be an array table", kind, string(k))
 		}
 		s.clear(idx)
-	} else {
-		idx = s.create(parentIdx, k, arrayTableKind, true)
 	}
 
 	s.currentIdx = idx
 
-	return nil
+	return firstTime, nil
 }
 
-func (s *SeenTracker) checkKeyValue(node *ast.Node) error {
-	it := node.Key()
-
+func (s *SeenTracker) checkKeyValue(node *unstable.Node) (bool, error) {
 	parentIdx := s.currentIdx
+	it := node.Key()
 
 	for it.Next() {
 		k := it.Node().Data
 
 		idx := s.find(parentIdx, k)
 
-		if idx >= 0 {
-			if s.entries[idx].kind != tableKind {
-				return fmt.Errorf("toml: expected %s to be a table, not a %s", string(k), s.entries[idx].kind)
-			}
-			if s.entries[idx].explicit {
-				return fmt.Errorf("toml: cannot redefine table %s that has already been explicitly defined", string(k))
-			}
+		if idx < 0 {
+			idx = s.create(parentIdx, k, tableKind, false, true)
 		} else {
-			idx = s.create(parentIdx, k, tableKind, false)
+			entry := s.entries[idx]
+			if it.IsLast() {
+				return false, fmt.Errorf("toml: key %s is already defined", string(k))
+			} else if entry.kind != tableKind {
+				return false, fmt.Errorf("toml: expected %s to be a table, not a %s", string(k), entry.kind)
+			} else if entry.explicit {
+				return false, fmt.Errorf("toml: cannot redefine table %s that has already been explicitly defined", string(k))
+			}
 		}
+
 		parentIdx = idx
 	}
 
-	kind := valueKind
+	s.entries[parentIdx].kind = valueKind
 
-	if node.Value().Kind == ast.InlineTable {
-		kind = tableKind
+	value := node.Value()
+
+	switch value.Kind {
+	case unstable.InlineTable:
+		return s.checkInlineTable(value)
+	case unstable.Array:
+		return s.checkArray(value)
 	}
-	s.entries[parentIdx].kind = kind
 
-	return nil
+	return false, nil
 }
 
-func (s *SeenTracker) id(idx int) int {
-	if idx >= 0 {
-		return s.entries[idx].id
+func (s *SeenTracker) checkArray(node *unstable.Node) (first bool, err error) {
+	it := node.Children()
+	for it.Next() {
+		n := it.Node()
+		switch n.Kind {
+		case unstable.InlineTable:
+			first, err = s.checkInlineTable(n)
+			if err != nil {
+				return false, err
+			}
+		case unstable.Array:
+			first, err = s.checkArray(n)
+			if err != nil {
+				return false, err
+			}
+		}
 	}
-	return 0
+	return first, nil
 }
 
-func (s *SeenTracker) find(parentIdx int, k []byte) int {
-	parentID := s.id(parentIdx)
+func (s *SeenTracker) checkInlineTable(node *unstable.Node) (first bool, err error) {
+	s = pool.Get().(*SeenTracker)
+	s.reset()
 
-	for i := parentIdx + 1; i < len(s.entries); i++ {
-		if s.entries[i].parent == parentID && bytes.Equal(s.entries[i].name, k) {
-			return i
+	it := node.Children()
+	for it.Next() {
+		n := it.Node()
+		first, err = s.checkKeyValue(n)
+		if err != nil {
+			return false, err
 		}
 	}
 
-	return -1
+	// As inline tables are self-contained, the tracker does not
+	// need to retain the details of what they contain. The
+	// keyValue element that creates the inline table is kept to
+	// mark the presence of the inline table and prevent
+	// redefinition of its keys: check* functions cannot walk into
+	// a value.
+	pool.Put(s)
+	return first, nil
 }

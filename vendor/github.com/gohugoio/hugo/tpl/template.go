@@ -1,4 +1,4 @@
-// Copyright 2019 The Hugo Authors. All rights reserved.
+// Copyright 2025 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,64 +11,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package tpl contains template functions and related types.
 package tpl
 
 import (
-	"io"
-	"reflect"
-	"regexp"
+	"context"
+	"slices"
+	"strings"
+	"sync"
+	"unicode"
 
-	"github.com/gohugoio/hugo/output"
+	"github.com/bep/helpers/contexthelpers"
+	bp "github.com/gohugoio/hugo/bufferpool"
 
+	"github.com/gohugoio/hugo/identity"
+	"github.com/gohugoio/hugo/langs"
+
+	htmltemplate "github.com/gohugoio/hugo/tpl/internal/go_templates/htmltemplate"
 	texttemplate "github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate"
 )
-
-// TemplateManager manages the collection of templates.
-type TemplateManager interface {
-	TemplateHandler
-	TemplateFuncGetter
-	AddTemplate(name, tpl string) error
-	MarkReady() error
-}
-
-// TemplateVariants describes the possible variants of a template.
-// All of these may be empty.
-type TemplateVariants struct {
-	Language     string
-	OutputFormat output.Format
-}
-
-// TemplateFinder finds templates.
-type TemplateFinder interface {
-	TemplateLookup
-	TemplateLookupVariant
-}
-
-// TemplateHandler finds and executes templates.
-type TemplateHandler interface {
-	TemplateFinder
-	Execute(t Template, wr io.Writer, data interface{}) error
-	LookupLayout(d output.LayoutDescriptor, f output.Format) (Template, bool, error)
-	HasTemplate(name string) bool
-}
-
-type TemplateLookup interface {
-	Lookup(name string) (Template, bool)
-}
-
-type TemplateLookupVariant interface {
-	// TODO(bep) this currently only works for shortcodes.
-	// We may unify and expand this variant pattern to the
-	// other templates, but we need this now for the shortcodes to
-	// quickly determine if a shortcode has a template for a given
-	// output format.
-	// It returns the template, if it was found or not and if there are
-	// alternative representations (output format, language).
-	// We are currently only interested in output formats, so we should improve
-	// this for speed.
-	LookupVariant(name string, variants TemplateVariants) (Template, bool, bool)
-	LookupVariants(name string) []Template
-}
 
 // Template is the common interface between text/template and html/template.
 type Template interface {
@@ -76,66 +37,155 @@ type Template interface {
 	Prepare() (*texttemplate.Template, error)
 }
 
-// TemplateParser is used to parse ad-hoc templates, e.g. in the Resource chain.
-type TemplateParser interface {
-	Parse(name, tpl string) (Template, error)
+// RenderingContext represents the currently rendered site/language.
+type RenderingContext struct {
+	Site       site
+	SiteOutIdx int
 }
 
-// TemplateParseFinder provides both parsing and finding.
-type TemplateParseFinder interface {
-	TemplateParser
-	TemplateFinder
+type (
+	contextKey uint8
+)
+
+const (
+	contextKeyDependencyManagerScopedProvider contextKey = iota
+	contextKeyDependencyScope
+	contextKeyPage
+	contextKeyIsInGoldmark
+	cntextKeyCurrentTemplateInfo
+)
+
+// Context manages values passed in the context to templates.
+var Context = struct {
+	DependencyManagerScopedProvider    contexthelpers.ContextDispatcher[identity.DependencyManagerScopedProvider]
+	GetDependencyManagerInCurrentScope func(context.Context) identity.Manager
+	DependencyScope                    contexthelpers.ContextDispatcher[int]
+	Page                               contexthelpers.ContextDispatcher[page]
+	IsInGoldmark                       contexthelpers.ContextDispatcher[bool]
+	CurrentTemplate                    contexthelpers.ContextDispatcher[*CurrentTemplateInfo]
+}{
+	DependencyManagerScopedProvider: contexthelpers.NewContextDispatcher[identity.DependencyManagerScopedProvider](contextKeyDependencyManagerScopedProvider),
+	DependencyScope:                 contexthelpers.NewContextDispatcher[int](contextKeyDependencyScope),
+	Page:                            contexthelpers.NewContextDispatcher[page](contextKeyPage),
+	IsInGoldmark:                    contexthelpers.NewContextDispatcher[bool](contextKeyIsInGoldmark),
+	CurrentTemplate:                 contexthelpers.NewContextDispatcher[*CurrentTemplateInfo](cntextKeyCurrentTemplateInfo),
 }
 
-// TemplateDebugger prints some debug info to stdout.
-type TemplateDebugger interface {
-	Debug()
-}
-
-// templateInfo wraps a Template with some additional information.
-type templateInfo struct {
-	Template
-	Info
-}
-
-// templateInfo wraps a Template with some additional information.
-type templateInfoManager struct {
-	Template
-	InfoManager
-}
-
-// TemplatesProvider as implemented by deps.Deps.
-type TemplatesProvider interface {
-	Tmpl() TemplateHandler
-	TextTmpl() TemplateParseFinder
-}
-
-// WithInfo wraps the info in a template.
-func WithInfo(templ Template, info Info) Template {
-	if manager, ok := info.(InfoManager); ok {
-		return &templateInfoManager{
-			Template:    templ,
-			InfoManager: manager,
+func init() {
+	Context.GetDependencyManagerInCurrentScope = func(ctx context.Context) identity.Manager {
+		idmsp := Context.DependencyManagerScopedProvider.Get(ctx)
+		if idmsp != nil {
+			return idmsp.GetDependencyManagerForScope(Context.DependencyScope.Get(ctx))
 		}
-	}
-
-	return &templateInfo{
-		Template: templ,
-		Info:     info,
+		return nil
 	}
 }
 
-var baseOfRe = regexp.MustCompile("template: (.*?):")
-
-func extractBaseOf(err string) string {
-	m := baseOfRe.FindStringSubmatch(err)
-	if len(m) == 2 {
-		return m[1]
-	}
-	return ""
+type page interface {
+	IsNode() bool
 }
 
-// TemplateFuncGetter allows to find a template func by name.
-type TemplateFuncGetter interface {
-	GetFunc(name string) (reflect.Value, bool)
+type site interface {
+	Language() *langs.Language
+}
+
+const (
+	// HugoDeferredTemplatePrefix is the prefix for placeholders for deferred templates.
+	HugoDeferredTemplatePrefix = "__hdeferred/"
+	// HugoDeferredTemplateSuffix is the suffix for placeholders for deferred templates.
+	HugoDeferredTemplateSuffix = "__d="
+)
+
+const hugoNewLinePlaceholder = "___hugonl_"
+
+var stripHTMLReplacerPre = strings.NewReplacer("\n", " ", "</p>", hugoNewLinePlaceholder, "<br>", hugoNewLinePlaceholder, "<br />", hugoNewLinePlaceholder)
+
+// StripHTML strips out all HTML tags in s.
+func StripHTML(s string) string {
+	// Shortcut strings with no tags in them
+	if !strings.ContainsAny(s, "<>") {
+		return s
+	}
+
+	pre := stripHTMLReplacerPre.Replace(s)
+	preReplaced := pre != s
+
+	s = htmltemplate.StripTags(pre)
+
+	if preReplaced {
+		s = strings.ReplaceAll(s, hugoNewLinePlaceholder, "\n")
+	}
+
+	var wasSpace bool
+	b := bp.GetBuffer()
+	defer bp.PutBuffer(b)
+	for _, r := range s {
+		isSpace := unicode.IsSpace(r)
+		if !(isSpace && wasSpace) {
+			b.WriteRune(r)
+		}
+		wasSpace = isSpace
+	}
+
+	if b.Len() > 0 {
+		s = b.String()
+	}
+
+	return s
+}
+
+// DeferredExecution holds the template and data for a deferred execution.
+type DeferredExecution struct {
+	Mu           sync.Mutex
+	Ctx          context.Context
+	TemplatePath string
+	Data         any
+
+	Executed bool
+	Result   string
+}
+
+type CurrentTemplateInfoOps interface {
+	CurrentTemplateInfoCommonOps
+	Base() CurrentTemplateInfoCommonOps
+}
+
+type CurrentTemplateInfoCommonOps interface {
+	// Template name.
+	Name() string
+	// Template source filename.
+	// Will be empty for internal templates.
+	Filename() string
+}
+
+// CurrentTemplateInfo as returned in templates.Current.
+type CurrentTemplateInfo struct {
+	Parent *CurrentTemplateInfo
+	Level  int
+	Key    string
+	CurrentTemplateInfoOps
+}
+
+// CurrentTemplateInfos is a slice of CurrentTemplateInfo.
+type CurrentTemplateInfos []*CurrentTemplateInfo
+
+// Reverse creates a copy of the slice and reverses it.
+func (c CurrentTemplateInfos) Reverse() CurrentTemplateInfos {
+	if len(c) == 0 {
+		return c
+	}
+	r := make(CurrentTemplateInfos, len(c))
+	copy(r, c)
+	slices.Reverse(r)
+	return r
+}
+
+// Ancestors returns the ancestors of the current template.
+func (ti *CurrentTemplateInfo) Ancestors() CurrentTemplateInfos {
+	var ancestors []*CurrentTemplateInfo
+	for ti.Parent != nil {
+		ti = ti.Parent
+		ancestors = append(ancestors, ti)
+	}
+	return ancestors
 }

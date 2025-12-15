@@ -2,6 +2,7 @@ package css_ast
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/css_lexer"
@@ -24,10 +25,57 @@ import (
 // representation that helps provide good parsing and printing performance.
 
 type AST struct {
+	Symbols              []ast.Symbol
+	CharFreq             *ast.CharFreq
 	ImportRecords        []ast.ImportRecord
 	Rules                []Rule
 	SourceMapComment     logger.Span
 	ApproximateLineCount int32
+	LocalSymbols         []ast.LocRef
+	LocalScope           map[string]ast.LocRef
+	GlobalScope          map[string]ast.LocRef
+	Composes             map[ast.Ref]*Composes
+
+	// These contain all layer names in the file. It can be used to replace the
+	// layer-related side effects of importing this file. They are split into two
+	// groups (those before and after "@import" rules) so that the linker can put
+	// them in the right places.
+	LayersPreImport  [][]string
+	LayersPostImport [][]string
+}
+
+type Composes struct {
+	// Note that each of these can be either local or global. Local examples:
+	//
+	//   .foo { composes: bar }
+	//   .bar { color: red }
+	//
+	// Global examples:
+	//
+	//   .foo { composes: bar from global }
+	//   .foo :global { composes: bar }
+	//   .foo { :global { composes: bar } }
+	//   :global .bar { color: red }
+	//
+	Names []ast.LocRef
+
+	// Each of these is local in another file. For example:
+	//
+	//   .foo { composes: bar from "bar.css" }
+	//   .foo { composes: bar from url(bar.css) }
+	//
+	ImportedNames []ImportedComposesName
+
+	// This tracks what CSS properties each class uses so that we can warn when
+	// "composes" is used incorrectly to compose two classes from separate files
+	// that declare the same CSS properties.
+	Properties map[string]logger.Loc
+}
+
+type ImportedComposesName struct {
+	Alias             string
+	AliasLoc          logger.Loc
+	ImportRecordIndex uint32
 }
 
 // We create a lot of tokens, so make sure this layout is memory-efficient.
@@ -35,18 +83,25 @@ type AST struct {
 // "string" could be shorter) but at least the ordering of fields was
 // deliberately chosen to minimize size.
 type Token struct {
-	// This is the raw contents of the token most of the time. However, it
-	// contains the decoded string contents for "TString" tokens.
-	Text string // 16 bytes
-
 	// Contains the child tokens for component values that are simple blocks.
 	// These are either "(", "{", "[", or function tokens. The closing token is
 	// implicit and is not stored.
 	Children *[]Token // 8 bytes
 
+	// This is the raw contents of the token most of the time. However, it
+	// contains the decoded string contents for "TString" tokens.
+	Text string // 16 bytes
+
+	// The source location at the start of the token
+	Loc logger.Loc // 4 bytes
+
 	// URL tokens have an associated import record at the top-level of the AST.
 	// This index points to that import record.
-	ImportRecordIndex uint32 // 4 bytes
+	//
+	// Symbol tokens have an associated symbol. This index is the "InnerIndex"
+	// of the "Ref" for this symbol. The "SourceIndex" for the "Ref" is just
+	// the source index of the file for this AST.
+	PayloadIndex uint32 // 4 bytes
 
 	// The division between the number and the unit for "TDimension" tokens.
 	UnitOffset uint16 // 2 bytes
@@ -79,13 +134,80 @@ const (
 	WhitespaceAfter
 )
 
-func (a Token) Equal(b Token) bool {
-	if a.Kind == b.Kind && a.Text == b.Text && a.ImportRecordIndex == b.ImportRecordIndex && a.Whitespace == b.Whitespace {
+// This is necessary when comparing tokens between two different files
+type CrossFileEqualityCheck struct {
+	ImportRecordsA []ast.ImportRecord
+	ImportRecordsB []ast.ImportRecord
+	Symbols        ast.SymbolMap
+	SourceIndexA   uint32
+	SourceIndexB   uint32
+}
+
+func (check *CrossFileEqualityCheck) RefsAreEquivalent(a ast.Ref, b ast.Ref) bool {
+	if a == b {
+		return true
+	}
+	if check == nil || check.Symbols.SymbolsForSource == nil {
+		return false
+	}
+	a = ast.FollowSymbols(check.Symbols, a)
+	b = ast.FollowSymbols(check.Symbols, b)
+	if a == b {
+		return true
+	}
+	symbolA := check.Symbols.Get(a)
+	symbolB := check.Symbols.Get(b)
+	return symbolA.Kind == ast.SymbolGlobalCSS && symbolB.Kind == ast.SymbolGlobalCSS && symbolA.OriginalName == symbolB.OriginalName
+}
+
+func (a Token) Equal(b Token, check *CrossFileEqualityCheck) bool {
+	if a.Kind == b.Kind && a.Text == b.Text && a.Whitespace == b.Whitespace {
+		// URLs should be compared based on the text of the associated import record
+		// (which is what will actually be printed) instead of the original text
+		if a.Kind == css_lexer.TURL {
+			if check == nil {
+				// If both tokens are in the same file, just compare the index
+				if a.PayloadIndex != b.PayloadIndex {
+					return false
+				}
+			} else {
+				// If the tokens come from separate files, compare the import records
+				// themselves instead of comparing the indices. This can happen when
+				// the linker runs a "DuplicateRuleRemover" during bundling. This
+				// doesn't compare the source indices because at this point during
+				// linking, paths inside the bundle (e.g. due to the "copy" loader)
+				// should have already been converted into text (e.g. the "unique key"
+				// string).
+				if check.ImportRecordsA[a.PayloadIndex].Path.Text !=
+					check.ImportRecordsB[b.PayloadIndex].Path.Text {
+					return false
+				}
+			}
+		}
+
+		// Symbols should be compared based on the symbol reference instead of the
+		// original text
+		if a.Kind == css_lexer.TSymbol {
+			if check == nil {
+				// If both tokens are in the same file, just compare the index
+				if a.PayloadIndex != b.PayloadIndex {
+					return false
+				}
+			} else {
+				// If the tokens come from separate files, compare the symbols themselves
+				refA := ast.Ref{SourceIndex: check.SourceIndexA, InnerIndex: a.PayloadIndex}
+				refB := ast.Ref{SourceIndex: check.SourceIndexB, InnerIndex: b.PayloadIndex}
+				if !check.RefsAreEquivalent(refA, refB) {
+					return false
+				}
+			}
+		}
+
 		if a.Children == nil && b.Children == nil {
 			return true
 		}
 
-		if a.Children != nil && b.Children != nil && TokensEqual(*a.Children, *b.Children) {
+		if a.Children != nil && b.Children != nil && TokensEqual(*a.Children, *b.Children, check) {
 			return true
 		}
 	}
@@ -93,12 +215,12 @@ func (a Token) Equal(b Token) bool {
 	return false
 }
 
-func TokensEqual(a []Token, b []Token) bool {
+func TokensEqual(a []Token, b []Token, check *CrossFileEqualityCheck) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i, c := range a {
-		if !c.Equal(b[i]) {
+	for i, ai := range a {
+		if !ai.Equal(b[i], check) {
 			return false
 		}
 	}
@@ -110,7 +232,9 @@ func HashTokens(hash uint32, tokens []Token) uint32 {
 
 	for _, t := range tokens {
 		hash = helpers.HashCombine(hash, uint32(t.Kind))
-		hash = helpers.HashCombineString(hash, t.Text)
+		if t.Kind != css_lexer.TURL {
+			hash = helpers.HashCombineString(hash, t.Text)
+		}
 		if t.Children != nil {
 			hash = HashTokens(hash, *t.Children)
 		}
@@ -120,7 +244,7 @@ func HashTokens(hash uint32, tokens []Token) uint32 {
 }
 
 func (a Token) EqualIgnoringWhitespace(b Token) bool {
-	if a.Kind == b.Kind && a.Text == b.Text && a.ImportRecordIndex == b.ImportRecordIndex {
+	if a.Kind == b.Kind && a.Text == b.Text && a.PayloadIndex == b.PayloadIndex {
 		if a.Children == nil && b.Children == nil {
 			return true
 		}
@@ -157,7 +281,37 @@ func TokensAreCommaSeparated(tokens []Token) bool {
 	return false
 }
 
-func (t Token) FractionForPercentage() (float64, bool) {
+type PercentageFlags uint8
+
+const (
+	AllowPercentageBelow0 PercentageFlags = 1 << iota
+	AllowPercentageAbove100
+	AllowAnyPercentage = AllowPercentageBelow0 | AllowPercentageAbove100
+)
+
+func (t Token) NumberOrFractionForPercentage(percentReferenceRange float64, flags PercentageFlags) (float64, bool) {
+	switch t.Kind {
+	case css_lexer.TNumber:
+		if f, err := strconv.ParseFloat(t.Text, 64); err == nil {
+			return f, true
+		}
+
+	case css_lexer.TPercentage:
+		if f, err := strconv.ParseFloat(t.PercentageValue(), 64); err == nil {
+			if (flags&AllowPercentageBelow0) == 0 && f < 0 {
+				return 0, true
+			}
+			if (flags&AllowPercentageAbove100) == 0 && f > 100 {
+				return percentReferenceRange, true
+			}
+			return f / 100 * percentReferenceRange, true
+		}
+	}
+
+	return 0, false
+}
+
+func (t Token) ClampedFractionForPercentage() (float64, bool) {
 	if t.Kind == css_lexer.TPercentage {
 		if f, err := strconv.ParseFloat(t.PercentageValue(), 64); err == nil {
 			if f < 0 {
@@ -166,9 +320,10 @@ func (t Token) FractionForPercentage() (float64, bool) {
 			if f > 100 {
 				return 1, true
 			}
-			return f / 100.0, true
+			return f / 100, true
 		}
 	}
+
 	return 0, false
 }
 
@@ -206,7 +361,7 @@ func (t Token) DimensionUnit() string {
 }
 
 func (t Token) DimensionUnitIsSafeLength() bool {
-	switch t.DimensionUnit() {
+	switch strings.ToLower(t.DimensionUnit()) {
 	// These units can be reasonably expected to be supported everywhere.
 	// Information used: https://developer.mozilla.org/en-US/docs/Web/CSS/length
 	case "cm", "em", "in", "mm", "pc", "pt", "px":
@@ -225,22 +380,41 @@ func (t Token) IsOne() bool {
 
 func (t Token) IsAngle() bool {
 	if t.Kind == css_lexer.TDimension {
-		unit := t.DimensionUnit()
+		unit := strings.ToLower(t.DimensionUnit())
 		return unit == "deg" || unit == "grad" || unit == "rad" || unit == "turn"
 	}
 	return false
+}
+
+func CloneTokensWithoutImportRecords(tokensIn []Token) (tokensOut []Token) {
+	for _, t := range tokensIn {
+		if t.Children != nil {
+			children := CloneTokensWithoutImportRecords(*t.Children)
+			t.Children = &children
+		}
+		tokensOut = append(tokensOut, t)
+	}
+	return
 }
 
 func CloneTokensWithImportRecords(
 	tokensIn []Token, importRecordsIn []ast.ImportRecord,
 	tokensOut []Token, importRecordsOut []ast.ImportRecord,
 ) ([]Token, []ast.ImportRecord) {
+	// Preallocate the output array if we can
+	if tokensOut == nil {
+		tokensOut = make([]Token, 0, len(tokensIn))
+	}
+
 	for _, t := range tokensIn {
+		// Clear the source mapping if this token is being used in another file
+		t.Loc.Start = 0
+
 		// If this is a URL token, also clone the import record
 		if t.Kind == css_lexer.TURL {
 			importRecordIndex := uint32(len(importRecordsOut))
-			importRecordsOut = append(importRecordsOut, importRecordsIn[t.ImportRecordIndex])
-			t.ImportRecordIndex = importRecordIndex
+			importRecordsOut = append(importRecordsOut, importRecordsIn[t.PayloadIndex])
+			t.PayloadIndex = importRecordIndex
 		}
 
 		// Also search for URL tokens in this token's children
@@ -256,22 +430,40 @@ func CloneTokensWithImportRecords(
 	return tokensOut, importRecordsOut
 }
 
+func CloneMediaQueriesWithImportRecords(
+	queriesIn []MediaQuery, importRecordsIn []ast.ImportRecord,
+	queriesOut []MediaQuery, importRecordsOut []ast.ImportRecord,
+) ([]MediaQuery, []ast.ImportRecord) {
+	// Preallocate the output array if we can
+	if queriesOut == nil {
+		queriesOut = make([]MediaQuery, 0, len(queriesIn))
+	}
+
+	// Recursively clone each query
+	for _, query := range queriesIn {
+		query.Data, importRecordsOut = query.Data.CloneWithImportRecords(importRecordsIn, importRecordsOut)
+		queriesOut = append(queriesOut, query)
+	}
+
+	return queriesOut, importRecordsOut
+}
+
 type Rule struct {
-	Loc  logger.Loc
 	Data R
+	Loc  logger.Loc
 }
 
 type R interface {
-	Equal(rule R) bool
+	Equal(rule R, check *CrossFileEqualityCheck) bool
 	Hash() (uint32, bool)
 }
 
-func RulesEqual(a []Rule, b []Rule) bool {
+func RulesEqual(a []Rule, b []Rule, check *CrossFileEqualityCheck) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	for i, c := range a {
-		if !c.Data.Equal(b[i].Data) {
+	for i, ai := range a {
+		if !ai.Data.Equal(b[i].Data, check) {
 			return false
 		}
 	}
@@ -294,7 +486,7 @@ type RAtCharset struct {
 	Encoding string
 }
 
-func (a *RAtCharset) Equal(rule R) bool {
+func (a *RAtCharset) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RAtCharset)
 	return ok && a.Encoding == b.Encoding
 }
@@ -305,12 +497,45 @@ func (r *RAtCharset) Hash() (uint32, bool) {
 	return hash, true
 }
 
-type RAtImport struct {
-	ImportRecordIndex uint32
-	ImportConditions  []Token
+type ImportConditions struct {
+	// The syntax for "@import" has been extended with optional conditions that
+	// behave as if the imported file was wrapped in a "@layer", "@supports",
+	// and/or "@media" rule. The possible syntax combinations are as follows:
+	//
+	//   @import url(...);
+	//   @import url(...) layer;
+	//   @import url(...) layer(layer-name);
+	//   @import url(...) layer(layer-name) supports(supports-condition);
+	//   @import url(...) layer(layer-name) supports(supports-condition) list-of-media-queries;
+	//   @import url(...) layer(layer-name) list-of-media-queries;
+	//   @import url(...) supports(supports-condition);
+	//   @import url(...) supports(supports-condition) list-of-media-queries;
+	//   @import url(...) list-of-media-queries;
+	//
+	// From: https://developer.mozilla.org/en-US/docs/Web/CSS/@import#syntax
+	Queries []MediaQuery
+
+	// These two fields will only ever have zero or one tokens. However, they are
+	// implemented as arrays for convenience because most of esbuild's helper
+	// functions that operate on tokens take arrays instead of individual tokens.
+	Layers   []Token
+	Supports []Token
 }
 
-func (*RAtImport) Equal(rule R) bool {
+func (c *ImportConditions) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (ImportConditions, []ast.ImportRecord) {
+	result := ImportConditions{}
+	result.Layers, importRecordsOut = CloneTokensWithImportRecords(c.Layers, importRecordsIn, nil, importRecordsOut)
+	result.Supports, importRecordsOut = CloneTokensWithImportRecords(c.Supports, importRecordsIn, nil, importRecordsOut)
+	result.Queries, importRecordsOut = CloneMediaQueriesWithImportRecords(c.Queries, importRecordsIn, nil, importRecordsOut)
+	return result, importRecordsOut
+}
+
+type RAtImport struct {
+	ImportConditions  *ImportConditions
+	ImportRecordIndex uint32
+}
+
+func (*RAtImport) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	return false
 }
 
@@ -319,19 +544,21 @@ func (r *RAtImport) Hash() (uint32, bool) {
 }
 
 type RAtKeyframes struct {
-	AtToken string
-	Name    string
-	Blocks  []KeyframeBlock
+	AtToken       string
+	Name          ast.LocRef
+	Blocks        []KeyframeBlock
+	CloseBraceLoc logger.Loc
 }
 
 type KeyframeBlock struct {
-	Selectors []string
-	Rules     []Rule
+	Selectors     []string
+	Rules         []Rule
+	Loc           logger.Loc
+	CloseBraceLoc logger.Loc
 }
 
-func (a *RAtKeyframes) Equal(rule R) bool {
-	b, ok := rule.(*RAtKeyframes)
-	if ok && a.AtToken == b.AtToken && a.Name == b.Name && len(a.Blocks) == len(b.Blocks) {
+func (a *RAtKeyframes) Equal(rule R, check *CrossFileEqualityCheck) bool {
+	if b, ok := rule.(*RAtKeyframes); ok && strings.EqualFold(a.AtToken, b.AtToken) && check.RefsAreEquivalent(a.Name.Ref, b.Name.Ref) && len(a.Blocks) == len(b.Blocks) {
 		for i, ai := range a.Blocks {
 			bi := b.Blocks[i]
 			if len(ai.Selectors) != len(bi.Selectors) {
@@ -342,7 +569,7 @@ func (a *RAtKeyframes) Equal(rule R) bool {
 					return false
 				}
 			}
-			if !RulesEqual(ai.Rules, bi.Rules) {
+			if !RulesEqual(ai.Rules, bi.Rules, check) {
 				return false
 			}
 		}
@@ -354,7 +581,6 @@ func (a *RAtKeyframes) Equal(rule R) bool {
 func (r *RAtKeyframes) Hash() (uint32, bool) {
 	hash := uint32(2)
 	hash = helpers.HashCombineString(hash, r.AtToken)
-	hash = helpers.HashCombineString(hash, r.Name)
 	hash = helpers.HashCombine(hash, uint32(len(r.Blocks)))
 	for _, block := range r.Blocks {
 		hash = helpers.HashCombine(hash, uint32(len(block.Selectors)))
@@ -367,14 +593,15 @@ func (r *RAtKeyframes) Hash() (uint32, bool) {
 }
 
 type RKnownAt struct {
-	AtToken string
-	Prelude []Token
-	Rules   []Rule
+	AtToken       string
+	Prelude       []Token
+	Rules         []Rule
+	CloseBraceLoc logger.Loc
 }
 
-func (a *RKnownAt) Equal(rule R) bool {
+func (a *RKnownAt) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RKnownAt)
-	return ok && a.AtToken == b.AtToken && TokensEqual(a.Prelude, b.Prelude) && RulesEqual(a.Rules, a.Rules)
+	return ok && strings.EqualFold(a.AtToken, b.AtToken) && TokensEqual(a.Prelude, b.Prelude, check) && RulesEqual(a.Rules, b.Rules, check)
 }
 
 func (r *RKnownAt) Hash() (uint32, bool) {
@@ -391,9 +618,9 @@ type RUnknownAt struct {
 	Block   []Token
 }
 
-func (a *RUnknownAt) Equal(rule R) bool {
+func (a *RUnknownAt) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RUnknownAt)
-	return ok && a.AtToken == b.AtToken && TokensEqual(a.Prelude, b.Prelude) && TokensEqual(a.Block, a.Block)
+	return ok && strings.EqualFold(a.AtToken, b.AtToken) && TokensEqual(a.Prelude, b.Prelude, check) && TokensEqual(a.Block, b.Block, check)
 }
 
 func (r *RUnknownAt) Hash() (uint32, bool) {
@@ -405,54 +632,33 @@ func (r *RUnknownAt) Hash() (uint32, bool) {
 }
 
 type RSelector struct {
-	Selectors []ComplexSelector
-	Rules     []Rule
+	Selectors     []ComplexSelector
+	Rules         []Rule
+	CloseBraceLoc logger.Loc
 }
 
-func (a *RSelector) Equal(rule R) bool {
+func (a *RSelector) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RSelector)
-	if ok && len(a.Selectors) == len(b.Selectors) {
-		for i, sel := range a.Selectors {
-			if !sel.Equal(b.Selectors[i]) {
-				return false
-			}
-		}
-		return RulesEqual(a.Rules, b.Rules)
-	}
-
-	return false
+	return ok && ComplexSelectorsEqual(a.Selectors, b.Selectors, check) && RulesEqual(a.Rules, b.Rules, check)
 }
 
 func (r *RSelector) Hash() (uint32, bool) {
 	hash := uint32(5)
 	hash = helpers.HashCombine(hash, uint32(len(r.Selectors)))
-	for _, complex := range r.Selectors {
-		hash = helpers.HashCombine(hash, uint32(len(complex.Selectors)))
-		for _, sel := range complex.Selectors {
-			if sel.TypeSelector != nil {
-				hash = helpers.HashCombineString(hash, sel.TypeSelector.Name.Text)
-			} else {
-				hash = helpers.HashCombine(hash, 0)
-			}
-			hash = helpers.HashCombine(hash, uint32(len(sel.SubclassSelectors)))
-			for _, sub := range sel.SubclassSelectors {
-				hash = helpers.HashCombine(hash, sub.Hash())
-			}
-			hash = helpers.HashCombineString(hash, sel.Combinator)
-		}
-	}
+	hash = HashComplexSelectors(hash, r.Selectors)
 	hash = HashRules(hash, r.Rules)
 	return hash, true
 }
 
 type RQualified struct {
-	Prelude []Token
-	Rules   []Rule
+	Prelude       []Token
+	Rules         []Rule
+	CloseBraceLoc logger.Loc
 }
 
-func (a *RQualified) Equal(rule R) bool {
+func (a *RQualified) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RQualified)
-	return ok && TokensEqual(a.Prelude, b.Prelude) && RulesEqual(a.Rules, b.Rules)
+	return ok && TokensEqual(a.Prelude, b.Prelude, check) && RulesEqual(a.Rules, b.Rules, check)
 }
 
 func (r *RQualified) Hash() (uint32, bool) {
@@ -470,14 +676,28 @@ type RDeclaration struct {
 	Important bool
 }
 
-func (a *RDeclaration) Equal(rule R) bool {
+func (a *RDeclaration) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RDeclaration)
-	return ok && a.KeyText == b.KeyText && TokensEqual(a.Value, b.Value) && a.Important == b.Important
+	return ok && a.KeyText == b.KeyText && TokensEqual(a.Value, b.Value, check) && a.Important == b.Important
 }
 
 func (r *RDeclaration) Hash() (uint32, bool) {
-	hash := uint32(7)
-	hash = helpers.HashCombine(hash, uint32(r.Key))
+	var hash uint32
+	if r.Key == DUnknown {
+		if r.Important {
+			hash = uint32(7)
+		} else {
+			hash = uint32(8)
+		}
+		hash = helpers.HashCombineString(hash, r.KeyText)
+	} else {
+		if r.Important {
+			hash = uint32(9)
+		} else {
+			hash = uint32(10)
+		}
+		hash = helpers.HashCombine(hash, uint32(r.Key))
+	}
 	hash = HashTokens(hash, r.Value)
 	return hash, true
 }
@@ -486,13 +706,13 @@ type RBadDeclaration struct {
 	Tokens []Token
 }
 
-func (a *RBadDeclaration) Equal(rule R) bool {
+func (a *RBadDeclaration) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RBadDeclaration)
-	return ok && TokensEqual(a.Tokens, b.Tokens)
+	return ok && TokensEqual(a.Tokens, b.Tokens, check)
 }
 
 func (r *RBadDeclaration) Hash() (uint32, bool) {
-	hash := uint32(8)
+	hash := uint32(7)
 	hash = HashTokens(hash, r.Tokens)
 	return hash, true
 }
@@ -501,29 +721,506 @@ type RComment struct {
 	Text string
 }
 
-func (a *RComment) Equal(rule R) bool {
+func (a *RComment) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RComment)
 	return ok && a.Text == b.Text
 }
 
 func (r *RComment) Hash() (uint32, bool) {
-	hash := uint32(9)
+	hash := uint32(8)
 	hash = helpers.HashCombineString(hash, r.Text)
 	return hash, true
+}
+
+type RAtLayer struct {
+	Names         [][]string
+	Rules         []Rule
+	CloseBraceLoc logger.Loc
+}
+
+func (a *RAtLayer) Equal(rule R, check *CrossFileEqualityCheck) bool {
+	if b, ok := rule.(*RAtLayer); ok && len(a.Names) == len(b.Names) && len(a.Rules) == len(b.Rules) {
+		for i, ai := range a.Names {
+			bi := b.Names[i]
+			if len(ai) != len(bi) {
+				return false
+			}
+			for j, aj := range ai {
+				if aj != bi[j] {
+					return false
+				}
+			}
+		}
+		if !RulesEqual(a.Rules, b.Rules, check) {
+			return false
+		}
+	}
+	return false
+}
+
+func (r *RAtLayer) Hash() (uint32, bool) {
+	hash := uint32(9)
+	hash = helpers.HashCombine(hash, uint32(len(r.Names)))
+	for _, parts := range r.Names {
+		hash = helpers.HashCombine(hash, uint32(len(parts)))
+		for _, part := range parts {
+			hash = helpers.HashCombineString(hash, part)
+		}
+	}
+	hash = HashRules(hash, r.Rules)
+	return hash, true
+}
+
+type RAtMedia struct {
+	Queries       []MediaQuery
+	Rules         []Rule
+	CloseBraceLoc logger.Loc
+}
+
+func (a *RAtMedia) Equal(rule R, check *CrossFileEqualityCheck) bool {
+	b, ok := rule.(*RAtMedia)
+	return ok && MediaQueriesEqual(a.Queries, b.Queries, check) && RulesEqual(a.Rules, b.Rules, check)
+}
+
+func (r *RAtMedia) Hash() (uint32, bool) {
+	hash := uint32(10)
+	hash = HashMediaQueries(hash, r.Queries)
+	hash = HashRules(hash, r.Rules)
+	return hash, true
+}
+
+type MediaQuery struct {
+	Loc  logger.Loc
+	Data MQ
+}
+
+type MQ interface {
+	Equal(query MQ, check *CrossFileEqualityCheck) bool
+	EqualIgnoringWhitespace(query MQ) bool
+	Hash() uint32
+	CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (MQ, []ast.ImportRecord)
+}
+
+func MediaQueriesEqual(a []MediaQuery, b []MediaQuery, check *CrossFileEqualityCheck) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, ai := range a {
+		if !ai.Data.Equal(b[i].Data, check) {
+			return false
+		}
+	}
+	return true
+}
+
+func MediaQueriesEqualIgnoringWhitespace(a []MediaQuery, b []MediaQuery) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, ai := range a {
+		if !ai.Data.EqualIgnoringWhitespace(b[i].Data) {
+			return false
+		}
+	}
+	return true
+}
+
+func HashMediaQueries(hash uint32, queries []MediaQuery) uint32 {
+	hash = helpers.HashCombine(hash, uint32(len(queries)))
+	for _, q := range queries {
+		hash = helpers.HashCombine(hash, q.Data.Hash())
+	}
+	return hash
+}
+
+type MQTypeOp uint8
+
+const (
+	MQTypeOpNone MQTypeOp = iota
+	MQTypeOpNot
+	MQTypeOpOnly
+)
+
+type MQType struct {
+	Op        MQTypeOp
+	Type      string
+	AndOrNull MediaQuery
+}
+
+func (q *MQType) Equal(query MQ, check *CrossFileEqualityCheck) bool {
+	if p, ok := query.(*MQType); ok && q.Op == p.Op && q.Type == p.Type {
+		return (q.AndOrNull.Data == nil && p.AndOrNull.Data == nil) ||
+			(q.AndOrNull.Data != nil && p.AndOrNull.Data != nil && q.AndOrNull.Data.Equal(p.AndOrNull.Data, check))
+	}
+	return false
+}
+
+func (q *MQType) EqualIgnoringWhitespace(query MQ) bool {
+	if p, ok := query.(*MQType); ok && q.Op == p.Op && q.Type == p.Type {
+		return (q.AndOrNull.Data == nil && p.AndOrNull.Data == nil) ||
+			(q.AndOrNull.Data != nil && p.AndOrNull.Data != nil && q.AndOrNull.Data.EqualIgnoringWhitespace(p.AndOrNull.Data))
+	}
+	return false
+}
+
+func (q *MQType) Hash() uint32 {
+	hash := uint32(0)
+	hash = helpers.HashCombine(hash, uint32(q.Op))
+	hash = helpers.HashCombineString(hash, q.Type)
+	if q.AndOrNull.Data != nil {
+		hash = helpers.HashCombine(hash, q.AndOrNull.Data.Hash())
+	}
+	return hash
+}
+
+func (q *MQType) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (MQ, []ast.ImportRecord) {
+	var andOrNull MQ
+	if q.AndOrNull.Data != nil {
+		andOrNull, importRecordsOut = q.AndOrNull.Data.CloneWithImportRecords(importRecordsIn, importRecordsOut)
+	}
+	return &MQType{Op: q.Op, Type: q.Type, AndOrNull: MediaQuery{Data: andOrNull}}, importRecordsOut
+}
+
+type MQNot struct {
+	Inner MediaQuery
+}
+
+func (q *MQNot) Equal(query MQ, check *CrossFileEqualityCheck) bool {
+	p, ok := query.(*MQNot)
+	return ok && q.Inner.Data.Equal(p.Inner.Data, check)
+}
+
+func (q *MQNot) EqualIgnoringWhitespace(query MQ) bool {
+	p, ok := query.(*MQNot)
+	return ok && q.Inner.Data.EqualIgnoringWhitespace(p.Inner.Data)
+}
+
+func (q *MQNot) Hash() uint32 {
+	hash := uint32(1)
+	hash = helpers.HashCombine(hash, q.Inner.Data.Hash())
+	return hash
+}
+
+func (q *MQNot) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (MQ, []ast.ImportRecord) {
+	inner, importRecordsOut := q.Inner.Data.CloneWithImportRecords(importRecordsIn, importRecordsOut)
+	return &MQNot{Inner: MediaQuery{Data: inner}}, importRecordsOut
+}
+
+type MQBinaryOp uint8
+
+const (
+	MQBinaryOpAnd MQBinaryOp = iota
+	MQBinaryOpOr
+)
+
+type MQBinary struct {
+	Op    MQBinaryOp
+	Terms []MediaQuery
+}
+
+func (q *MQBinary) Equal(query MQ, check *CrossFileEqualityCheck) bool {
+	p, ok := query.(*MQBinary)
+	return ok && q.Op == p.Op && MediaQueriesEqual(q.Terms, p.Terms, check)
+}
+
+func (q *MQBinary) EqualIgnoringWhitespace(query MQ) bool {
+	p, ok := query.(*MQBinary)
+	return ok && q.Op == p.Op && MediaQueriesEqualIgnoringWhitespace(q.Terms, p.Terms)
+}
+
+func (q *MQBinary) Hash() uint32 {
+	hash := uint32(2)
+	hash = helpers.HashCombine(hash, uint32(q.Op))
+	hash = HashMediaQueries(hash, q.Terms)
+	return hash
+}
+
+func (q *MQBinary) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (MQ, []ast.ImportRecord) {
+	terms := make([]MediaQuery, 0, len(q.Terms))
+	for _, term := range q.Terms {
+		var clone MQ
+		clone, importRecordsOut = term.Data.CloneWithImportRecords(importRecordsIn, importRecordsOut)
+		terms = append(terms, MediaQuery{Data: clone})
+	}
+	return &MQBinary{Op: q.Op, Terms: terms}, importRecordsOut
+}
+
+type MQArbitraryTokens struct {
+	Tokens []Token
+}
+
+func (q *MQArbitraryTokens) Equal(query MQ, check *CrossFileEqualityCheck) bool {
+	p, ok := query.(*MQArbitraryTokens)
+	return ok && TokensEqual(q.Tokens, p.Tokens, check)
+}
+
+func (q *MQArbitraryTokens) EqualIgnoringWhitespace(query MQ) bool {
+	p, ok := query.(*MQArbitraryTokens)
+	return ok && TokensEqualIgnoringWhitespace(q.Tokens, p.Tokens)
+}
+
+func (q *MQArbitraryTokens) Hash() uint32 {
+	hash := uint32(3)
+	hash = HashTokens(hash, q.Tokens)
+	return hash
+}
+
+func (q *MQArbitraryTokens) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (MQ, []ast.ImportRecord) {
+	tokens, importRecordsOut := CloneTokensWithImportRecords(q.Tokens, importRecordsIn, nil, importRecordsOut)
+	return &MQArbitraryTokens{Tokens: tokens}, importRecordsOut
+}
+
+type MQPlainOrBoolean struct {
+	Name       string
+	ValueOrNil []Token
+}
+
+func (q *MQPlainOrBoolean) Equal(query MQ, check *CrossFileEqualityCheck) bool {
+	p, ok := query.(*MQPlainOrBoolean)
+	return ok && q.Name == p.Name && TokensEqual(q.ValueOrNil, p.ValueOrNil, check)
+}
+
+func (q *MQPlainOrBoolean) EqualIgnoringWhitespace(query MQ) bool {
+	p, ok := query.(*MQPlainOrBoolean)
+	return ok && q.Name == p.Name && TokensEqualIgnoringWhitespace(q.ValueOrNil, p.ValueOrNil)
+}
+
+func (q *MQPlainOrBoolean) Hash() uint32 {
+	hash := uint32(4)
+	hash = helpers.HashCombineString(hash, q.Name)
+	hash = HashTokens(hash, q.ValueOrNil)
+	return hash
+}
+
+func (q *MQPlainOrBoolean) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (MQ, []ast.ImportRecord) {
+	var valueOrNil []Token
+	if q.ValueOrNil != nil {
+		valueOrNil, importRecordsOut = CloneTokensWithImportRecords(q.ValueOrNil, importRecordsIn, nil, importRecordsOut)
+	}
+	return &MQPlainOrBoolean{Name: q.Name, ValueOrNil: valueOrNil}, importRecordsOut
+}
+
+type MQRange struct {
+	Before    []Token
+	Name      string
+	After     []Token
+	NameLoc   logger.Loc
+	BeforeCmp MQCmp
+	AfterCmp  MQCmp
+}
+
+func (q *MQRange) Equal(query MQ, check *CrossFileEqualityCheck) bool {
+	p, ok := query.(*MQRange)
+	return ok && q.BeforeCmp == p.BeforeCmp && q.AfterCmp == p.AfterCmp && q.Name == p.Name &&
+		TokensEqual(q.Before, p.Before, check) && TokensEqual(q.After, p.After, check)
+}
+
+func (q *MQRange) EqualIgnoringWhitespace(query MQ) bool {
+	p, ok := query.(*MQRange)
+	return ok && q.BeforeCmp == p.BeforeCmp && q.AfterCmp == p.AfterCmp && q.Name == p.Name &&
+		TokensEqualIgnoringWhitespace(q.Before, p.Before) && TokensEqualIgnoringWhitespace(q.After, p.After)
+}
+
+func (q *MQRange) Hash() uint32 {
+	hash := uint32(5)
+	hash = HashTokens(hash, q.Before)
+	hash = helpers.HashCombine(hash, uint32(q.BeforeCmp))
+	hash = helpers.HashCombineString(hash, q.Name)
+	hash = helpers.HashCombine(hash, uint32(q.AfterCmp))
+	hash = HashTokens(hash, q.After)
+	return hash
+}
+
+func (q *MQRange) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (MQ, []ast.ImportRecord) {
+	before, importRecordsOut := CloneTokensWithImportRecords(q.Before, importRecordsIn, nil, importRecordsOut)
+	after, importRecordsOut := CloneTokensWithImportRecords(q.After, importRecordsIn, nil, importRecordsOut)
+	return &MQRange{
+		Before:    before,
+		BeforeCmp: q.BeforeCmp,
+		Name:      q.Name,
+		AfterCmp:  q.AfterCmp,
+		After:     after,
+	}, importRecordsOut
+}
+
+type MQCmp uint8
+
+const (
+	MQCmpNone MQCmp = iota
+	MQCmpEq
+	MQCmpLt
+	MQCmpLe
+	MQCmpGt
+	MQCmpGe
+)
+
+func (cmp MQCmp) String() string {
+	switch cmp {
+	case MQCmpLt:
+		return "<"
+	case MQCmpLe:
+		return "<="
+	case MQCmpGt:
+		return ">"
+	case MQCmpGe:
+		return ">="
+	}
+	return "="
+}
+
+func (cmp MQCmp) Dir() int {
+	switch cmp {
+	case MQCmpLt, MQCmpLe:
+		return -1
+	case MQCmpGt, MQCmpGe:
+		return 1
+	}
+	return 0
+}
+
+func (cmp MQCmp) Flip() MQCmp {
+	switch cmp {
+	case MQCmpLt:
+		return MQCmpGe
+	case MQCmpLe:
+		return MQCmpGt
+	case MQCmpGt:
+		return MQCmpLe
+	case MQCmpGe:
+		return MQCmpLt
+	}
+	return cmp
+}
+
+func (cmp MQCmp) Reverse() MQCmp {
+	switch cmp {
+	case MQCmpLt:
+		return MQCmpGt
+	case MQCmpLe:
+		return MQCmpGe
+	case MQCmpGt:
+		return MQCmpLt
+	case MQCmpGe:
+		return MQCmpLe
+	}
+	return cmp
 }
 
 type ComplexSelector struct {
 	Selectors []CompoundSelector
 }
 
-func (a ComplexSelector) Equal(b ComplexSelector) bool {
+func ComplexSelectorsEqual(a []ComplexSelector, b []ComplexSelector, check *CrossFileEqualityCheck) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, ai := range a {
+		if !ai.Equal(b[i], check) {
+			return false
+		}
+	}
+	return true
+}
+
+func HashComplexSelectors(hash uint32, selectors []ComplexSelector) uint32 {
+	for _, complex := range selectors {
+		hash = helpers.HashCombine(hash, uint32(len(complex.Selectors)))
+		for _, sel := range complex.Selectors {
+			if sel.TypeSelector != nil {
+				hash = helpers.HashCombineString(hash, sel.TypeSelector.Name.Text)
+			} else {
+				hash = helpers.HashCombine(hash, 0)
+			}
+			hash = helpers.HashCombine(hash, uint32(len(sel.SubclassSelectors)))
+			for _, ss := range sel.SubclassSelectors {
+				hash = helpers.HashCombine(hash, ss.Data.Hash())
+			}
+			hash = helpers.HashCombine(hash, uint32(sel.Combinator.Byte))
+		}
+	}
+	return hash
+}
+
+func (s ComplexSelector) Clone() ComplexSelector {
+	clone := ComplexSelector{Selectors: make([]CompoundSelector, len(s.Selectors))}
+	for i, sel := range s.Selectors {
+		clone.Selectors[i] = sel.Clone()
+	}
+	return clone
+}
+
+func (sel ComplexSelector) ContainsNestingCombinator() bool {
+	for _, inner := range sel.Selectors {
+		if len(inner.NestingSelectorLocs) > 0 {
+			return true
+		}
+		for _, ss := range inner.SubclassSelectors {
+			if pseudo, ok := ss.Data.(*SSPseudoClassWithSelectorList); ok {
+				for _, nested := range pseudo.Selectors {
+					if nested.ContainsNestingCombinator() {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (sel ComplexSelector) IsRelative() bool {
+	// https://www.w3.org/TR/css-nesting-1/#syntax
+	// "If a selector in the <relative-selector-list> does not start with a
+	// combinator but does contain the nesting selector, it is interpreted
+	// as a non-relative selector."
+	if sel.Selectors[0].Combinator.Byte == 0 && sel.ContainsNestingCombinator() {
+		return false
+	}
+	return true
+}
+
+func tokensContainAmpersandRecursive(tokens []Token) bool {
+	for _, t := range tokens {
+		if t.Kind == css_lexer.TDelimAmpersand {
+			return true
+		}
+		if children := t.Children; children != nil && tokensContainAmpersandRecursive(*children) {
+			return true
+		}
+	}
+	return false
+}
+
+func (sel ComplexSelector) UsesPseudoElement() bool {
+	for _, sel := range sel.Selectors {
+		for _, ss := range sel.SubclassSelectors {
+			if class, ok := ss.Data.(*SSPseudoClass); ok {
+				if class.IsElement {
+					return true
+				}
+
+				// https://www.w3.org/TR/selectors-4/#single-colon-pseudos
+				// The four Level 2 pseudo-elements (::before, ::after, ::first-line,
+				// and ::first-letter) may, for legacy reasons, be represented using
+				// the <pseudo-class-selector> grammar, with only a single ":"
+				// character at their start.
+				switch class.Name {
+				case "before", "after", "first-line", "first-letter":
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (a ComplexSelector) Equal(b ComplexSelector, check *CrossFileEqualityCheck) bool {
 	if len(a.Selectors) != len(b.Selectors) {
 		return false
 	}
 
 	for i, ai := range a.Selectors {
 		bi := b.Selectors[i]
-		if ai.HasNestPrefix != bi.HasNestPrefix || ai.Combinator != bi.Combinator {
+		if len(ai.NestingSelectorLocs) != len(bi.NestingSelectorLocs) || ai.Combinator.Byte != bi.Combinator.Byte {
 			return false
 		}
 
@@ -537,7 +1234,7 @@ func (a ComplexSelector) Equal(b ComplexSelector) bool {
 			return false
 		}
 		for j, aj := range ai.SubclassSelectors {
-			if !aj.Equal(bi.SubclassSelectors[j]) {
+			if !aj.Data.Equal(bi.SubclassSelectors[j].Data, check) {
 				return false
 			}
 		}
@@ -546,16 +1243,75 @@ func (a ComplexSelector) Equal(b ComplexSelector) bool {
 	return true
 }
 
+type Combinator struct {
+	Loc  logger.Loc
+	Byte uint8 // Optional, may be 0 for no combinator
+}
+
 type CompoundSelector struct {
-	HasNestPrefix     bool   // "&"
-	Combinator        string // Optional, may be ""
-	TypeSelector      *NamespacedName
-	SubclassSelectors []SS
+	TypeSelector        *NamespacedName
+	SubclassSelectors   []SubclassSelector
+	NestingSelectorLocs []logger.Loc // "&" vs. "&&" is different specificity
+	Combinator          Combinator   // Optional, may be 0
+
+	// If this is true, this is a "&" that was generated by a bare ":local" or ":global"
+	WasEmptyFromLocalOrGlobal bool
+}
+
+func (sel CompoundSelector) IsSingleAmpersand() bool {
+	return len(sel.NestingSelectorLocs) == 1 && sel.Combinator.Byte == 0 && sel.TypeSelector == nil && len(sel.SubclassSelectors) == 0
+}
+
+func (sel CompoundSelector) IsInvalidBecauseEmpty() bool {
+	return len(sel.NestingSelectorLocs) == 0 && sel.TypeSelector == nil && len(sel.SubclassSelectors) == 0
+}
+
+func (sel CompoundSelector) Range() (r logger.Range) {
+	if sel.Combinator.Byte != 0 {
+		r = logger.Range{Loc: sel.Combinator.Loc, Len: 1}
+	}
+	if sel.TypeSelector != nil {
+		r.ExpandBy(sel.TypeSelector.Range())
+	}
+	for _, loc := range sel.NestingSelectorLocs {
+		r.ExpandBy(logger.Range{Loc: loc, Len: 1})
+	}
+	if len(sel.SubclassSelectors) > 0 {
+		for _, ss := range sel.SubclassSelectors {
+			r.ExpandBy(ss.Range)
+		}
+	}
+	return
+}
+
+func (sel CompoundSelector) Clone() CompoundSelector {
+	clone := sel
+
+	if sel.TypeSelector != nil {
+		t := sel.TypeSelector.Clone()
+		clone.TypeSelector = &t
+	}
+
+	if sel.SubclassSelectors != nil {
+		selectors := make([]SubclassSelector, len(sel.SubclassSelectors))
+		for i, ss := range sel.SubclassSelectors {
+			ss.Data = ss.Data.Clone()
+			selectors[i] = ss
+		}
+		clone.SubclassSelectors = selectors
+	}
+
+	return clone
 }
 
 type NameToken struct {
-	Kind css_lexer.T
-	Text string
+	Text  string
+	Range logger.Range
+	Kind  css_lexer.T
+}
+
+func (a NameToken) Equal(b NameToken) bool {
+	return a.Text == b.Text && a.Kind == b.Kind
 }
 
 type NamespacedName struct {
@@ -566,54 +1322,85 @@ type NamespacedName struct {
 	Name NameToken
 }
 
+func (n NamespacedName) Range() logger.Range {
+	if n.NamespacePrefix != nil {
+		loc := n.NamespacePrefix.Range.Loc
+		return logger.Range{Loc: loc, Len: n.Name.Range.End() - loc.Start}
+	}
+	return n.Name.Range
+}
+
+func (n NamespacedName) Clone() NamespacedName {
+	clone := n
+	if n.NamespacePrefix != nil {
+		prefix := *n.NamespacePrefix
+		clone.NamespacePrefix = &prefix
+	}
+	return clone
+}
+
 func (a NamespacedName) Equal(b NamespacedName) bool {
-	return a.Name == b.Name && (a.NamespacePrefix == nil) == (b.NamespacePrefix == nil) &&
-		(a.NamespacePrefix == nil || b.NamespacePrefix == nil || *a.NamespacePrefix == *b.NamespacePrefix)
+	return a.Name.Equal(b.Name) && (a.NamespacePrefix == nil) == (b.NamespacePrefix == nil) &&
+		(a.NamespacePrefix == nil || b.NamespacePrefix == nil || a.NamespacePrefix.Equal(b.Name))
+}
+
+type SubclassSelector struct {
+	Data  SS
+	Range logger.Range
 }
 
 type SS interface {
-	Equal(ss SS) bool
+	Equal(ss SS, check *CrossFileEqualityCheck) bool
 	Hash() uint32
+	Clone() SS
 }
 
 type SSHash struct {
-	Name string
+	Name ast.LocRef
 }
 
-func (a *SSHash) Equal(ss SS) bool {
+func (a *SSHash) Equal(ss SS, check *CrossFileEqualityCheck) bool {
 	b, ok := ss.(*SSHash)
-	return ok && a.Name == b.Name
+	return ok && check.RefsAreEquivalent(a.Name.Ref, b.Name.Ref)
 }
 
 func (ss *SSHash) Hash() uint32 {
 	hash := uint32(1)
-	hash = helpers.HashCombineString(hash, ss.Name)
 	return hash
 }
 
-type SSClass struct {
-	Name string
+func (ss *SSHash) Clone() SS {
+	clone := *ss
+	return &clone
 }
 
-func (a *SSClass) Equal(ss SS) bool {
+type SSClass struct {
+	Name ast.LocRef
+}
+
+func (a *SSClass) Equal(ss SS, check *CrossFileEqualityCheck) bool {
 	b, ok := ss.(*SSClass)
-	return ok && a.Name == b.Name
+	return ok && check.RefsAreEquivalent(a.Name.Ref, b.Name.Ref)
 }
 
 func (ss *SSClass) Hash() uint32 {
 	hash := uint32(2)
-	hash = helpers.HashCombineString(hash, ss.Name)
 	return hash
 }
 
+func (ss *SSClass) Clone() SS {
+	clone := *ss
+	return &clone
+}
+
 type SSAttribute struct {
-	NamespacedName  NamespacedName
 	MatcherOp       string // Either "" or one of: "=" "~=" "|=" "^=" "$=" "*="
 	MatcherValue    string
+	NamespacedName  NamespacedName
 	MatcherModifier byte // Either 0 or one of: 'i' 'I' 's' 'S'
 }
 
-func (a *SSAttribute) Equal(ss SS) bool {
+func (a *SSAttribute) Equal(ss SS, check *CrossFileEqualityCheck) bool {
 	b, ok := ss.(*SSAttribute)
 	return ok && a.NamespacedName.Equal(b.NamespacedName) && a.MatcherOp == b.MatcherOp &&
 		a.MatcherValue == b.MatcherValue && a.MatcherModifier == b.MatcherModifier
@@ -627,15 +1414,21 @@ func (ss *SSAttribute) Hash() uint32 {
 	return hash
 }
 
+func (ss *SSAttribute) Clone() SS {
+	clone := *ss
+	clone.NamespacedName = ss.NamespacedName.Clone()
+	return &clone
+}
+
 type SSPseudoClass struct {
 	Name      string
 	Args      []Token
 	IsElement bool // If true, this is prefixed by "::" instead of ":"
 }
 
-func (a *SSPseudoClass) Equal(ss SS) bool {
+func (a *SSPseudoClass) Equal(ss SS, check *CrossFileEqualityCheck) bool {
 	b, ok := ss.(*SSPseudoClass)
-	return ok && a.Name == b.Name && TokensEqual(a.Args, b.Args) && a.IsElement == b.IsElement
+	return ok && a.Name == b.Name && TokensEqual(a.Args, b.Args, check) && a.IsElement == b.IsElement
 }
 
 func (ss *SSPseudoClass) Hash() uint32 {
@@ -643,4 +1436,125 @@ func (ss *SSPseudoClass) Hash() uint32 {
 	hash = helpers.HashCombineString(hash, ss.Name)
 	hash = HashTokens(hash, ss.Args)
 	return hash
+}
+
+func (ss *SSPseudoClass) Clone() SS {
+	clone := *ss
+	if ss.Args != nil {
+		ss.Args = CloneTokensWithoutImportRecords(ss.Args)
+	}
+	return &clone
+}
+
+type PseudoClassKind uint8
+
+const (
+	PseudoClassGlobal PseudoClassKind = iota
+	PseudoClassHas
+	PseudoClassIs
+	PseudoClassLocal
+	PseudoClassNot
+	PseudoClassNthChild
+	PseudoClassNthLastChild
+	PseudoClassNthLastOfType
+	PseudoClassNthOfType
+	PseudoClassWhere
+)
+
+func (kind PseudoClassKind) HasNthIndex() bool {
+	return kind >= PseudoClassNthChild && kind <= PseudoClassNthOfType
+}
+
+func (kind PseudoClassKind) String() string {
+	switch kind {
+	case PseudoClassGlobal:
+		return "global"
+	case PseudoClassHas:
+		return "has"
+	case PseudoClassIs:
+		return "is"
+	case PseudoClassLocal:
+		return "local"
+	case PseudoClassNot:
+		return "not"
+	case PseudoClassNthChild:
+		return "nth-child"
+	case PseudoClassNthLastChild:
+		return "nth-last-child"
+	case PseudoClassNthLastOfType:
+		return "nth-last-of-type"
+	case PseudoClassNthOfType:
+		return "nth-of-type"
+	case PseudoClassWhere:
+		return "where"
+	default:
+		panic("Internal error")
+	}
+}
+
+// This is the "An+B" syntax
+type NthIndex struct {
+	A string
+	B string // May be "even" or "odd"
+}
+
+func (index *NthIndex) Minify() {
+	// "even" => "2n"
+	if index.B == "even" {
+		index.A = "2"
+		index.B = ""
+		return
+	}
+
+	// "2n+1" => "odd"
+	if index.A == "2" && index.B == "1" {
+		index.A = ""
+		index.B = "odd"
+		return
+	}
+
+	// "0n+1" => "1"
+	if index.A == "0" {
+		index.A = ""
+		if index.B == "" {
+			// "0n" => "0"
+			index.B = "0"
+		}
+		return
+	}
+
+	// "1n+0" => "1n"
+	if index.B == "0" && index.A != "" {
+		index.B = ""
+	}
+}
+
+// See https://drafts.csswg.org/selectors/#grouping
+type SSPseudoClassWithSelectorList struct {
+	Selectors []ComplexSelector
+	Index     NthIndex
+	Kind      PseudoClassKind
+}
+
+func (a *SSPseudoClassWithSelectorList) Equal(ss SS, check *CrossFileEqualityCheck) bool {
+	b, ok := ss.(*SSPseudoClassWithSelectorList)
+	return ok && a.Kind == b.Kind && a.Index == b.Index && ComplexSelectorsEqual(a.Selectors, b.Selectors, check)
+}
+
+func (ss *SSPseudoClassWithSelectorList) Hash() uint32 {
+	hash := uint32(5)
+	hash = helpers.HashCombine(hash, uint32(ss.Kind))
+	hash = helpers.HashCombineString(hash, ss.Index.A)
+	hash = helpers.HashCombineString(hash, ss.Index.B)
+	hash = HashComplexSelectors(hash, ss.Selectors)
+	return hash
+}
+
+func (ss *SSPseudoClassWithSelectorList) Clone() SS {
+	clone := *ss
+	clone.Selectors = make([]ComplexSelector, len(ss.Selectors))
+	for i, sel := range ss.Selectors {
+		clone.Selectors[i] = sel.Clone()
+	}
+	return &clone
 }

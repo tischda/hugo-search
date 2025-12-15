@@ -17,6 +17,7 @@
 package modules
 
 import (
+	"net/url"
 	"time"
 
 	"github.com/gohugoio/hugo/config"
@@ -25,7 +26,6 @@ import (
 var _ Module = (*moduleAdapter)(nil)
 
 type Module interface {
-
 	// Optional config read from the configFilename above.
 	Cfg() config.Provider
 
@@ -39,9 +39,6 @@ type Module interface {
 
 	// Directory holding files for this module.
 	Dir() string
-
-	// This module is disabled.
-	Disabled() bool
 
 	// Returns whether this is a Go Module.
 	IsGoMod() bool
@@ -58,6 +55,10 @@ type Module interface {
 	// or the path below your /theme folder, e.g. "mytheme".
 	Path() string
 
+	// For direct dependencies, this will be Path + "@" + VersionQuery.
+	// For managed dependencies, this will be the same as Path.
+	PathVersionQuery(escapeQuery bool) string
+
 	// Replaced by this module.
 	Replace() Module
 
@@ -66,6 +67,12 @@ type Module interface {
 
 	// The module version.
 	Version() string
+
+	// The version query requested in the import.
+	VersionQuery() string
+
+	// The expected cryptographic hash of the module.
+	Sum() string
 
 	// Time version was created.
 	Time() time.Time
@@ -77,13 +84,13 @@ type Module interface {
 type Modules []Module
 
 type moduleAdapter struct {
-	path       string
-	dir        string
-	version    string
-	vendor     bool
-	disabled   bool
-	projectMod bool
-	owner      Module
+	path         string
+	dir          string
+	version      string
+	versionQuery string
+	vendor       bool
+	projectMod   bool
+	owner        Module
 
 	mounts []Mount
 
@@ -115,10 +122,6 @@ func (m *moduleAdapter) Dir() string {
 	return m.gomod.Dir
 }
 
-func (m *moduleAdapter) Disabled() bool {
-	return m.disabled
-}
-
 func (m *moduleAdapter) IsGoMod() bool {
 	return m.gomod != nil
 }
@@ -136,6 +139,23 @@ func (m *moduleAdapter) Path() string {
 		return m.path
 	}
 	return m.gomod.Path
+}
+
+func (m *moduleAdapter) PathVersionQuery(escapeQuery bool) string {
+	// We added version as a config option in Hugo v0.150.0, so
+	// to make this backward compatible, we only add the version
+	// if it was explicitly requested.
+	pathBase := m.Path()
+	if m.versionQuery == "" || !m.IsGoMod() {
+		return pathBase
+	}
+
+	q := m.versionQuery
+	if escapeQuery {
+		q = url.QueryEscape(q)
+	}
+
+	return pathBase + "@" + q
 }
 
 func (m *moduleAdapter) Replace() Module {
@@ -159,13 +179,24 @@ func (m *moduleAdapter) Version() string {
 	return m.gomod.Version
 }
 
+func (m *moduleAdapter) VersionQuery() string {
+	return m.versionQuery
+}
+
+func (m *moduleAdapter) Sum() string {
+	if !m.IsGoMod() {
+		return ""
+	}
+
+	return m.gomod.Sum
+}
+
 func (m *moduleAdapter) Time() time.Time {
 	if !m.IsGoMod() || m.gomod.Time == nil {
 		return time.Time{}
 	}
 
 	return *m.gomod.Time
-
 }
 
 func (m *moduleAdapter) Watch() bool {
@@ -184,5 +215,7 @@ func (m *moduleAdapter) Watch() bool {
 		return m.Replace().Version() == ""
 	}
 
-	return false
+	// Any module set up in a workspace file will have Indirect set to false.
+	// That leaves modules inside the read-only module cache.
+	return !m.gomod.Indirect
 }

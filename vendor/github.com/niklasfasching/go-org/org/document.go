@@ -20,6 +20,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 )
 
 type Configuration struct {
@@ -28,6 +29,7 @@ type Configuration struct {
 	DefaultSettings     map[string]string                     // Default values for settings that are overriden by setting the same key in BufferSettings.
 	Log                 *log.Logger                           // Log is used to print warnings during parsing.
 	ReadFile            func(filename string) ([]byte, error) // ReadFile is used to read e.g. #+INCLUDE files.
+	ResolveLink         func(protocol string, description []Node, link string) Node
 }
 
 // Document contains the parsing results and a pointer to the Configuration.
@@ -72,10 +74,12 @@ var lexFns = []lexFn{
 	lexKeywordOrComment,
 	lexFootnoteDefinition,
 	lexExample,
+	lexLatexBlock,
 	lexText,
 }
 
 var nilToken = token{"nil", -1, "", nil}
+var orgWriterMutex = sync.Mutex{}
 var orgWriter = NewOrgWriter()
 
 // New returns a new Configuration with (hopefully) sane defaults.
@@ -86,15 +90,22 @@ func New() *Configuration {
 		DefaultSettings: map[string]string{
 			"TODO":         "TODO | DONE",
 			"EXCLUDE_TAGS": "noexport",
-			"OPTIONS":      "toc:t <:t e:t f:t pri:t todo:t tags:t title:t",
+			"OPTIONS":      "toc:t <:t e:t f:t pri:t todo:t tags:t title:t ealb:nil",
 		},
 		Log:      log.New(os.Stderr, "go-org: ", 0),
 		ReadFile: ioutil.ReadFile,
+		ResolveLink: func(protocol string, description []Node, link string) Node {
+			return RegularLink{protocol, description, link, false}
+		},
 	}
 }
 
 // String returns the pretty printed Org mode string for the given nodes (see OrgWriter).
-func String(nodes []Node) string { return orgWriter.WriteNodesAsString(nodes...) }
+func String(nodes ...Node) string {
+	orgWriterMutex.Lock()
+	defer orgWriterMutex.Unlock()
+	return orgWriter.WriteNodesAsString(nodes...)
+}
 
 // Write is called after with an instance of the Writer interface to export a parsed Document into another format.
 func (d *Document) Write(w Writer) (out string, err error) {
@@ -179,7 +190,8 @@ func (d *Document) Get(key string) string {
 // - todo (export headline todo status)
 // - pri (export headline priority)
 // - tags (export headline tags)
-// see https://orgmode.org/manual/Export-settings.html for more information
+// - ealb (non-standard) (export with east asian line breaks / ignore line breaks between multi-byte characters)
+// see https://orgmode.org/manual/Export-Settings.html for more information
 func (d *Document) GetOption(key string) string {
 	get := func(settings map[string]string) string {
 		for _, field := range strings.Fields(settings["OPTIONS"]) {
@@ -208,6 +220,8 @@ func (d *Document) parseOne(i int, stop stopFn) (consumed int, node Node) {
 		consumed, node = d.parseTable(i, stop)
 	case "beginBlock":
 		consumed, node = d.parseBlock(i, stop)
+	case "beginLatexBlock":
+		consumed, node = d.parseLatexBlock(i, stop)
 	case "result":
 		consumed, node = d.parseResult(i, stop)
 	case "beginDrawer":
@@ -231,7 +245,7 @@ func (d *Document) parseOne(i int, stop stopFn) (consumed int, node Node) {
 	if consumed != 0 {
 		return consumed, node
 	}
-	d.Log.Printf("Could not parse token %#v: Falling back to treating it as plain text.", d.tokens[i])
+	d.Log.Printf("Could not parse token %#v in file %s: Falling back to treating it as plain text.", d.tokens[i], d.Path)
 	m := plainTextRegexp.FindStringSubmatch(d.tokens[i].matches[0])
 	d.tokens[i] = token{"text", len(m[1]), m[2], m}
 	return d.parseOne(i, stop)
@@ -250,7 +264,9 @@ func (d *Document) parseMany(i int, stop stopFn) (int, []Node) {
 func (d *Document) addHeadline(headline *Headline) int {
 	current := &Section{Headline: headline}
 	d.Outline.last.add(current)
-	d.Outline.count++
+	if !headline.IsExcluded(d) {
+		d.Outline.count++
+	}
 	d.Outline.last = current
 	return d.Outline.count
 }

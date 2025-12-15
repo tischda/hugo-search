@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 
+	u "net/url"
+
 	h "golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
@@ -16,8 +18,23 @@ import (
 // HTMLWriter exports an org document into a html document.
 type HTMLWriter struct {
 	ExtendingWriter     Writer
-	HighlightCodeBlock  func(source, lang string, inline bool) string
+	HighlightCodeBlock  func(source, lang string, inline bool, params map[string]string) string
 	PrettyRelativeLinks bool
+	// TopLevelHLevel determines what HTML heading to use for a
+	// level-1 Org headline, and by extension further headings.
+	//
+	// For example, a value of 1 means a top-level Org headline will be
+	// rendered as an <h1> element, a level-2 Org headline will be
+	// rendered as an <h2> element, and so on.
+	//
+	// A value of 2 (default) means a top-level Org headline will be
+	// rendered as an <h2> element, a level-2 Org headline will be
+	// rendered as an <h3> element, and so on.
+	//
+	// This setting and its default behavior match Org's
+	// :html-toplevel-hlevel export property and the associated
+	// org-html-toplevel-hlevel variable.
+	TopLevelHLevel int
 
 	strings.Builder
 	document   *Document
@@ -29,23 +46,24 @@ type HTMLWriter struct {
 type footnotes struct {
 	mapping map[string]int
 	list    []*FootnoteDefinition
+	unused  map[string]*FootnoteDefinition
 }
 
 var emphasisTags = map[string][]string{
-	"/":   []string{"<em>", "</em>"},
-	"*":   []string{"<strong>", "</strong>"},
-	"+":   []string{"<del>", "</del>"},
-	"~":   []string{"<code>", "</code>"},
-	"=":   []string{`<code class="verbatim">`, "</code>"},
-	"_":   []string{`<span style="text-decoration: underline;">`, "</span>"},
-	"_{}": []string{"<sub>", "</sub>"},
-	"^{}": []string{"<sup>", "</sup>"},
+	"/":   {"<em>", "</em>"},
+	"*":   {"<strong>", "</strong>"},
+	"+":   {"<del>", "</del>"},
+	"~":   {"<code>", "</code>"},
+	"=":   {`<code class="verbatim">`, "</code>"},
+	"_":   {`<span style="text-decoration: underline;">`, "</span>"},
+	"_{}": {"<sub>", "</sub>"},
+	"^{}": {"<sup>", "</sup>"},
 }
 
 var listTags = map[string][]string{
-	"unordered":   []string{"<ul>", "</ul>"},
-	"ordered":     []string{"<ol>", "</ol>"},
-	"descriptive": []string{"<dl>", "</dl>"},
+	"unordered":   {"<ul>", "</ul>"},
+	"ordered":     {"<ol>", "</ol>"},
+	"descriptive": {"<dl>", "</dl>"},
 }
 
 var listItemStatuses = map[string]string{
@@ -63,14 +81,16 @@ func NewHTMLWriter() *HTMLWriter {
 		document:   &Document{Configuration: defaultConfig},
 		log:        defaultConfig.Log,
 		htmlEscape: true,
-		HighlightCodeBlock: func(source, lang string, inline bool) string {
+		HighlightCodeBlock: func(source, lang string, inline bool, params map[string]string) string {
 			if inline {
 				return fmt.Sprintf("<div class=\"highlight-inline\">\n<pre>\n%s\n</pre>\n</div>", html.EscapeString(source))
 			}
 			return fmt.Sprintf("<div class=\"highlight\">\n<pre>\n%s\n</pre>\n</div>", html.EscapeString(source))
 		},
+		TopLevelHLevel: 2,
 		footnotes: &footnotes{
 			mapping: map[string]int{},
+			unused:  map[string]*FootnoteDefinition{},
 		},
 	}
 }
@@ -97,7 +117,17 @@ func (w *HTMLWriter) Before(d *Document) {
 	if title := d.Get("TITLE"); title != "" && w.document.GetOption("title") != "nil" {
 		titleDocument := d.Parse(strings.NewReader(title), d.Path)
 		if titleDocument.Error == nil {
-			title = w.WriteNodesAsString(titleDocument.Nodes...)
+			simpleTitle := false
+			if len(titleDocument.Nodes) == 1 {
+				switch p := titleDocument.Nodes[0].(type) {
+				case Paragraph:
+					simpleTitle = true
+					title = w.WriteNodesAsString(p.Children...)
+				}
+			}
+			if !simpleTitle {
+				title = w.WriteNodesAsString(titleDocument.Nodes...)
+			}
 		}
 		w.WriteString(fmt.Sprintf(`<h1 class="title">%s</h1>`+"\n", title))
 	}
@@ -122,11 +152,15 @@ func (w *HTMLWriter) WriteBlock(b Block) {
 		if params[":exports"] == "results" || params[":exports"] == "none" {
 			break
 		}
+		if params[":noweb"] == "strip-export" {
+			stripNoweb := regexp.MustCompile(`<<[^>]+>>`)
+			content = stripNoweb.ReplaceAllString(content, "")
+		}
 		lang := "text"
 		if len(b.Parameters) >= 1 {
 			lang = strings.ToLower(b.Parameters[0])
 		}
-		content = w.HighlightCodeBlock(content, lang, false)
+		content = w.HighlightCodeBlock(content, lang, false, params)
 		w.WriteString(fmt.Sprintf("<div class=\"src src-%s\">\n%s\n</div>\n", lang, content))
 	case "EXAMPLE":
 		w.WriteString(`<pre class="example">` + "\n" + html.EscapeString(content) + "\n</pre>\n")
@@ -149,6 +183,11 @@ func (w *HTMLWriter) WriteBlock(b Block) {
 	}
 }
 
+func (w *HTMLWriter) WriteLatexBlock(b LatexBlock) {
+	WriteNodes(w, b.Content...)
+	w.WriteString("\n")
+}
+
 func (w *HTMLWriter) WriteResult(r Result) { WriteNodes(w, r.Node) }
 
 func (w *HTMLWriter) WriteInlineBlock(b InlineBlock) {
@@ -156,7 +195,7 @@ func (w *HTMLWriter) WriteInlineBlock(b InlineBlock) {
 	switch b.Name {
 	case "src":
 		lang := strings.ToLower(b.Parameters[0])
-		content = w.HighlightCodeBlock(content, lang, true)
+		content = w.HighlightCodeBlock(content, lang, true, nil)
 		w.WriteString(fmt.Sprintf("<div class=\"src src-inline src-%s\">\n%s\n</div>", lang, content))
 	case "export":
 		if strings.ToLower(b.Parameters[0]) == "html" {
@@ -193,9 +232,12 @@ func (w *HTMLWriter) WriteFootnotes(d *Document) {
 		return
 	}
 	w.WriteString(`<div class="footnotes">` + "\n")
-	w.WriteString(`<hr class="footnotes-separatator">` + "\n")
+	w.WriteString(`<hr class="footnotes-separatator"/>` + "\n")
 	w.WriteString(`<div class="footnote-definitions">` + "\n")
-	for i, definition := range w.footnotes.list {
+
+	// iterate by index instead of ranging, since new footnotes can be added when writing the definitions
+	for i := 0; i < len(w.footnotes.list); i++ {
+		definition := w.footnotes.list[i]
 		id := i + 1
 		if definition == nil {
 			name := ""
@@ -227,7 +269,7 @@ func (w *HTMLWriter) WriteOutline(d *Document, maxLvl int) {
 }
 
 func (w *HTMLWriter) writeSection(section *Section, maxLvl int) {
-	if maxLvl != 0 && section.Headline.Lvl > maxLvl {
+	if (maxLvl != 0 && section.Headline.Lvl > maxLvl) || section.Headline.IsExcluded(w.document) {
 		return
 	}
 	// NOTE: To satisfy hugo ExtractTOC() check we cannot use `<li>\n` here. Doesn't really matter, just a note.
@@ -250,35 +292,33 @@ func (w *HTMLWriter) writeSection(section *Section, maxLvl int) {
 }
 
 func (w *HTMLWriter) WriteHeadline(h Headline) {
-	for _, excludeTag := range strings.Fields(w.document.Get("EXCLUDE_TAGS")) {
-		for _, tag := range h.Tags {
-			if excludeTag == tag {
-				return
-			}
-		}
+	if h.IsExcluded(w.document) {
+		return
 	}
 
-	w.WriteString(fmt.Sprintf(`<div id="outline-container-%s" class="outline-%d">`, h.ID(), h.Lvl+1) + "\n")
-	w.WriteString(fmt.Sprintf(`<h%d id="%s">`, h.Lvl+1, h.ID()) + "\n")
+	level := (h.Lvl - 1) + w.TopLevelHLevel
+
+	w.WriteString(fmt.Sprintf(`<div id="outline-container-%s" class="outline-%d">`, h.ID(), level) + "\n")
+	w.WriteString(fmt.Sprintf(`<h%d id="%s">`, level, h.ID()) + "\n")
 	if w.document.GetOption("todo") != "nil" && h.Status != "" {
-		w.WriteString(fmt.Sprintf(`<span class="todo">%s</span>`, h.Status) + "\n")
+		w.WriteString(fmt.Sprintf(`<span class="todo status-%s">%s</span>`, strings.ToLower(h.Status), h.Status) + "\n")
 	}
 	if w.document.GetOption("pri") != "nil" && h.Priority != "" {
-		w.WriteString(fmt.Sprintf(`<span class="priority">[%s]</span>`, h.Priority) + "\n")
+		w.WriteString(fmt.Sprintf(`<span class="priority priority-%s">[%s]</span>`, strings.ToLower(h.Priority), h.Priority) + "\n")
 	}
 
 	WriteNodes(w, h.Title...)
 	if w.document.GetOption("tags") != "nil" && len(h.Tags) != 0 {
 		tags := make([]string, len(h.Tags))
 		for i, tag := range h.Tags {
-			tags[i] = fmt.Sprintf(`<span>%s</span>`, tag)
+			tags[i] = fmt.Sprintf(`<span class="tag-%s">%s</span>`, strings.ToLower(tag), tag)
 		}
 		w.WriteString("&#xa0;&#xa0;&#xa0;")
 		w.WriteString(fmt.Sprintf(`<span class="tags">%s</span>`, strings.Join(tags, "&#xa0;")))
 	}
-	w.WriteString(fmt.Sprintf("\n</h%d>\n", h.Lvl+1))
+	w.WriteString(fmt.Sprintf("\n</h%d>\n", level))
 	if content := w.WriteNodesAsString(h.Children...); content != "" {
-		w.WriteString(fmt.Sprintf(`<div id="outline-text-%s" class="outline-text-%d">`, h.ID(), h.Lvl+1) + "\n" + content + "</div>\n")
+		w.WriteString(fmt.Sprintf(`<div id="outline-text-%s" class="outline-text-%d">`, h.ID(), level) + "\n" + content + "</div>\n")
 	}
 	w.WriteString("</div>\n")
 }
@@ -314,7 +354,9 @@ func (w *HTMLWriter) WriteStatisticToken(s StatisticToken) {
 }
 
 func (w *HTMLWriter) WriteLineBreak(l LineBreak) {
-	w.WriteString(strings.Repeat("\n", l.Count))
+	if w.document.GetOption("ealb") == "nil" || !l.BetweenMultibyteCharacters {
+		w.WriteString(strings.Repeat("\n", l.Count))
+	}
 }
 
 func (w *HTMLWriter) WriteExplicitLineBreak(l ExplicitLineBreak) {
@@ -362,21 +404,27 @@ func (w *HTMLWriter) WriteRegularLink(l RegularLink) {
 		url = strings.TrimSuffix(url, ".org") + ".html"
 	}
 	if prefix := w.document.Links[l.Protocol]; prefix != "" {
-		url = html.EscapeString(prefix) + strings.TrimPrefix(url, l.Protocol+":")
+		if tag := strings.TrimPrefix(l.URL, l.Protocol+":"); strings.Contains(prefix, "%s") || strings.Contains(prefix, "%h") {
+			url = html.EscapeString(strings.ReplaceAll(strings.ReplaceAll(prefix, "%s", tag), "%h", u.QueryEscape(tag)))
+		} else {
+			url = html.EscapeString(prefix) + tag
+		}
+	} else if prefix := w.document.Links[l.URL]; prefix != "" {
+		url = html.EscapeString(strings.ReplaceAll(strings.ReplaceAll(prefix, "%s", ""), "%h", ""))
 	}
 	switch l.Kind() {
 	case "image":
 		if l.Description == nil {
 			w.WriteString(fmt.Sprintf(`<img src="%s" alt="%s" title="%s" />`, url, url, url))
 		} else {
-			description := strings.TrimPrefix(String(l.Description), "file:")
+			description := strings.TrimPrefix(String(l.Description...), "file:")
 			w.WriteString(fmt.Sprintf(`<a href="%s"><img src="%s" alt="%s" /></a>`, url, description, description))
 		}
 	case "video":
 		if l.Description == nil {
 			w.WriteString(fmt.Sprintf(`<video src="%s" title="%s">%s</video>`, url, url, url))
 		} else {
-			description := strings.TrimPrefix(String(l.Description), "file:")
+			description := strings.TrimPrefix(String(l.Description...), "file:")
 			w.WriteString(fmt.Sprintf(`<a href="%s"><video src="%s" title="%s"></video></a>`, url, description, description))
 		}
 	default:
@@ -412,12 +460,15 @@ func (w *HTMLWriter) WriteList(l List) {
 }
 
 func (w *HTMLWriter) WriteListItem(li ListItem) {
-	if li.Status != "" {
-		w.WriteString(fmt.Sprintf("<li class=\"%s\">\n", listItemStatuses[li.Status]))
-	} else {
-		w.WriteString("<li>\n")
+	attributes := ""
+	if li.Value != "" {
+		attributes += fmt.Sprintf(` value="%s"`, li.Value)
 	}
-	WriteNodes(w, li.Children...)
+	if li.Status != "" {
+		attributes += fmt.Sprintf(` class="%s"`, listItemStatuses[li.Status])
+	}
+	w.WriteString(fmt.Sprintf("<li%s>", attributes))
+	w.writeListItemContent(li.Children)
 	w.WriteString("</li>\n")
 }
 
@@ -434,9 +485,24 @@ func (w *HTMLWriter) WriteDescriptiveListItem(di DescriptiveListItem) {
 		w.WriteString("?")
 	}
 	w.WriteString("\n</dt>\n")
-	w.WriteString("<dd>\n")
-	WriteNodes(w, di.Details...)
+	w.WriteString("<dd>")
+	w.writeListItemContent(di.Details)
 	w.WriteString("</dd>\n")
+}
+
+func (w *HTMLWriter) writeListItemContent(children []Node) {
+	if isParagraphNodeSlice(children) {
+		for i, c := range children {
+			out := w.WriteNodesAsString(c.(Paragraph).Children...)
+			if i != 0 && out != "" {
+				w.WriteString("\n")
+			}
+			w.WriteString(out)
+		}
+	} else {
+		w.WriteString("\n")
+		WriteNodes(w, children...)
+	}
 }
 
 func (w *HTMLWriter) WriteParagraph(p Paragraph) {
@@ -565,7 +631,8 @@ func (w *HTMLWriter) blockContent(name string, children []Node) string {
 		WriteNodes(w, children...)
 		out := w.String()
 		w.Builder, w.htmlEscape = builder, htmlEscape
-		return strings.TrimRightFunc(out, unicode.IsSpace)
+
+		return strings.TrimRightFunc(strings.TrimLeftFunc(out, IsNewLineChar), unicode.IsSpace)
 	} else {
 		return w.WriteNodesAsString(children...)
 	}
@@ -586,10 +653,27 @@ func setHTMLAttribute(attributes []h.Attribute, k, v string) []h.Attribute {
 	return append(attributes, h.Attribute{Namespace: "", Key: k, Val: v})
 }
 
+func isParagraphNodeSlice(ns []Node) bool {
+	for _, n := range ns {
+		if _, ok := n.(Paragraph); !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (fs *footnotes) add(f FootnoteLink) int {
 	if i, ok := fs.mapping[f.Name]; ok && f.Name != "" {
 		return i
 	}
+
+	if def, ok := fs.unused[f.Name]; ok && f.Name != "" && f.Definition == nil {
+		// if there was an a previously unused definition with the same name, attach it to this link
+		// (this enables footnotes from another footnote's definition)
+		f.Definition = def
+		delete(fs.unused, f.Name)
+	}
+
 	fs.list = append(fs.list, f.Definition)
 	i := len(fs.list) - 1
 	if f.Name != "" {
@@ -601,5 +685,9 @@ func (fs *footnotes) add(f FootnoteLink) int {
 func (fs *footnotes) updateDefinition(f FootnoteDefinition) {
 	if i, ok := fs.mapping[f.Name]; ok {
 		fs.list[i] = &f
+	} else {
+		// this could either be an unused definition or one used in another footnote
+		// save in case it's the latter
+		fs.unused[f.Name] = &f
 	}
 }

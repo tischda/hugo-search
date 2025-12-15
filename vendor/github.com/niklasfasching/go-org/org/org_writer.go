@@ -20,14 +20,14 @@ type OrgWriter struct {
 var exampleBlockUnescapeRegexp = regexp.MustCompile(`(^|\n)([ \t]*)(\*|,\*|#\+|,#\+)`)
 
 var emphasisOrgBorders = map[string][]string{
-	"_":   []string{"_", "_"},
-	"*":   []string{"*", "*"},
-	"/":   []string{"/", "/"},
-	"+":   []string{"+", "+"},
-	"~":   []string{"~", "~"},
-	"=":   []string{"=", "="},
-	"_{}": []string{"_{", "}"},
-	"^{}": []string{"^{", "}"},
+	"_":   {"_", "_"},
+	"*":   {"*", "*"},
+	"/":   {"/", "/"},
+	"+":   {"+", "+"},
+	"~":   {"~", "~"},
+	"=":   {"=", "="},
+	"_{}": {"_{", "}"},
+	"^{}": {"^{", "}"},
 }
 
 func NewOrgWriter() *OrgWriter {
@@ -107,6 +107,12 @@ func (w *OrgWriter) WriteBlock(b Block) {
 		w.WriteString("\n")
 		WriteNodes(w, b.Result)
 	}
+}
+
+func (w *OrgWriter) WriteLatexBlock(b LatexBlock) {
+	w.WriteString(w.indent)
+	WriteNodes(w, b.Content...)
+	w.WriteString("\n")
 }
 
 func (w *OrgWriter) WriteResult(r Result) {
@@ -219,6 +225,9 @@ func (w *OrgWriter) WriteListItem(li ListItem) {
 	content := strings.TrimPrefix(w.String(), w.indent)
 	w.Builder, w.indent = originalBuilder, originalIndent
 	w.WriteString(w.indent + li.Bullet)
+	if li.Value != "" {
+		w.WriteString(fmt.Sprintf(" [@%s]", li.Value))
+	}
 	if li.Status != "" {
 		w.WriteString(fmt.Sprintf(" [%s]", li.Status))
 	}

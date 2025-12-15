@@ -17,12 +17,12 @@ package internal
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"go/doc"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
@@ -49,7 +49,10 @@ type TemplateFuncsNamespace struct {
 	Name string
 
 	// This is the method receiver.
-	Context func(v ...interface{}) (interface{}, error)
+	Context func(ctx context.Context, v ...any) (any, error)
+
+	// OnCreated is called when all the namespaces are ready.
+	OnCreated func(namespaces map[string]any)
 
 	// Additional info, aliases and examples, per method name.
 	MethodMappings map[string]TemplateFuncMethodMapping
@@ -59,12 +62,17 @@ type TemplateFuncsNamespace struct {
 type TemplateFuncsNamespaces []*TemplateFuncsNamespace
 
 // AddMethodMapping adds a method to a template function namespace.
-func (t *TemplateFuncsNamespace) AddMethodMapping(m interface{}, aliases []string, examples [][2]string) {
+func (t *TemplateFuncsNamespace) AddMethodMapping(m any, aliases []string, examples [][2]string) {
 	if t.MethodMappings == nil {
 		t.MethodMappings = make(map[string]TemplateFuncMethodMapping)
 	}
 
 	name := methodToName(m)
+
+	// Rewrite §§ to ` in example commands.
+	for i, e := range examples {
+		examples[i][0] = strings.ReplaceAll(e[0], "§§", "`")
+	}
 
 	// sanity check
 	for _, e := range examples {
@@ -88,7 +96,7 @@ func (t *TemplateFuncsNamespace) AddMethodMapping(m interface{}, aliases []strin
 // TemplateFuncMethodMapping represents a mapping of functions to methods for a
 // given namespace.
 type TemplateFuncMethodMapping struct {
-	Method interface{}
+	Method any
 
 	// Any template funcs aliases. This is mainly motivated by keeping
 	// backwards compatibility, but some new template funcs may also make
@@ -104,7 +112,7 @@ type TemplateFuncMethodMapping struct {
 	Examples [][2]string
 }
 
-func methodToName(m interface{}) string {
+func methodToName(m any) string {
 	name := runtime.FuncForPC(reflect.ValueOf(m).Pointer()).Name()
 	name = filepath.Ext(name)
 	name = strings.TrimPrefix(name, ".")
@@ -141,6 +149,22 @@ func (t goDocFunc) toJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// ToMap returns a limited map representation of the namespaces.
+func (namespaces TemplateFuncsNamespaces) ToMap() map[string]any {
+	m := make(map[string]any)
+	for _, ns := range namespaces {
+		mm := make(map[string]any)
+		for name, mapping := range ns.MethodMappings {
+			mm[name] = map[string]any{
+				"Examples": mapping.Examples,
+				"Aliases":  mapping.Aliases,
+			}
+		}
+		m[ns.Name] = mm
+	}
+	return m
+}
+
 // MarshalJSON returns the JSON encoding of namespaces.
 func (namespaces TemplateFuncsNamespaces) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
@@ -148,14 +172,17 @@ func (namespaces TemplateFuncsNamespaces) MarshalJSON() ([]byte, error) {
 	buf.WriteString("{")
 
 	for i, ns := range namespaces {
-		if i != 0 {
-			buf.WriteString(",")
-		}
-		b, err := ns.toJSON()
+
+		b, err := ns.toJSON(context.Background())
 		if err != nil {
 			return nil, err
 		}
-		buf.Write(b)
+		if b != nil {
+			if i != 0 {
+				buf.WriteString(",")
+			}
+			buf.Write(b)
+		}
 	}
 
 	buf.WriteString("}")
@@ -163,7 +190,11 @@ func (namespaces TemplateFuncsNamespaces) MarshalJSON() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func (t *TemplateFuncsNamespace) toJSON() ([]byte, error) {
+var ignoreFuncs = map[string]bool{
+	"Reset": true,
+}
+
+func (t *TemplateFuncsNamespace) toJSON(ctx context.Context) ([]byte, error) {
 	var buf bytes.Buffer
 
 	godoc := getGetTplPackagesGoDoc()[t.Name]
@@ -172,13 +203,21 @@ func (t *TemplateFuncsNamespace) toJSON() ([]byte, error) {
 
 	buf.WriteString(fmt.Sprintf(`%q: {`, t.Name))
 
-	ctx, err := t.Context()
+	tctx, err := t.Context(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ctxType := reflect.TypeOf(ctx)
-	for i := 0; i < ctxType.NumMethod(); i++ {
+	if tctx == nil {
+		// E.g. page.
+		// We should fix this, but we're going to abandon this construct in a little while.
+		return nil, nil
+	}
+	ctxType := reflect.TypeOf(tctx)
+	for i := range ctxType.NumMethod() {
 		method := ctxType.Method(i)
+		if ignoreFuncs[method.Name] {
+			continue
+		}
 		f := goDocFunc{
 			Name: method.Name,
 		}
@@ -239,7 +278,7 @@ func getGetTplPackagesGoDoc() map[string]map[string]methodGoDocInfo {
 			basePath = filepath.Join(pwd, "tpl")
 		}
 
-		files, err := ioutil.ReadDir(basePath)
+		files, err := os.ReadDir(basePath)
 		if err != nil {
 			log.Fatal(err)
 		}

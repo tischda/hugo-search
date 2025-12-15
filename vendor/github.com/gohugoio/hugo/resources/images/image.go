@@ -14,6 +14,7 @@
 package images
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -25,6 +26,9 @@ import (
 	"sync"
 
 	"github.com/bep/gowebp/libwebp/webpoptions"
+	"github.com/bep/imagemeta"
+	"github.com/bep/logg"
+	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/resources/images/webp"
 
 	"github.com/gohugoio/hugo/media"
@@ -35,7 +39,6 @@ import (
 	"golang.org/x/image/tiff"
 
 	"github.com/gohugoio/hugo/common/hugio"
-	"github.com/pkg/errors"
 )
 
 func NewImage(f Format, proc *ImageProcessor, img image.Image, s Spec) *Image {
@@ -85,6 +88,10 @@ func (i *Image) EncodeTo(conf ImageConfig, img image.Image, w io.Writer) error {
 		return encoder.Encode(w, img)
 
 	case GIF:
+		if giphy, ok := img.(Giphy); ok {
+			g := giphy.GIF()
+			return gif.EncodeAll(w, g)
+		}
 		return gif.Encode(w, img, &gif.Options{
 			NumColors: 256,
 		})
@@ -163,19 +170,20 @@ func (i *Image) initConfig() error {
 	})
 
 	if err != nil {
-		return errors.Wrap(err, "failed to load image config")
+		return fmt.Errorf("failed to load image config: %w", err)
 	}
 
 	return nil
 }
 
-func NewImageProcessor(cfg ImagingConfig) (*ImageProcessor, error) {
-	e := cfg.Cfg.Exif
+func NewImageProcessor(warnl logg.LevelLogger, cfg *config.ConfigNamespace[ImagingConfig, ImagingConfigInternal]) (*ImageProcessor, error) {
+	e := cfg.Config.Imaging.Exif
 	exifDecoder, err := exif.NewDecoder(
 		exif.WithDateDisabled(e.DisableDate),
 		exif.WithLatLongDisabled(e.DisableLatLong),
 		exif.ExcludeFields(e.ExcludeFields),
 		exif.IncludeFields(e.IncludeFields),
+		exif.WithWarnLogger(warnl),
 	)
 	if err != nil {
 		return nil, err
@@ -188,15 +196,16 @@ func NewImageProcessor(cfg ImagingConfig) (*ImageProcessor, error) {
 }
 
 type ImageProcessor struct {
-	Cfg         ImagingConfig
+	Cfg         *config.ConfigNamespace[ImagingConfig, ImagingConfigInternal]
 	exifDecoder *exif.Decoder
 }
 
-func (p *ImageProcessor) DecodeExif(r io.Reader) (*exif.Exif, error) {
-	return p.exifDecoder.Decode(r)
+// Filename is only used for logging.
+func (p *ImageProcessor) DecodeExif(filename string, format imagemeta.ImageFormat, r io.Reader) (*exif.ExifInfo, error) {
+	return p.exifDecoder.Decode(filename, format, r)
 }
 
-func (p *ImageProcessor) ApplyFiltersFromConfig(src image.Image, conf ImageConfig) (image.Image, error) {
+func (p *ImageProcessor) FiltersFromConfig(src image.Image, conf ImageConfig) ([]gift.Filter, error) {
 	var filters []gift.Filter
 
 	if conf.Rotate != 0 {
@@ -207,8 +216,23 @@ func (p *ImageProcessor) ApplyFiltersFromConfig(src image.Image, conf ImageConfi
 	switch conf.Action {
 	case "resize":
 		filters = append(filters, gift.Resize(conf.Width, conf.Height, conf.Filter))
+	case "crop":
+		if conf.Anchor == SmartCropAnchor {
+			bounds, err := p.smartCrop(src, conf.Width, conf.Height, conf.Filter)
+			if err != nil {
+				return nil, err
+			}
+
+			// First crop using the bounds returned by smartCrop.
+			filters = append(filters, gift.Crop(bounds))
+			// Then center crop the image to get an image the desired size without resizing.
+			filters = append(filters, gift.CropToSize(conf.Width, conf.Height, gift.CenterAnchor))
+
+		} else {
+			filters = append(filters, gift.CropToSize(conf.Width, conf.Height, conf.Anchor))
+		}
 	case "fill":
-		if conf.AnchorStr == smartCropIdentifier {
+		if conf.Anchor == SmartCropAnchor {
 			bounds, err := p.smartCrop(src, conf.Width, conf.Height, conf.Filter)
 			if err != nil {
 				return nil, err
@@ -224,10 +248,22 @@ func (p *ImageProcessor) ApplyFiltersFromConfig(src image.Image, conf ImageConfi
 	case "fit":
 		filters = append(filters, gift.ResizeToFit(conf.Width, conf.Height, conf.Filter))
 	default:
-		return nil, errors.Errorf("unsupported action: %q", conf.Action)
+
+	}
+	return filters, nil
+}
+
+func (p *ImageProcessor) ApplyFiltersFromConfig(src image.Image, conf ImageConfig) (image.Image, error) {
+	filters, err := p.FiltersFromConfig(src, conf)
+	if err != nil {
+		return nil, err
 	}
 
-	img, err := p.Filter(src, filters...)
+	if len(filters) == 0 {
+		return p.resolveSrc(src, conf.TargetFormat), nil
+	}
+
+	img, err := p.doFilter(src, conf.TargetFormat, filters...)
 	if err != nil {
 		return nil, err
 	}
@@ -236,8 +272,47 @@ func (p *ImageProcessor) ApplyFiltersFromConfig(src image.Image, conf ImageConfi
 }
 
 func (p *ImageProcessor) Filter(src image.Image, filters ...gift.Filter) (image.Image, error) {
-	g := gift.New(filters...)
-	bounds := g.Bounds(src.Bounds())
+	return p.doFilter(src, 0, filters...)
+}
+
+func (p *ImageProcessor) resolveSrc(src image.Image, targetFormat Format) image.Image {
+	if giph, ok := src.(Giphy); ok {
+		g := giph.GIF()
+		if len(g.Image) < 2 || (targetFormat == 0 || targetFormat != GIF) {
+			src = g.Image[0]
+		}
+	}
+	return src
+}
+
+func (p *ImageProcessor) doFilter(src image.Image, targetFormat Format, filters ...gift.Filter) (image.Image, error) {
+	filter := gift.New(filters...)
+
+	if giph, ok := src.(Giphy); ok {
+		g := giph.GIF()
+		if len(g.Image) < 2 || (targetFormat == 0 || targetFormat != GIF) {
+			src = g.Image[0]
+		} else {
+			var bounds image.Rectangle
+			firstFrame := g.Image[0]
+			tmp := image.NewNRGBA(firstFrame.Bounds())
+			for i := range g.Image {
+				gift.New().DrawAt(tmp, g.Image[i], g.Image[i].Bounds().Min, gift.OverOperator)
+				bounds = filter.Bounds(tmp.Bounds())
+				dst := image.NewPaletted(bounds, g.Image[i].Palette)
+				filter.Draw(dst, tmp)
+				g.Image[i] = dst
+			}
+			g.Config.Width = bounds.Dx()
+			g.Config.Height = bounds.Dy()
+
+			return giph, nil
+		}
+
+	}
+
+	bounds := filter.Bounds(src.Bounds())
+
 	var dst draw.Image
 	switch src.(type) {
 	case *image.RGBA:
@@ -249,15 +324,19 @@ func (p *ImageProcessor) Filter(src image.Image, filters ...gift.Filter) (image.
 	default:
 		dst = image.NewNRGBA(bounds)
 	}
-	g.Draw(dst, src)
+	filter.Draw(dst, src)
+
 	return dst, nil
 }
 
-func GetDefaultImageConfig(action string, defaults ImagingConfig) ImageConfig {
+func GetDefaultImageConfig(defaults *config.ConfigNamespace[ImagingConfig, ImagingConfigInternal]) ImageConfig {
+	if defaults == nil {
+		defaults = defaultImageConfig
+	}
 	return ImageConfig{
-		Action:  action,
-		Hint:    defaults.Hint,
-		Quality: defaults.Cfg.Quality,
+		Anchor:  -1, // The real values start at 0.
+		Hint:    defaults.Config.Hint,
+		Quality: defaults.Config.Imaging.Quality,
 	}
 }
 
@@ -277,6 +356,21 @@ const (
 	BMP
 	WEBP
 )
+
+func (f Format) ToImageMetaImageFormatFormat() imagemeta.ImageFormat {
+	switch f {
+	case JPEG:
+		return imagemeta.JPEG
+	case PNG:
+		return imagemeta.PNG
+	case TIFF:
+		return imagemeta.TIFF
+	case WEBP:
+		return imagemeta.WebP
+	default:
+		return -1
+	}
+}
 
 // RequiresDefaultQuality returns if the default quality needs to be applied to
 // images of this format.
@@ -299,17 +393,17 @@ func (f Format) DefaultExtension() string {
 func (f Format) MediaType() media.Type {
 	switch f {
 	case JPEG:
-		return media.JPEGType
+		return media.Builtin.JPEGType
 	case PNG:
-		return media.PNGType
+		return media.Builtin.PNGType
 	case GIF:
-		return media.GIFType
+		return media.Builtin.GIFType
 	case TIFF:
-		return media.TIFFType
+		return media.Builtin.TIFFType
 	case BMP:
-		return media.BMPType
+		return media.Builtin.BMPType
 	case WEBP:
-		return media.WEBPType
+		return media.Builtin.WEBPType
 	default:
 		panic(fmt.Sprintf("%d is not a valid image format", f))
 	}
@@ -322,11 +416,23 @@ type imageConfig struct {
 }
 
 func imageConfigFromImage(img image.Image) image.Config {
+	if giphy, ok := img.(Giphy); ok {
+		return giphy.GIF().Config
+	}
 	b := img.Bounds()
 	return image.Config{Width: b.Max.X, Height: b.Max.Y}
 }
 
-func ToFilters(in interface{}) []gift.Filter {
+// UnwrapFilter unwraps the given filter if it is a filter wrapper.
+func UnwrapFilter(in gift.Filter) gift.Filter {
+	if f, ok := in.(filter); ok {
+		return f.Filter
+	}
+	return in
+}
+
+// ToFilters converts the given input to a slice of gift.Filter.
+func ToFilters(in any) []gift.Filter {
 	switch v := in.(type) {
 	case []gift.Filter:
 		return v
@@ -359,4 +465,10 @@ func IsOpaque(img image.Image) bool {
 type ImageSource interface {
 	DecodeImage() (image.Image, error)
 	Key() string
+}
+
+// Giphy represents a GIF Image that may be animated.
+type Giphy interface {
+	image.Image    // The first frame.
+	GIF() *gif.GIF // All frames.
 }

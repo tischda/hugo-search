@@ -18,7 +18,7 @@ import (
 	"strings"
 
 	"github.com/gohugoio/hugo/output"
-	"github.com/gohugoio/hugo/resources/page"
+	"github.com/gohugoio/hugo/resources/kinds"
 	"github.com/spf13/cast"
 )
 
@@ -27,6 +27,7 @@ func createDefaultOutputFormats(allFormats output.Formats) map[string]output.For
 	htmlOut, _ := allFormats.GetByName(output.HTMLFormat.Name)
 	robotsOut, _ := allFormats.GetByName(output.RobotsTxtFormat.Name)
 	sitemapOut, _ := allFormats.GetByName(output.SitemapFormat.Name)
+	httpStatus404Out, _ := allFormats.GetByName(output.HTTPStatus404HTMLFormat.Name)
 
 	defaultListTypes := output.Formats{htmlOut}
 	if rssFound {
@@ -34,26 +35,26 @@ func createDefaultOutputFormats(allFormats output.Formats) map[string]output.For
 	}
 
 	m := map[string]output.Formats{
-		page.KindPage:     {htmlOut},
-		page.KindHome:     defaultListTypes,
-		page.KindSection:  defaultListTypes,
-		page.KindTerm:     defaultListTypes,
-		page.KindTaxonomy: defaultListTypes,
+		kinds.KindPage:     {htmlOut},
+		kinds.KindHome:     defaultListTypes,
+		kinds.KindSection:  defaultListTypes,
+		kinds.KindTerm:     defaultListTypes,
+		kinds.KindTaxonomy: defaultListTypes,
 		// Below are for consistency. They are currently not used during rendering.
-		kindSitemap:   {sitemapOut},
-		kindRobotsTXT: {robotsOut},
-		kind404:       {htmlOut},
+		kinds.KindSitemap:   {sitemapOut},
+		kinds.KindRobotsTXT: {robotsOut},
+		kinds.KindStatus404: {httpStatus404Out},
 	}
 
 	// May be disabled
 	if rssFound {
-		m[kindRSS] = output.Formats{rssOut}
+		m[kinds.KindRSS] = output.Formats{rssOut}
 	}
 
 	return m
 }
 
-func createSiteOutputFormats(allFormats output.Formats, outputs map[string]interface{}, rssDisabled bool) (map[string]output.Formats, error) {
+func createSiteOutputFormats(allFormats output.Formats, outputs map[string]any, rssDisabled bool) (map[string]output.Formats, error) {
 	defaultOutputFormats := createDefaultOutputFormats(allFormats)
 
 	if outputs == nil {
@@ -69,7 +70,7 @@ func createSiteOutputFormats(allFormats output.Formats, outputs map[string]inter
 	seen := make(map[string]bool)
 
 	for k, v := range outputs {
-		k = getKind(k)
+		k = kinds.GetKindAny(k)
 		if k == "" {
 			// Invalid kind
 			continue
@@ -80,7 +81,7 @@ func createSiteOutputFormats(allFormats output.Formats, outputs map[string]inter
 			f, found := allFormats.GetByName(format)
 			if !found {
 				if rssDisabled && strings.EqualFold(format, "RSS") {
-					// This is legacy behaviour. We used to have both
+					// This is legacy behavior. We used to have both
 					// a RSS page kind and output format.
 					continue
 				}

@@ -1,4 +1,4 @@
-// Copyright 2021 The Hugo Authors. All rights reserved.
+// Copyright 2024 The Hugo Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,13 +17,12 @@ import (
 	"fmt"
 	"net/url"
 	"path"
+	"path/filepath"
+	"runtime"
 	"strings"
-
-	"github.com/PuerkitoBio/purell"
 )
 
-type pathBridge struct {
-}
+type pathBridge struct{}
 
 func (pathBridge) Base(in string) string {
 	return path.Base(in)
@@ -51,56 +50,12 @@ func (pathBridge) Separator() string {
 
 var pb pathBridge
 
-func sanitizeURLWithFlags(in string, f purell.NormalizationFlags) string {
-	s, err := purell.NormalizeURLString(in, f)
-	if err != nil {
-		return in
-	}
-
-	// Temporary workaround for the bug fix and resulting
-	// behavioral change in purell.NormalizeURLString():
-	// a leading '/' was inadvertently added to relative links,
-	// but no longer, see #878.
-	//
-	// I think the real solution is to allow Hugo to
-	// make relative URL with relative path,
-	// e.g. "../../post/hello-again/", as wished by users
-	// in issues #157, #622, etc., without forcing
-	// relative URLs to begin with '/'.
-	// Once the fixes are in, let's remove this kludge
-	// and restore SanitizeURL() to the way it was.
-	//                         -- @anthonyfok, 2015-02-16
-	//
-	// Begin temporary kludge
-	u, err := url.Parse(s)
-	if err != nil {
-		panic(err)
-	}
-	if len(u.Path) > 0 && !strings.HasPrefix(u.Path, "/") {
-		u.Path = "/" + u.Path
-	}
-	return u.String()
-	// End temporary kludge
-
-	// return s
-
-}
-
-// SanitizeURL sanitizes the input URL string.
-func SanitizeURL(in string) string {
-	return sanitizeURLWithFlags(in, purell.FlagsSafe|purell.FlagRemoveTrailingSlash|purell.FlagRemoveDotSegments|purell.FlagRemoveDuplicateSlashes|purell.FlagRemoveUnnecessaryHostDots|purell.FlagRemoveEmptyPortSeparator)
-}
-
-// SanitizeURLKeepTrailingSlash is the same as SanitizeURL, but will keep any trailing slash.
-func SanitizeURLKeepTrailingSlash(in string) string {
-	return sanitizeURLWithFlags(in, purell.FlagsSafe|purell.FlagRemoveDotSegments|purell.FlagRemoveDuplicateSlashes|purell.FlagRemoveUnnecessaryHostDots|purell.FlagRemoveEmptyPortSeparator)
-}
-
 // MakePermalink combines base URL with content path to create full URL paths.
 // Example
-//    base:   http://spf13.com/
-//    path:   post/how-i-blog
-//    result: http://spf13.com/post/how-i-blog
+//
+//	base:   http://spf13.com/
+//	path:   post/how-i-blog
+//	result: http://spf13.com/post/how-i-blog
 func MakePermalink(host, plink string) *url.URL {
 	base, err := url.Parse(host)
 	if err != nil {
@@ -117,6 +72,8 @@ func MakePermalink(host, plink string) *url.URL {
 	}
 
 	base.Path = path.Join(base.Path, p.Path)
+	base.Fragment = p.Fragment
+	base.RawQuery = p.RawQuery
 
 	// path.Join will strip off the last /, so put it back if it was there.
 	hadTrailingSlash := (plink == "" && strings.HasSuffix(host, "/")) || strings.HasSuffix(p.Path, "/")
@@ -125,16 +82,6 @@ func MakePermalink(host, plink string) *url.URL {
 	}
 
 	return base
-}
-
-// IsAbsURL determines whether the given path points to an absolute URL.
-func IsAbsURL(path string) bool {
-	url, err := url.Parse(path)
-	if err != nil {
-		return false
-	}
-
-	return url.IsAbs() || strings.HasPrefix(path, "//")
 }
 
 // AddContextRoot adds the context root to an URL if it's not already set.
@@ -174,17 +121,19 @@ func PrettifyURL(in string) string {
 
 // PrettifyURLPath takes a URL path to a content and converts it
 // to enable pretty URLs.
-//     /section/name.html       becomes /section/name/index.html
-//     /section/name/           becomes /section/name/index.html
-//     /section/name/index.html becomes /section/name/index.html
+//
+//	/section/name.html       becomes /section/name/index.html
+//	/section/name/           becomes /section/name/index.html
+//	/section/name/index.html becomes /section/name/index.html
 func PrettifyURLPath(in string) string {
 	return prettifyPath(in, pb)
 }
 
 // Uglify does the opposite of PrettifyURLPath().
-//     /section/name/index.html becomes /section/name.html
-//     /section/name/           becomes /section/name.html
-//     /section/name.html       becomes /section/name.html
+//
+//	/section/name/index.html becomes /section/name.html
+//	/section/name/           becomes /section/name.html
+//	/section/name.html       becomes /section/name.html
 func Uglify(in string) string {
 	if path.Ext(in) == "" {
 		if len(in) < 2 {
@@ -209,4 +158,116 @@ func Uglify(in string) string {
 	}
 	// /section/name.html -> /section/name.html
 	return path.Clean(in)
+}
+
+// URLEscape escapes unicode letters.
+func URLEscape(uri string) string {
+	// escape unicode letters
+	u, err := url.Parse(uri)
+	if err != nil {
+		panic(err)
+	}
+	return u.String()
+}
+
+// TrimExt trims the extension from a path..
+func TrimExt(in string) string {
+	return strings.TrimSuffix(in, path.Ext(in))
+}
+
+// From https://github.com/golang/go/blob/e0c76d95abfc1621259864adb3d101cf6f1f90fc/src/cmd/go/internal/web/url.go#L45
+func UrlFromFilename(filename string) (*url.URL, error) {
+	if !filepath.IsAbs(filename) {
+		return nil, fmt.Errorf("filepath must be absolute")
+	}
+
+	// If filename has a Windows volume name, convert the volume to a host and prefix
+	// per https://blogs.msdn.microsoft.com/ie/2006/12/06/file-uris-in-windows/.
+	if vol := filepath.VolumeName(filename); vol != "" {
+		if strings.HasPrefix(vol, `\\`) {
+			filename = filepath.ToSlash(filename[2:])
+			i := strings.IndexByte(filename, '/')
+
+			if i < 0 {
+				// A degenerate case.
+				// \\host.example.com (without a share name)
+				// becomes
+				// file://host.example.com/
+				return &url.URL{
+					Scheme: "file",
+					Host:   filename,
+					Path:   "/",
+				}, nil
+			}
+
+			// \\host.example.com\Share\path\to\file
+			// becomes
+			// file://host.example.com/Share/path/to/file
+			return &url.URL{
+				Scheme: "file",
+				Host:   filename[:i],
+				Path:   filepath.ToSlash(filename[i:]),
+			}, nil
+		}
+
+		// C:\path\to\file
+		// becomes
+		// file:///C:/path/to/file
+		return &url.URL{
+			Scheme: "file",
+			Path:   "/" + filepath.ToSlash(filename),
+		}, nil
+	}
+
+	// /path/to/file
+	// becomes
+	// file:///path/to/file
+	return &url.URL{
+		Scheme: "file",
+		Path:   filepath.ToSlash(filename),
+	}, nil
+}
+
+// UrlStringToFilename converts the URL s to a filename.
+// If ParseRequestURI fails, the input is just converted to OS specific slashes and returned.
+func UrlStringToFilename(s string) (string, bool) {
+	u, err := url.ParseRequestURI(s)
+	if err != nil {
+		return filepath.FromSlash(s), false
+	}
+
+	p := u.Path
+
+	if p == "" {
+		p, _ = url.QueryUnescape(u.Opaque)
+		return filepath.FromSlash(p), false
+	}
+
+	if runtime.GOOS != "windows" {
+		return p, true
+	}
+
+	if len(p) == 0 || p[0] != '/' {
+		return filepath.FromSlash(p), false
+	}
+
+	p = filepath.FromSlash(p)
+
+	if len(u.Host) == 1 {
+		// file://c/Users/...
+		return strings.ToUpper(u.Host) + ":" + p, true
+	}
+
+	if u.Host != "" && u.Host != "localhost" {
+		if filepath.VolumeName(u.Host) != "" {
+			return "", false
+		}
+		return `\\` + u.Host + p, true
+	}
+
+	if vol := filepath.VolumeName(p[1:]); vol == "" || strings.HasPrefix(vol, `\\`) {
+		return "", false
+	}
+
+	return p[1:], true
 }

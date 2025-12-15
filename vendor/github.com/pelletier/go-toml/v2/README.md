@@ -4,24 +4,14 @@ Go library for the [TOML](https://toml.io/en/) format.
 
 This library supports [TOML v1.0.0](https://toml.io/en/v1.0.0).
 
-## Development status
-
-This is the upcoming major version of go-toml. It is currently in active
-development. As of release v2.0.0-beta.1, the library has reached feature parity
-with v1, and fixes a lot known bugs and performance issues along the way.
-
-If you do not need the advanced document editing features of v1, you are
-encouraged to try out this version.
-
-[👉 Roadmap for v2](https://github.com/pelletier/go-toml/discussions/506)
-
 [🐞 Bug Reports](https://github.com/pelletier/go-toml/issues)
 
 [💬 Anything else](https://github.com/pelletier/go-toml/discussions)
 
 ## Documentation
 
-Full API, examples, and implementation notes are available in the Go documentation.
+Full API, examples, and implementation notes are available in the Go
+documentation.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/pelletier/go-toml/v2.svg)](https://pkg.go.dev/github.com/pelletier/go-toml/v2)
 
@@ -48,22 +38,22 @@ operations should not be shockingly slow. See [benchmarks](#benchmarks).
 ### Strict mode
 
 `Decoder` can be set to "strict mode", which makes it error when some parts of
-the TOML document was not prevent in the target structure. This is a great way
+the TOML document was not present in the target structure. This is a great way
 to check for typos. [See example in the documentation][strict].
 
-[strict]: https://pkg.go.dev/github.com/pelletier/go-toml/v2#example-Decoder.SetStrict
+[strict]: https://pkg.go.dev/github.com/pelletier/go-toml/v2#example-Decoder.DisallowUnknownFields
 
 ### Contextualized errors
 
-When decoding errors occur, go-toml returns [`DecodeError`][decode-err]), which
-contains a human readable contextualized version of the error. For example:
+When most decoding errors occur, go-toml returns [`DecodeError`][decode-err],
+which contains a human readable contextualized version of the error. For
+example:
 
 ```
-2| key1 = "value1"
-3| key2 = "missing2"
- | ~~~~ missing field
-4| key3 = "missing3"
-5| key4 = "value4"
+1| [server]
+2| path = 100
+ |        ~~~ cannot decode TOML integer into struct field toml_test.Server.Path of type string
+3| port = 50
 ```
 
 [decode-err]: https://pkg.go.dev/github.com/pelletier/go-toml/v2#DecodeError
@@ -82,15 +72,35 @@ representation.
 [tlt]: https://pkg.go.dev/github.com/pelletier/go-toml/v2#LocalTime
 [tldt]: https://pkg.go.dev/github.com/pelletier/go-toml/v2#LocalDateTime
 
+### Commented config
+
+Since TOML is often used for configuration files, go-toml can emit documents
+annotated with [comments and commented-out values][comments-example]. For
+example, it can generate the following file:
+
+```toml
+# Host IP to connect to.
+host = '127.0.0.1'
+# Port of the remote server.
+port = 4242
+
+# Encryption parameters (optional)
+# [TLS]
+# cipher = 'AEAD-AES128-GCM-SHA256'
+# version = 'TLS 1.3'
+```
+
+[comments-example]: https://pkg.go.dev/github.com/pelletier/go-toml/v2#example-Marshal-Commented
+
 ## Getting started
 
 Given the following struct, let's see how to read it and write it as TOML:
 
 ```go
 type MyConfig struct {
-      Version int
-      Name    string
-      Tags    []string
+	Version int
+	Name    string
+	Tags    []string
 }
 ```
 
@@ -109,7 +119,7 @@ tags = ["go", "toml"]
 var cfg MyConfig
 err := toml.Unmarshal([]byte(doc), &cfg)
 if err != nil {
-      panic(err)
+	panic(err)
 }
 fmt.Println("version:", cfg.Version)
 fmt.Println("name:", cfg.Name)
@@ -130,14 +140,14 @@ as a TOML document:
 
 ```go
 cfg := MyConfig{
-      Version: 2,
-      Name:    "go-toml",
-      Tags:    []string{"go", "toml"},
+	Version: 2,
+	Name:    "go-toml",
+	Tags:    []string{"go", "toml"},
 }
 
 b, err := toml.Marshal(cfg)
 if err != nil {
-      panic(err)
+	panic(err)
 }
 fmt.Println(string(b))
 
@@ -149,22 +159,33 @@ fmt.Println(string(b))
 
 [marshal]: https://pkg.go.dev/github.com/pelletier/go-toml/v2#Marshal
 
+## Unstable API
+
+This API does not yet follow the backward compatibility guarantees of this
+library. They provide early access to features that may have rough edges or an
+API subject to change.
+
+### Parser
+
+Parser is the unstable API that allows iterative parsing of a TOML document at
+the AST level. See https://pkg.go.dev/github.com/pelletier/go-toml/v2/unstable.
+
 ## Benchmarks
 
 Execution time speedup compared to other Go TOML libraries:
 
 <table>
-    <thead>
-        <tr><th>Benchmark</th><th>go-toml v1</th><th>BurntSushi/toml</th></tr>
-    </thead>
-    <tbody>
-        <tr><td>Marshal/HugoFrontMatter-2</td><td>1.9x</td><td>1.9x</td></tr>
-        <tr><td>Marshal/ReferenceFile/map-2</td><td>1.7x</td><td>1.9x</td></tr>
-        <tr><td>Marshal/ReferenceFile/struct-2</td><td>2.4x</td><td>2.6x</td></tr>
-        <tr><td>Unmarshal/HugoFrontMatter-2</td><td>2.9x</td><td>2.5x</td></tr>
-        <tr><td>Unmarshal/ReferenceFile/map-2</td><td>2.7x</td><td>2.6x</td></tr>
-        <tr><td>Unmarshal/ReferenceFile/struct-2</td><td>4.8x</td><td>5.1x</td></tr>
-     </tbody>
+	<thead>
+		<tr><th>Benchmark</th><th>go-toml v1</th><th>BurntSushi/toml</th></tr>
+	</thead>
+	<tbody>
+		<tr><td>Marshal/HugoFrontMatter-2</td><td>1.9x</td><td>2.2x</td></tr>
+		<tr><td>Marshal/ReferenceFile/map-2</td><td>1.7x</td><td>2.1x</td></tr>
+		<tr><td>Marshal/ReferenceFile/struct-2</td><td>2.2x</td><td>3.0x</td></tr>
+		<tr><td>Unmarshal/HugoFrontMatter-2</td><td>2.9x</td><td>2.7x</td></tr>
+		<tr><td>Unmarshal/ReferenceFile/map-2</td><td>2.6x</td><td>2.7x</td></tr>
+		<tr><td>Unmarshal/ReferenceFile/struct-2</td><td>4.6x</td><td>5.1x</td></tr>
+	 </tbody>
 </table>
 <details><summary>See more</summary>
 <p>The table above has the results of the most common use-cases. The table below
@@ -172,22 +193,22 @@ contains the results of all benchmarks, including unrealistic ones. It is
 provided for completeness.</p>
 
 <table>
-    <thead>
-        <tr><th>Benchmark</th><th>go-toml v1</th><th>BurntSushi/toml</th></tr>
-    </thead>
-    <tbody>
-        <tr><td>Marshal/SimpleDocument/map-2</td><td>1.7x</td><td>2.1x</td></tr>
-        <tr><td>Marshal/SimpleDocument/struct-2</td><td>2.5x</td><td>2.8x</td></tr>
-        <tr><td>Unmarshal/SimpleDocument/map-2</td><td>4.1x</td><td>3.1x</td></tr>
-        <tr><td>Unmarshal/SimpleDocument/struct-2</td><td>6.4x</td><td>4.3x</td></tr>
-        <tr><td>UnmarshalDataset/example-2</td><td>3.4x</td><td>3.2x</td></tr>
-        <tr><td>UnmarshalDataset/code-2</td><td>2.2x</td><td>2.5x</td></tr>
-        <tr><td>UnmarshalDataset/twitter-2</td><td>2.8x</td><td>2.7x</td></tr>
-        <tr><td>UnmarshalDataset/citm_catalog-2</td><td>2.2x</td><td>2.0x</td></tr>
-        <tr><td>UnmarshalDataset/canada-2</td><td>1.8x</td><td>1.4x</td></tr>
-        <tr><td>UnmarshalDataset/config-2</td><td>4.4x</td><td>2.9x</td></tr>
-        <tr><td>[Geo mean]</td><td>2.8x</td><td>2.6x</td></tr>
-     </tbody>
+	<thead>
+		<tr><th>Benchmark</th><th>go-toml v1</th><th>BurntSushi/toml</th></tr>
+	</thead>
+	<tbody>
+		<tr><td>Marshal/SimpleDocument/map-2</td><td>1.8x</td><td>2.7x</td></tr>
+		<tr><td>Marshal/SimpleDocument/struct-2</td><td>2.7x</td><td>3.8x</td></tr>
+		<tr><td>Unmarshal/SimpleDocument/map-2</td><td>3.8x</td><td>3.0x</td></tr>
+		<tr><td>Unmarshal/SimpleDocument/struct-2</td><td>5.6x</td><td>4.1x</td></tr>
+		<tr><td>UnmarshalDataset/example-2</td><td>3.0x</td><td>3.2x</td></tr>
+		<tr><td>UnmarshalDataset/code-2</td><td>2.3x</td><td>2.9x</td></tr>
+		<tr><td>UnmarshalDataset/twitter-2</td><td>2.6x</td><td>2.7x</td></tr>
+		<tr><td>UnmarshalDataset/citm_catalog-2</td><td>2.2x</td><td>2.3x</td></tr>
+		<tr><td>UnmarshalDataset/canada-2</td><td>1.8x</td><td>1.5x</td></tr>
+		<tr><td>UnmarshalDataset/config-2</td><td>4.1x</td><td>2.9x</td></tr>
+		<tr><td>geomean</td><td>2.7x</td><td>2.8x</td></tr>
+	 </tbody>
 </table>
 <p>This table can be generated with <code>./ci.sh benchmark -a -html</code>.</p>
 </details>
@@ -205,6 +226,44 @@ Installation instructions:
 In case of trouble: [Go Modules FAQ][mod-faq].
 
 [mod-faq]: https://github.com/golang/go/wiki/Modules#why-does-installing-a-tool-via-go-get-fail-with-error-cannot-find-main-module
+
+## Tools
+
+Go-toml provides three handy command line tools:
+
+ * `tomljson`: Reads a TOML file and outputs its JSON representation.
+
+	```
+	$ go install github.com/pelletier/go-toml/v2/cmd/tomljson@latest
+	$ tomljson --help
+	```
+
+ * `jsontoml`: Reads a JSON file and outputs a TOML representation.
+
+	```
+	$ go install github.com/pelletier/go-toml/v2/cmd/jsontoml@latest
+	$ jsontoml --help
+	```
+
+ * `tomll`: Lints and reformats a TOML file.
+
+	```
+	$ go install github.com/pelletier/go-toml/v2/cmd/tomll@latest
+	$ tomll --help
+	```
+
+### Docker image
+
+Those tools are also available as a [Docker image][docker]. For example, to use
+`tomljson`:
+
+```
+docker run -i ghcr.io/pelletier/go-toml:v2 tomljson < example.toml
+```
+
+Multiple versions are available on [ghcr.io][docker].
+
+[docker]: https://github.com/pelletier/go-toml/pkgs/container/go-toml
 
 ## Migrating from v1
 
@@ -234,16 +293,16 @@ element in the interface to decode the object. For example:
 
 ```go
 type inner struct {
-  B interface{}
+	B interface{}
 }
 type doc struct {
-  A interface{}
+	A interface{}
 }
 
 d := doc{
-  A: inner{
-    B: "Before",
-  },
+	A: inner{
+		B: "Before",
+	},
 }
 
 data := `
@@ -282,7 +341,7 @@ contained in the doc is superior to the capacity of the array. For example:
 
 ```go
 type doc struct {
-  A [2]string
+	A [2]string
 }
 d := doc{}
 err := toml.Unmarshal([]byte(`A = ["one", "two", "many"]`), &d)
@@ -324,6 +383,29 @@ The recommended replacement is pre-filling the struct before unmarshaling.
 
 [go-defaults]: https://github.com/mcuadros/go-defaults
 
+#### `toml.Tree` replacement
+
+This structure was the initial attempt at providing a document model for
+go-toml. It allows manipulating the structure of any document, encoding and
+decoding from their TOML representation. While a more robust feature was
+initially planned in go-toml v2, this has been ultimately [removed from
+scope][nodoc] of this library, with no plan to add it back at the moment. The
+closest equivalent at the moment would be to unmarshal into an `interface{}` and
+use type assertions and/or reflection to manipulate the arbitrary
+structure. However this would fall short of providing all of the TOML features
+such as adding comments and be specific about whitespace.
+
+
+#### `toml.Position` are not retrievable anymore
+
+The API for retrieving the position (line, column) of a specific TOML element do
+not exist anymore. This was done to minimize the amount of concepts introduced
+by the library (query path), and avoid the performance hit related to storing
+positions in the absence of a document model, for a feature that seemed to have
+little use. Errors however have gained more detailed position
+information. Position retrieval seems better fitted for a document model, which
+has been [removed from the scope][nodoc] of go-toml v2 at the moment.
+
 ### Encoding / Marshal
 
 #### Default struct fields order
@@ -359,7 +441,8 @@ fmt.Println("v2:\n" + string(b))
 ```
 
 There is no way to make v2 encoder behave like v1. A workaround could be to
-manually sort the fields alphabetically in the struct definition.
+manually sort the fields alphabetically in the struct definition, or generate
+struct types using `reflect.StructOf`.
 
 #### No indentation by default
 
@@ -407,7 +490,9 @@ fmt.Println("v2 Encoder:\n" + string(buf.Bytes()))
 
 V1 always uses double quotes (`"`) around strings and keys that cannot be
 represented bare (unquoted). V2 uses single quotes instead by default (`'`),
-unless a character cannot be represented, then falls back to double quotes.
+unless a character cannot be represented, then falls back to double quotes. As a
+result of this change, `Encoder.QuoteMapKeys` has been removed, as it is not
+useful anymore.
 
 There is no way to make v2 encoder behave like v1.
 
@@ -421,6 +506,70 @@ root object.
 There is no way to make v2 encoder behave like v1.
 
 [tm]: https://golang.org/pkg/encoding/#TextMarshaler
+
+#### `Encoder.CompactComments` has been removed
+
+Emitting compact comments is now the default behavior of go-toml. This option
+is not necessary anymore.
+
+#### Struct tags have been merged
+
+V1 used to provide multiple struct tags: `comment`, `commented`, `multiline`,
+`toml`, and `omitempty`. To behave more like the standard library, v2 has merged
+`toml`, `multiline`, `commented`, and `omitempty`. For example:
+
+```go
+type doc struct {
+	// v1
+	F string `toml:"field" multiline:"true" omitempty:"true" commented:"true"`
+	// v2
+	F string `toml:"field,multiline,omitempty,commented"`
+}
+```
+
+Has a result, the `Encoder.SetTag*` methods have been removed, as there is just
+one tag now.
+
+#### `Encoder.ArraysWithOneElementPerLine` has been renamed
+
+The new name is `Encoder.SetArraysMultiline`. The behavior should be the same.
+
+#### `Encoder.Indentation` has been renamed
+
+The new name is `Encoder.SetIndentSymbol`. The behavior should be the same.
+
+
+#### Embedded structs behave like stdlib
+
+V1 defaults to merging embedded struct fields into the embedding struct. This
+behavior was unexpected because it does not follow the standard library. To
+avoid breaking backward compatibility, the `Encoder.PromoteAnonymous` method was
+added to make the encoder behave correctly. Given backward compatibility is not
+a problem anymore, v2 does the right thing by default: it follows the behavior
+of `encoding/json`. `Encoder.PromoteAnonymous` has been removed.
+
+[nodoc]: https://github.com/pelletier/go-toml/discussions/506#discussioncomment-1526038
+
+### `query`
+
+go-toml v1 provided the [`go-toml/query`][query] package. It allowed to run
+JSONPath-style queries on TOML files. This feature is not available in v2. For a
+replacement, check out [dasel][dasel].
+
+This package has been removed because it was essentially not supported anymore
+(last commit May 2020), increased the complexity of the code base, and more
+complete solutions exist out there.
+
+[query]: https://github.com/pelletier/go-toml/tree/f99d6bbca119636aeafcf351ee52b3d202782627/query
+[dasel]: https://github.com/TomWright/dasel
+
+## Versioning
+
+Expect for parts explicitly marked otherwise, go-toml follows [Semantic
+Versioning](https://semver.org). The supported version of
+[TOML](https://github.com/toml-lang/toml) is indicated at the beginning of this
+document. The last two major versions of Go are supported (see [Go Release
+Policy](https://golang.org/doc/devel/release.html#policy)).
 
 ## License
 

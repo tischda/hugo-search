@@ -26,24 +26,28 @@ import (
 // Glob walks the fs and passes all matches to the handle func.
 // The handle func can return true to signal a stop.
 func Glob(fs afero.Fs, pattern string, handle func(fi FileMetaInfo) (bool, error)) error {
-	pattern = glob.NormalizePath(pattern)
+	pattern = glob.NormalizePathNoLower(pattern)
 	if pattern == "" {
 		return nil
 	}
+	root := glob.ResolveRootDir(pattern)
+	if !strings.HasPrefix(root, "/") {
+		root = "/" + root
+	}
+	pattern = strings.ToLower(pattern)
 
 	g, err := glob.GetGlob(pattern)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	hasSuperAsterisk := strings.Contains(pattern, "**")
 	levels := strings.Count(pattern, "/")
-	root := glob.ResolveRootDir(pattern)
 
 	// Signals that we're done.
 	done := errors.New("done")
 
-	wfn := func(p string, info FileMetaInfo, err error) error {
+	wfn := func(p string, info FileMetaInfo) error {
 		p = glob.NormalizePath(p)
 		if info.IsDir() {
 			if !hasSuperAsterisk {
@@ -68,11 +72,13 @@ func Glob(fs afero.Fs, pattern string, handle func(fi FileMetaInfo) (bool, error
 		return nil
 	}
 
-	w := NewWalkway(WalkwayConfig{
-		Root:   root,
-		Fs:     fs,
-		WalkFn: wfn,
-	})
+	w := NewWalkway(
+		WalkwayConfig{
+			Root:           root,
+			Fs:             fs,
+			WalkFn:         wfn,
+			FailOnNotExist: true,
+		})
 
 	err = w.Walk()
 

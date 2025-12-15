@@ -1,6 +1,7 @@
+SHELL=/usr/bin/env bash
 NAME=minify
 CMD=./cmd/minify
-TARGETS=linux_amd64 darwin_amd64 freebsd_amd64 netbsd_amd64 openbsd_amd64 windows_amd64
+TARGETS=linux_amd64 linux_arm64 darwin_amd64 darwin_arm64 freebsd_amd64 netbsd_amd64 openbsd_amd64 windows_amd64
 VERSION=`git describe --tags`
 FLAGS=-ldflags "-s -w -X 'main.Version=${VERSION}'" -trimpath
 ENVS=GO111MODULES=on CGO_ENABLED=0
@@ -17,8 +18,9 @@ release:
 	if [ "${.SHELLSTATUS}" -eq 0 ]; then \
 		echo "Releasing ${VERSION}"; \
 	else \
-		echo "WARNING: commit is not tagged with a version"; \
+		echo "ERROR: commit is not tagged with a version"; \
 		echo ""; \
+		exit 1; \
 	fi
 	rm -rf dist
 	mkdir -p dist
@@ -47,6 +49,7 @@ release:
 		fi; \
 		rm -rf dist/$$t; \
 	done
+	./publish.sh
 
 clean:
 	echo "Cleaning dist/"

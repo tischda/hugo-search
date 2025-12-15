@@ -1,6 +1,7 @@
+//go:build !dev
 // +build !dev
 
 package libwebp
 
-// #cgo linux LDFLAGS: -lm
+// #cgo unix LDFLAGS: -lm
 import "C"

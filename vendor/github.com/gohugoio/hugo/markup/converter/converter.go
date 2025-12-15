@@ -15,11 +15,14 @@ package converter
 
 import (
 	"bytes"
+	"context"
 
+	"github.com/gohugoio/hugo/common/hexec"
 	"github.com/gohugoio/hugo/common/loggers"
 	"github.com/gohugoio/hugo/config"
 	"github.com/gohugoio/hugo/identity"
 	"github.com/gohugoio/hugo/markup/converter/hooks"
+	"github.com/gohugoio/hugo/markup/highlight"
 	"github.com/gohugoio/hugo/markup/markup_config"
 	"github.com/gohugoio/hugo/markup/tableofcontents"
 	"github.com/spf13/afero"
@@ -27,12 +30,15 @@ import (
 
 // ProviderConfig configures a new Provider.
 type ProviderConfig struct {
-	MarkupConfig markup_config.Config
-
-	Cfg       config.Provider // Site config
+	Conf      config.AllProvider // Site config
 	ContentFs afero.Fs
 	Logger    loggers.Logger
-	Highlight func(code, lang, optsStr string) (string, error)
+	Exec      *hexec.Exec
+	highlight.Highlighter
+}
+
+func (p ProviderConfig) MarkupConfig() markup_config.Config {
+	return p.Conf.GetConfigSection("markup").(markup_config.Config)
 }
 
 // ProviderProvider creates converter providers.
@@ -71,7 +77,7 @@ var NopConverter = new(nopConverter)
 
 type nopConverter int
 
-func (nopConverter) Convert(ctx RenderContext) (Result, error) {
+func (nopConverter) Convert(ctx RenderContext) (ResultRender, error) {
 	return &bytes.Buffer{}, nil
 }
 
@@ -82,13 +88,26 @@ func (nopConverter) Supports(feature identity.Identity) bool {
 // Converter wraps the Convert method that converts some markup into
 // another format, e.g. Markdown to HTML.
 type Converter interface {
-	Convert(ctx RenderContext) (Result, error)
-	Supports(feature identity.Identity) bool
+	Convert(ctx RenderContext) (ResultRender, error)
 }
 
-// Result represents the minimum returned from Convert.
-type Result interface {
+// ParseRenderer is an optional interface.
+// The Goldmark converter implements this, and this allows us
+// to extract the ToC without having to render the content.
+type ParseRenderer interface {
+	Parse(RenderContext) (ResultParse, error)
+	Render(RenderContext, any) (ResultRender, error)
+}
+
+// ResultRender represents the minimum returned from Convert and Render.
+type ResultRender interface {
 	Bytes() []byte
+}
+
+// ResultParse represents the minimum returned from Parse.
+type ResultParse interface {
+	Doc() any
+	TableOfContents() *tableofcontents.Fragments
 }
 
 // DocumentInfo holds additional information provided by some converters.
@@ -98,7 +117,7 @@ type DocumentInfo interface {
 
 // TableOfContentsProvider provides the content as a ToC structure.
 type TableOfContentsProvider interface {
-	TableOfContents() tableofcontents.Root
+	TableOfContents() *tableofcontents.Fragments
 }
 
 // AnchorNameSanitizer tells how a converter sanitizes anchor names.
@@ -116,18 +135,24 @@ func (b Bytes) Bytes() []byte {
 
 // DocumentContext holds contextual information about the document to convert.
 type DocumentContext struct {
-	Document        interface{} // May be nil. Usually a page.Page
-	DocumentID      string
-	DocumentName    string
-	Filename        string
-	ConfigOverrides map[string]interface{}
+	Document       any              // May be nil. Usually a page.Page
+	DocumentLookup func(uint64) any // May be nil.
+	DocumentID     string
+	DocumentName   string
+	Filename       string
 }
 
 // RenderContext holds contextual information about the content to render.
 type RenderContext struct {
-	Src         []byte
-	RenderTOC   bool
-	RenderHooks hooks.Renderers
-}
+	// Ctx is the context.Context for the current Page render.
+	Ctx context.Context
 
-var FeatureRenderHooks = identity.NewPathIdentity("markup", "renderingHooks")
+	// Src is the content to render.
+	Src []byte
+
+	// Whether to render TableOfContents.
+	RenderTOC bool
+
+	// GerRenderer provides hook renderers on demand.
+	GetRenderer hooks.GetRendererFunc
+}

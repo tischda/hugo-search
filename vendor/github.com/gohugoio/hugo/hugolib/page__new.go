@@ -14,205 +14,252 @@
 package hugolib
 
 import (
-	"html/template"
+	"fmt"
 	"strings"
+	"sync/atomic"
 
-	"github.com/gohugoio/hugo/common/hugo"
+	"github.com/gohugoio/hugo/hugofs/files"
+	"github.com/gohugoio/hugo/resources"
 
+	"github.com/gohugoio/hugo/common/constants"
 	"github.com/gohugoio/hugo/common/maps"
-	"github.com/gohugoio/hugo/source"
-
-	"github.com/gohugoio/hugo/output"
+	"github.com/gohugoio/hugo/common/paths"
 
 	"github.com/gohugoio/hugo/lazy"
 
+	"github.com/gohugoio/hugo/resources/kinds"
 	"github.com/gohugoio/hugo/resources/page"
+	"github.com/gohugoio/hugo/resources/page/pagemeta"
 )
 
-func newPageBase(metaProvider *pageMeta) (*pageState, error) {
-	if metaProvider.s == nil {
-		panic("must provide a Site")
-	}
+var pageIDCounter atomic.Uint64
 
-	s := metaProvider.s
-
-	ps := &pageState{
-		pageOutput: nopPageOutput,
-		pageCommon: &pageCommon{
-			FileProvider:            metaProvider,
-			AuthorProvider:          metaProvider,
-			Scratcher:               maps.NewScratcher(),
-			Positioner:              page.NopPage,
-			InSectionPositioner:     page.NopPage,
-			ResourceMetaProvider:    metaProvider,
-			ResourceParamsProvider:  metaProvider,
-			PageMetaProvider:        metaProvider,
-			RelatedKeywordsProvider: metaProvider,
-			OutputFormatsProvider:   page.NopPage,
-			ResourceTypeProvider:    pageTypesProvider,
-			MediaTypeProvider:       pageTypesProvider,
-			RefProvider:             page.NopPage,
-			ShortcodeInfoProvider:   page.NopPage,
-			LanguageProvider:        s,
-			pagePages:               &pagePages{},
-
-			InternalDependencies: s,
-			init:                 lazy.New(),
-			m:                    metaProvider,
-			s:                    s,
-		},
-	}
-
-	siteAdapter := pageSiteAdapter{s: s, p: ps}
-
-	deprecatedWarningPage := struct {
-		source.FileWithoutOverlap
-		page.DeprecatedWarningPageMethods1
-	}{
-		FileWithoutOverlap:            metaProvider.File(),
-		DeprecatedWarningPageMethods1: &pageDeprecatedWarning{p: ps},
-	}
-
-	ps.DeprecatedWarningPageMethods = page.NewDeprecatedWarningPage(deprecatedWarningPage)
-	ps.pageMenus = &pageMenus{p: ps}
-	ps.PageMenusProvider = ps.pageMenus
-	ps.GetPageProvider = siteAdapter
-	ps.GitInfoProvider = ps
-	ps.TranslationsProvider = ps
-	ps.ResourceDataProvider = &pageData{pageState: ps}
-	ps.RawContentProvider = ps
-	ps.ChildCareProvider = ps
-	ps.TreeProvider = pageTree{p: ps}
-	ps.Eqer = ps
-	ps.TranslationKeyProvider = ps
-	ps.ShortcodeInfoProvider = ps
-	ps.PageRenderProvider = ps
-	ps.AlternativeOutputFormatsProvider = ps
-
-	return ps, nil
-}
-
-func newPageBucket(p *pageState) *pagesMapBucket {
-	return &pagesMapBucket{owner: p, pagesMapBucketPages: &pagesMapBucketPages{}}
-}
-
-func newPageFromMeta(
-	n *contentNode,
-	parentBucket *pagesMapBucket,
-	meta map[string]interface{},
-	metaProvider *pageMeta) (*pageState, error) {
-	if metaProvider.f == nil {
-		metaProvider.f = page.NewZeroFile(metaProvider.s.LogDistinct)
-	}
-
-	ps, err := newPageBase(metaProvider)
+func (h *HugoSites) newPage(m *pageMeta) (*pageState, *paths.Path, error) {
+	p, pth, err := h.doNewPage(m)
 	if err != nil {
-		return nil, err
+		// Make sure that any partially created page part is marked as stale.
+		m.MarkStale()
 	}
 
-	bucket := parentBucket
-
-	if ps.IsNode() {
-		ps.bucket = newPageBucket(ps)
+	if p != nil && pth != nil && p.IsHome() && pth.IsLeafBundle() {
+		msg := "Using %s in your content's root directory is usually incorrect for your home page. "
+		msg += "You should use %s instead. If you don't rename this file, your home page will be "
+		msg += "treated as a leaf bundle, meaning it won't be able to have any child pages or sections."
+		h.Log.Warnidf(constants.WarnHomePageIsLeafBundle, msg, pth.PathNoLeadingSlash(), strings.ReplaceAll(pth.PathNoLeadingSlash(), "index", "_index"))
 	}
 
-	if meta != nil || parentBucket != nil {
-		if err := metaProvider.setMetadata(bucket, ps, meta); err != nil {
-			return nil, ps.wrapError(err)
+	return p, pth, err
+}
+
+func (h *HugoSites) doNewPage(m *pageMeta) (*pageState, *paths.Path, error) {
+	m.Staler = &resources.AtomicStaler{}
+	if m.pageMetaParams == nil {
+		m.pageMetaParams = &pageMetaParams{
+			pageConfig: &pagemeta.PageConfig{},
+		}
+	}
+	if m.pageConfig.Params == nil {
+		m.pageConfig.Params = maps.Params{}
+	}
+
+	pid := pageIDCounter.Add(1)
+	pi, err := m.parseFrontMatter(h, pid)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := m.setMetaPre(pi, h.Log, h.Conf); err != nil {
+		return nil, nil, m.wrapError(err, h.BaseFs.SourceFs)
+	}
+	pcfg := m.pageConfig
+	if pcfg.Lang != "" {
+		if h.Conf.IsLangDisabled(pcfg.Lang) {
+			return nil, nil, nil
 		}
 	}
 
-	if err := metaProvider.applyDefaultValues(n); err != nil {
-		return nil, err
-	}
+	if pcfg.Path != "" {
+		s := m.pageConfig.Path
+		// Paths from content adapters should never have any extension.
+		if pcfg.IsFromContentAdapter || !paths.HasExt(s) {
+			var (
+				isBranch    bool
+				isBranchSet bool
+				ext         string = m.pageConfig.ContentMediaType.FirstSuffix.Suffix
+			)
+			if pcfg.Kind != "" {
+				isBranch = kinds.IsBranch(pcfg.Kind)
+				isBranchSet = true
+			}
 
-	ps.init.Add(func() (interface{}, error) {
-		pp, err := newPagePaths(metaProvider.s, ps, metaProvider)
-		if err != nil {
-			return nil, err
-		}
-
-		makeOut := func(f output.Format, render bool) *pageOutput {
-			return newPageOutput(ps, pp, f, render)
-		}
-
-		shouldRenderPage := !ps.m.noRender()
-
-		if ps.m.standalone {
-			ps.pageOutput = makeOut(ps.m.outputFormats()[0], shouldRenderPage)
-		} else {
-			outputFormatsForPage := ps.m.outputFormats()
-
-			// Prepare output formats for all sites.
-			// We do this even if this page does not get rendered on
-			// its own. It may be referenced via .Site.GetPage and
-			// it will then need an output format.
-			ps.pageOutputs = make([]*pageOutput, len(ps.s.h.renderFormats))
-			created := make(map[string]*pageOutput)
-			for i, f := range ps.s.h.renderFormats {
-				po, found := created[f.Name]
-				if !found {
-					render := shouldRenderPage
-					if render {
-						_, render = outputFormatsForPage.GetByName(f.Name)
+			if !pcfg.IsFromContentAdapter {
+				if m.pathInfo != nil {
+					if !isBranchSet {
+						isBranch = m.pathInfo.IsBranchBundle()
 					}
-					po = makeOut(f, render)
-					created[f.Name] = po
+					if m.pathInfo.Ext() != "" {
+						ext = m.pathInfo.Ext()
+					}
+				} else if m.f != nil {
+					pi := m.f.FileInfo().Meta().PathInfo
+					if !isBranchSet {
+						isBranch = pi.IsBranchBundle()
+					}
+					if pi.Ext() != "" {
+						ext = pi.Ext()
+					}
 				}
-				ps.pageOutputs[i] = po
+			}
+
+			if isBranch {
+				s += "/_index." + ext
+			} else {
+				s += "/index." + ext
+			}
+
+		}
+		m.pathInfo = h.Conf.PathParser().Parse(files.ComponentFolderContent, s)
+	} else if m.pathInfo == nil {
+		if m.f != nil {
+			m.pathInfo = m.f.FileInfo().Meta().PathInfo
+		}
+
+		if m.pathInfo == nil {
+			panic(fmt.Sprintf("missing pathInfo in %v", m))
+		}
+	}
+
+	ps, err := func() (*pageState, error) {
+		if m.s == nil {
+			// Identify the Site/language to associate this Page with.
+			var lang string
+			if pcfg.Lang != "" {
+				lang = pcfg.Lang
+			} else if m.f != nil {
+				meta := m.f.FileInfo().Meta()
+				lang = meta.Lang
+			} else {
+				lang = m.pathInfo.Lang()
+			}
+
+			m.s = h.resolveSite(lang)
+
+			if m.s == nil {
+				return nil, fmt.Errorf("no site found for language %q", lang)
 			}
 		}
 
-		if err := ps.initCommonProviders(pp); err != nil {
-			return nil, err
+		var tc viewName
+		// Identify Page Kind.
+		if m.pageConfig.Kind == "" {
+			m.pageConfig.Kind = kinds.KindSection
+			if m.pathInfo.Base() == "/" {
+				m.pageConfig.Kind = kinds.KindHome
+			} else if m.pathInfo.IsBranchBundle() {
+				// A section, taxonomy or term.
+				tc = m.s.pageMap.cfg.getTaxonomyConfig(m.Path())
+				if !tc.IsZero() {
+					// Either a taxonomy or a term.
+					if tc.pluralTreeKey == m.Path() {
+						m.pageConfig.Kind = kinds.KindTaxonomy
+					} else {
+						m.pageConfig.Kind = kinds.KindTerm
+					}
+				}
+			} else if m.f != nil {
+				m.pageConfig.Kind = kinds.KindPage
+			}
 		}
 
-		return nil, nil
-	})
+		if m.pageConfig.Kind == kinds.KindTerm || m.pageConfig.Kind == kinds.KindTaxonomy {
+			if tc.IsZero() {
+				tc = m.s.pageMap.cfg.getTaxonomyConfig(m.Path())
+			}
+			if tc.IsZero() {
+				return nil, fmt.Errorf("no taxonomy configuration found for %q", m.Path())
+			}
+			m.singular = tc.singular
+			if m.pageConfig.Kind == kinds.KindTerm {
+				m.term = paths.TrimLeading(strings.TrimPrefix(m.pathInfo.Unnormalized().Base(), tc.pluralTreeKey))
+			}
+		}
 
-	return ps, err
-}
+		if m.pageConfig.Kind == kinds.KindPage && !m.s.conf.IsKindEnabled(m.pageConfig.Kind) {
+			return nil, nil
+		}
 
-// Used by the legacy 404, sitemap and robots.txt rendering
-func newPageStandalone(m *pageMeta, f output.Format) (*pageState, error) {
-	m.configuredOutputFormats = output.Formats{f}
-	m.standalone = true
-	p, err := newPageFromMeta(nil, nil, nil, m)
-	if err != nil {
-		return nil, err
+		// Parse the rest of the page content.
+		m.content, err = m.newCachedContent(h, pi)
+		if err != nil {
+			return nil, m.wrapError(err, h.SourceFs)
+		}
+
+		ps := &pageState{
+			pid:                               pid,
+			pageOutput:                        nopPageOutput,
+			pageOutputTemplateVariationsState: &atomic.Uint32{},
+			Staler:                            m,
+			dependencyManager:                 m.s.Conf.NewIdentityManager(m.Path()),
+			pageCommon: &pageCommon{
+				FileProvider:              m,
+				store:                     maps.NewScratch(),
+				Positioner:                page.NopPage,
+				InSectionPositioner:       page.NopPage,
+				ResourceNameTitleProvider: m,
+				ResourceParamsProvider:    m,
+				PageMetaProvider:          m,
+				PageMetaInternalProvider:  m,
+				OutputFormatsProvider:     page.NopPage,
+				ResourceTypeProvider:      pageTypesProvider,
+				MediaTypeProvider:         pageTypesProvider,
+				RefProvider:               page.NopPage,
+				ShortcodeInfoProvider:     page.NopPage,
+				LanguageProvider:          m.s,
+
+				RelatedDocsHandlerProvider: m.s,
+				init:                       lazy.New(),
+				m:                          m,
+				s:                          m.s,
+				sWrapped:                   page.WrapSite(m.s),
+			},
+		}
+
+		if m.f != nil {
+			gi, err := m.s.h.gitInfoForPage(ps)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load Git data: %w", err)
+			}
+			ps.gitInfo = gi
+			owners, err := m.s.h.codeownersForPage(ps)
+			if err != nil {
+				return nil, fmt.Errorf("failed to load CODEOWNERS: %w", err)
+			}
+			ps.codeowners = owners
+		}
+
+		ps.pageMenus = &pageMenus{p: ps}
+		ps.PageMenusProvider = ps.pageMenus
+		ps.GetPageProvider = pageSiteAdapter{s: m.s, p: ps}
+		ps.GitInfoProvider = ps
+		ps.TranslationsProvider = ps
+		ps.ResourceDataProvider = &pageData{pageState: ps}
+		ps.RawContentProvider = ps
+		ps.ChildCareProvider = ps
+		ps.TreeProvider = pageTree{p: ps}
+		ps.Eqer = ps
+		ps.TranslationKeyProvider = ps
+		ps.ShortcodeInfoProvider = ps
+		ps.AlternativeOutputFormatsProvider = ps
+
+		if err := ps.initLazyProviders(); err != nil {
+			return nil, ps.wrapError(err)
+		}
+		return ps, nil
+	}()
+
+	if ps == nil {
+		return nil, nil, err
 	}
 
-	if err := p.initPage(); err != nil {
-		return nil, err
-	}
-
-	return p, nil
-}
-
-type pageDeprecatedWarning struct {
-	p *pageState
-}
-
-func (p *pageDeprecatedWarning) IsDraft() bool          { return p.p.m.draft }
-func (p *pageDeprecatedWarning) Hugo() hugo.Info        { return p.p.s.Info.Hugo() }
-func (p *pageDeprecatedWarning) LanguagePrefix() string { return p.p.s.Info.LanguagePrefix }
-func (p *pageDeprecatedWarning) GetParam(key string) interface{} {
-	return p.p.m.params[strings.ToLower(key)]
-}
-
-func (p *pageDeprecatedWarning) RSSLink() template.URL {
-	f := p.p.OutputFormats().Get("RSS")
-	if f == nil {
-		return ""
-	}
-	return template.URL(f.Permalink())
-}
-
-func (p *pageDeprecatedWarning) URL() string {
-	if p.p.IsPage() && p.p.m.urlPaths.URL != "" {
-		// This is the url set in front matter
-		return p.p.m.urlPaths.URL
-	}
-	// Fall back to the relative permalink.
-	return p.p.RelPermalink()
+	return ps, ps.PathInfo(), err
 }

@@ -4,25 +4,45 @@ import (
 	"bytes"
 	"sort"
 
-	"github.com/tdewolff/parse/v2"
 	"github.com/tdewolff/parse/v2/js"
 )
 
+const identStartLen = 54
+const identContinueLen = 64
+
 type renamer struct {
-	ast      *js.AST
-	reserved map[string]struct{}
-	rename   bool
+	identStart    []byte
+	identContinue []byte
+	identOrder    map[byte]int
+	reserved      map[string]struct{}
+	rename        bool
 }
 
-func newRenamer(ast *js.AST, undeclared js.VarArray, rename bool) *renamer {
+func newRenamer(rename, useCharFreq bool) *renamer {
 	reserved := make(map[string]struct{}, len(js.Keywords))
 	for name := range js.Keywords {
 		reserved[name] = struct{}{}
 	}
+	identStart := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$")
+	identContinue := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$0123456789")
+	if useCharFreq {
+		// sorted based on character frequency of a collection of JS samples
+		identStart = []byte("etnsoiarclduhmfpgvbjy_wOxCEkASMFTzDNLRPHIBV$WUKqYGXQZJ")
+		identContinue = []byte("etnsoiarcldu14023hm8f6pg57v9bjy_wOxCEkASMFTzDNLRPHIBV$WUKqYGXQZJ")
+	}
+	if len(identStart) != identStartLen || len(identContinue) != identContinueLen {
+		panic("bad identStart or identContinue lengths")
+	}
+	identOrder := map[byte]int{}
+	for i, c := range identStart {
+		identOrder[c] = i
+	}
 	return &renamer{
-		ast:      ast,
-		reserved: reserved,
-		rename:   rename,
+		identStart:    identStart,
+		identContinue: identContinue,
+		identOrder:    identOrder,
+		reserved:      reserved,
+		rename:        rename,
 	}
 }
 
@@ -31,14 +51,30 @@ func (r *renamer) renameScope(scope js.Scope) {
 		return
 	}
 
-	rename := []byte("`") // so that the next is 'a'
+	i := 0
+	// keep function argument declaration order to improve GZIP compression
+	sort.Sort(js.VarsByUses(scope.Declared[scope.NumFuncArgs:]))
+	for _, v := range scope.Declared {
+		v.Data = r.getName(v.Data, i)
+		i++
+		for r.isReserved(v.Data, scope.Undeclared) {
+			v.Data = r.getName(v.Data, i)
+			i++
+		}
+	}
+}
+
+// rename all private elements in a class
+func (r *renamer) renameClassScope(scope js.Scope) {
+	if !r.rename {
+		return
+	}
+
+	i := 0
 	sort.Sort(js.VarsByUses(scope.Declared))
 	for _, v := range scope.Declared {
-		rename = r.next(rename)
-		for r.isReserved(rename, scope.Undeclared) {
-			rename = r.next(rename)
-		}
-		v.Data = parse.Copy(rename)
+		v.Data = append(v.Data[:1], r.getName(v.Data[1:], i)...) // keep #
+		i++
 	}
 }
 
@@ -59,256 +95,401 @@ func (r *renamer) isReserved(name []byte, undeclared js.VarArray) bool {
 	return false
 }
 
-func (r *renamer) next(name []byte) []byte {
+func (r *renamer) getIndex(name []byte) int {
+	index := 0
+NameLoop:
+	for i := len(name) - 1; 0 <= i; i-- {
+		chars := r.identContinue
+		if i == 0 {
+			chars = r.identStart
+			index *= identStartLen
+		} else {
+			index *= identContinueLen
+		}
+		for j, c := range chars {
+			if name[i] == c {
+				index += j
+				continue NameLoop
+			}
+		}
+		return -1
+	}
+	for n := 0; n < len(name)-1; n++ {
+		offset := identStartLen
+		for i := 0; i < n; i++ {
+			offset *= identContinueLen
+		}
+		index += offset
+	}
+	return index
+}
+
+func (r *renamer) getName(name []byte, index int) []byte {
 	// Generate new names for variables where the last character is (a-zA-Z$_) and others are (a-zA-Z).
 	// Thus we can have 54 one-character names and 52*54=2808 two-character names for every branch leaf.
 	// That is sufficient for virtually all input.
-	if name[len(name)-1] == 'z' {
-		name[len(name)-1] = 'A'
-	} else if name[len(name)-1] == 'Z' {
-		name[len(name)-1] = '_'
-	} else if name[len(name)-1] == '_' {
-		name[len(name)-1] = '$'
-	} else if name[len(name)-1] == '$' {
-		i := len(name) - 2
-		for ; 0 <= i; i-- {
-			if name[i] == 'Z' {
-				continue // happens after 52*54=2808 variables
-			} else if name[i] == 'z' {
-				name[i] = 'A' // happens after 26*54=1404 variables
-			} else {
-				name[i]++
-				break
-			}
+
+	// one character
+	if index < identStartLen {
+		name[0] = r.identStart[index]
+		return name[:1]
+	}
+	index -= identStartLen
+
+	// two characters or more
+	n := 2
+	for {
+		offset := identStartLen
+		for i := 0; i < n-1; i++ {
+			offset *= identContinueLen
 		}
-		for j := i + 1; j < len(name); j++ {
-			name[j] = 'a'
+		if index < offset {
+			break
 		}
-		if i < 0 {
-			name = append(name, 'a')
-		}
+		index -= offset
+		n++
+	}
+
+	if cap(name) < n {
+		name = make([]byte, n)
 	} else {
-		name[len(name)-1]++
+		name = name[:n]
+	}
+	name[0] = r.identStart[index%identStartLen]
+	index /= identStartLen
+	for i := 1; i < n; i++ {
+		name[i] = r.identContinue[index%identContinueLen]
+		index /= identContinueLen
 	}
 	return name
 }
 
 ////////////////////////////////////////////////////////////////
 
-func bindingRefs(ibinding js.IBinding) (refs []*js.Var) {
+func hasDefines(v *js.VarDecl) bool {
+	for _, item := range v.List {
+		if item.Default != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func bindingUsed(ibinding js.IBinding) bool {
 	switch binding := ibinding.(type) {
 	case *js.Var:
-		refs = append(refs, binding)
+		if 1 < binding.Uses {
+			return true
+		}
+	case *js.BindingArray:
+		for _, item := range binding.List {
+			if item.Binding != nil && bindingUsed(item.Binding) {
+				return true
+			}
+		}
+		if binding.Rest != nil && bindingUsed(binding.Rest) {
+			return true
+		}
+	case *js.BindingObject:
+		for _, item := range binding.List {
+			if item.Value.Binding != nil && bindingUsed(item.Value.Binding) {
+				return true
+			}
+		}
+		if binding.Rest != nil && bindingUsed(binding.Rest) {
+			return true
+		}
+	}
+	return false
+}
+
+func bindingVars(ibinding js.IBinding) (vs []*js.Var) {
+	switch binding := ibinding.(type) {
+	case *js.Var:
+		vs = append(vs, binding)
 	case *js.BindingArray:
 		for _, item := range binding.List {
 			if item.Binding != nil {
-				refs = append(refs, bindingRefs(item.Binding)...)
+				vs = append(vs, bindingVars(item.Binding)...)
 			}
 		}
 		if binding.Rest != nil {
-			refs = append(refs, bindingRefs(binding.Rest)...)
+			vs = append(vs, bindingVars(binding.Rest)...)
 		}
 	case *js.BindingObject:
 		for _, item := range binding.List {
 			if item.Value.Binding != nil {
-				refs = append(refs, bindingRefs(item.Value.Binding)...)
+				vs = append(vs, bindingVars(item.Value.Binding)...)
 			}
 		}
 		if binding.Rest != nil {
-			refs = append(refs, binding.Rest)
+			vs = append(vs, binding.Rest)
 		}
 	}
 	return
 }
 
-func appendBindingVars(vars *[]*js.Var, binding js.IBinding) {
-	if v, ok := binding.(*js.Var); ok {
-		*vars = append(*vars, v)
-	} else if array, ok := binding.(*js.BindingArray); ok {
-		for _, item := range array.List {
-			appendBindingVars(vars, item.Binding)
+func addDefinition(decl *js.VarDecl, binding js.IBinding, value js.IExpr, forward bool) {
+	if decl.TokenType != js.ErrorToken {
+		// see if not already defined in variable declaration list
+		// if forward is set, binding=value comes before decl, otherwise the reverse holds true
+		vars := bindingVars(binding)
+
+		// remove variables in destination
+	RemoveVarsLoop:
+		for _, vbind := range vars {
+			for i, item := range decl.List {
+				if v, ok := item.Binding.(*js.Var); ok && item.Default == nil && v == vbind {
+					v.Uses--
+					decl.List = append(decl.List[:i], decl.List[i+1:]...)
+					continue RemoveVarsLoop
+				}
+			}
+
+			if value != nil {
+				// variable declaration must be somewhere else, find and remove it
+				for _, decl2 := range decl.Scope.Func.VarDecls {
+					if !decl2.InForInOf {
+						for i, item := range decl2.List {
+							if v, ok := item.Binding.(*js.Var); ok && item.Default == nil && v == vbind {
+								v.Uses--
+								decl2.List = append(decl2.List[:i], decl2.List[i+1:]...)
+								continue RemoveVarsLoop
+							}
+						}
+					}
+				}
+			}
 		}
-		if array.Rest != nil {
-			appendBindingVars(vars, array.Rest)
-		}
-	} else if object, ok := binding.(*js.BindingObject); ok {
-		for _, item := range object.List {
-			appendBindingVars(vars, item.Value.Binding)
-		}
-		if object.Rest != nil {
-			*vars = append(*vars, object.Rest)
-		}
+	}
+
+	// add declaration to destination
+	item := js.BindingElement{Binding: binding, Default: value}
+	if forward {
+		decl.List = append([]js.BindingElement{item}, decl.List...)
+	} else {
+		decl.List = append(decl.List, item)
 	}
 }
 
-func addDefinition(decl *js.VarDecl, iDefines int, binding js.IBinding, value js.IExpr) bool {
-	// see if not already defined in variable declaration list
-	if vdef, ok := binding.(*js.Var); ok {
-		for i, item := range decl.List[iDefines:] {
-			if v, ok := item.Binding.(*js.Var); ok && v == vdef {
-				decl.List[iDefines+i].Default = value
-				if 0 < i {
-					decl.List[iDefines], decl.List[iDefines+i] = decl.List[iDefines+i], decl.List[iDefines]
-				}
-				return true
-			}
+func mergeVarDecls(dst, src *js.VarDecl, forward bool) {
+	// Merge var declarations by moving declarations from src to dst. If forward is set, src comes first and dst after, otherwise the order is reverse.
+	if forward {
+		// reverse order so we can iterate from beginning to end, sometimes addDefinition may remove another declaration in the src list
+		n := len(src.List) - 1
+		for j := 0; j < len(src.List)/2; j++ {
+			src.List[j], src.List[n-j] = src.List[n-j], src.List[j]
 		}
-	} else {
-		vars := []*js.Var{}
-		appendBindingVars(&vars, binding)
-		if len(vars) == 0 {
-			return false
-		}
-		locs := make([]int, len(vars))
-		for i, vdef := range vars {
-			locs[i] = -1
-			for loc, item := range decl.List[iDefines:] {
-				if v, ok := item.Binding.(*js.Var); ok && v == vdef {
-					locs[i] = loc
-					break
-				}
-			}
-			if locs[i] == -1 {
-				return false // cannot (probably) happen if we hoist variables
-			}
-		}
-		sort.Ints(locs)
-		if iDefines != locs[0] {
-			decl.List[iDefines], decl.List[iDefines+locs[0]] = decl.List[iDefines+locs[0]], decl.List[iDefines]
-		}
-		decl.List[iDefines].Binding = binding
-		decl.List[iDefines].Default = value
-		for i := len(locs) - 1; 1 <= i; i-- {
-			if locs[i] != locs[i-1] { // ignore duplicates, otherwise remove items from hoisted var declaration
-				decl.List = append(decl.List[:locs[i]], decl.List[locs[i]+1:]...)
-			}
-		}
+	}
+	for j := 0; j < len(src.List); j++ {
+		addDefinition(dst, src.List[j].Binding, src.List[j].Default, forward)
+	}
+	src.List = src.List[:0]
+}
+
+func mergeVarDeclExprStmt(decl *js.VarDecl, exprStmt *js.ExprStmt, forward bool) bool {
+	// Merge var declarations with an assignment expression. If forward is set than expr comes first and decl after, otherwise the order is reverse.
+	if decl2, ok := exprStmt.Value.(*js.VarDecl); ok {
+		// this happens when a variable declarations is converted to an expression due to hoisting
+		mergeVarDecls(decl, decl2, forward)
 		return true
+	} else if commaExpr, ok := exprStmt.Value.(*js.CommaExpr); ok {
+		n := 0
+		for i := 0; i < len(commaExpr.List); i++ {
+			item := commaExpr.List[i]
+			if forward {
+				item = commaExpr.List[len(commaExpr.List)-i-1]
+			}
+			if src, ok := item.(*js.VarDecl); ok {
+				// this happens when a variable declarations is converted to an expression due to hoisting
+				mergeVarDecls(decl, src, forward)
+				n++
+				continue
+			} else if binaryExpr, ok := item.(*js.BinaryExpr); ok && binaryExpr.Op == js.EqToken {
+				if v, ok := binaryExpr.X.(*js.Var); ok && v.Decl == js.VariableDecl {
+					addDefinition(decl, v, binaryExpr.Y, forward)
+					n++
+					continue
+				}
+			}
+			break
+		}
+		merge := n == len(commaExpr.List)
+		if !forward {
+			commaExpr.List = commaExpr.List[n:]
+		} else {
+			commaExpr.List = commaExpr.List[:len(commaExpr.List)-n]
+		}
+		return merge
+	} else if binaryExpr, ok := exprStmt.Value.(*js.BinaryExpr); ok && binaryExpr.Op == js.EqToken {
+		if v, ok := binaryExpr.X.(*js.Var); ok && v.Decl == js.VariableDecl {
+			addDefinition(decl, v, binaryExpr.Y, forward)
+			return true
+		}
 	}
 	return false
 }
 
-func (m *jsMinifier) hoistVars(body *js.BlockStmt) *js.VarDecl {
-	// Hoist all variable declarations in the current module/function scope to the top.
-	// If the first statement is a var declaration, expand it. Otherwise prepend a new var declaration.
-	// Except for the first var declaration, all others are converted to expressions. This is possible because an ArrayBindingPattern and ObjectBindingPattern can be converted to an ArrayLiteral or ObjectLiteral respectively, as they are supersets of the BindingPatterns.
-	parentVarsHoisted := m.varsHoisted
-	m.varsHoisted = nil
-	if 1 < body.Scope.NumVarDecls {
-		iDefines := 0 // position past last variable definition in declaration
-		mergeStatements := true
-
-		// ignore "use strict"
-		declStart := 0
-		for {
-			if _, ok := body.List[declStart].(*js.DirectivePrologueStmt); ok {
-				declStart++
-			} else {
-				break
-			}
-		}
-
-		var decl *js.VarDecl
-		if varDecl, ok := body.List[declStart].(*js.VarDecl); ok && varDecl.TokenType == js.VarToken {
-			decl = varDecl
-		} else if forStmt, ok := body.List[declStart].(*js.ForStmt); ok {
-			// TODO: only merge statements that don't have 'in' or 'of' keywords (slow to check?)
-			if forStmt.Init == nil {
-				decl = &js.VarDecl{TokenType: js.VarToken, List: nil}
-				forStmt.Init = decl
-			} else if varDecl, ok := forStmt.Init.(*js.VarDecl); ok && varDecl.TokenType == js.VarToken {
-				decl = varDecl
-			}
-			mergeStatements = false
-		} else if whileStmt, ok := body.List[declStart].(*js.WhileStmt); ok {
-			// TODO: only merge statements that don't have 'in' or 'of' keywords (slow to check?)
-			decl = &js.VarDecl{TokenType: js.VarToken, List: nil}
-			var forBody *js.BlockStmt
-			if blockStmt, ok := whileStmt.Body.(*js.BlockStmt); ok {
-				forBody = blockStmt
-			} else {
-				forBody = &js.BlockStmt{}
-				forBody.List = []js.IStmt{whileStmt.Body}
-			}
-			body.List[declStart] = &js.ForStmt{Init: decl, Cond: whileStmt.Cond, Post: nil, Body: forBody}
-			mergeStatements = false
-		}
-		if decl != nil {
-			// original declarations
-			vs := []*js.Var{}
-			for i, item := range decl.List {
-				if item.Default != nil {
-					iDefines = i + 1
-				}
-				vs = append(vs, bindingRefs(item.Binding)...)
-			}
-
-			// hoist other variable declarations in this function scope but don't initialize yet
-		DeclaredLoop:
-			for _, v := range body.Scope.Declared {
-				if v.Decl == js.VariableDecl {
-					for _, vdef := range vs {
-						if v == vdef {
-							continue DeclaredLoop
-						}
-					}
-					//v.Uses++ // might be inaccurate as we remove non-defining variable declarations later on
-					decl.List = append(decl.List, js.BindingElement{Binding: v, Default: nil})
-				}
-			}
-		} else {
-			decl = &js.VarDecl{TokenType: js.VarToken, List: nil}
-			for _, v := range body.Scope.Declared {
-				if v.Decl == js.VariableDecl {
-					v.Uses++ // might be inaccurate as we remove non-defining variable declarations later on
-					decl.List = append(decl.List, js.BindingElement{Binding: v, Default: nil})
-				}
-			}
-			body.List = append(body.List[:declStart], append([]js.IStmt{decl}, body.List[declStart:]...)...)
-		}
-
-		if mergeStatements {
-			// pull in assignments to variables into the declaration, e.g. var a;a=5  =>  var a=5
-			// sort in order of definitions
-			nMerged := 0
-			declEnd := declStart + 1
-		FindDefinitionsLoop:
-			for k, item := range body.List[declEnd:] {
-				if exprStmt, ok := item.(*js.ExprStmt); ok {
-					if binaryExpr, ok := exprStmt.Value.(*js.BinaryExpr); ok && binaryExpr.Op == js.EqToken {
-						if v, ok := binaryExpr.X.(*js.Var); ok && v.Decl == js.VariableDecl {
-							if addDefinition(decl, iDefines, v, binaryExpr.Y) {
-								iDefines++
-								nMerged++
-								continue
-							}
-						}
-					}
-				} else if varDecl, ok := item.(*js.VarDecl); ok && varDecl.TokenType == js.VarToken {
-					for j := 0; j < len(varDecl.List); j++ {
-						item := varDecl.List[j]
-						if item.Default != nil {
-							if addDefinition(decl, iDefines, item.Binding, item.Default) {
-								iDefines++
-								varDecl.List = append(varDecl.List[:j], varDecl.List[j+1:]...)
-								j--
-							} else {
-								break FindDefinitionsLoop
-							}
-						}
-						// declaration has no definition, that's fine as it's already merged previously
-					}
-					body.List[declEnd+k] = varDecl // update varDecl.List
-					nMerged++
-					continue // all variable declarations were matched, keep looking
-				}
-				break // not ExprStmt nor VarDecl
-			}
-			if 0 < nMerged {
-				body.List = append(body.List[:declEnd], body.List[declEnd+nMerged:]...)
-			}
-		}
-		m.varsHoisted = decl
+func (m *jsMinifier) countHoistLength(ibinding js.IBinding) int {
+	if !m.o.KeepVarNames {
+		return len(bindingVars(ibinding)) * 2 // assume that var name will be of length one, +1 for the comma
 	}
-	return parentVarsHoisted
+
+	n := 0
+	for _, v := range bindingVars(ibinding) {
+		n += len(v.Data) + 1 // +1 for the comma when added to other declaration
+	}
+	return n
+}
+
+func (m *jsMinifier) hoistVars(body *js.BlockStmt) {
+	// Hoist all variable declarations in the current module/function scope to the variable
+	// declaration that reduces file size the most. All other declarations are converted to
+	// expressions and their variable names are copied to the only remaining declaration.
+	// This is possible because an ArrayBindingPattern and ObjectBindingPattern can be converted to
+	// an ArrayLiteral or ObjectLiteral respectively, as they are supersets of the BindingPatterns.
+	if 1 < len(body.Scope.VarDecls) {
+		// Select which variable declarations will be hoisted (convert to expression) and which not
+		best := 0
+		scores := make([]int, len(body.Scope.VarDecls)) // savings if hoisting target
+		hoist := make([]bool, len(body.Scope.VarDecls))
+		for i, varDecl := range body.Scope.VarDecls {
+			hoist[i] = true
+			if varDecl.InForInOf {
+				continue
+			}
+
+			// variable names in for-in or for-of cannot be removed
+			n := 0        // total number of vars with decls
+			score := 3    // "var"
+			nArrays := 0  // of which lhs arrays
+			nObjects := 0 // of which lhs objects
+			hasDefinitions := false
+			for j, item := range varDecl.List {
+				if item.Default != nil {
+					// move arrays/objects to the front (saves a space)
+					if _, ok := item.Binding.(*js.BindingObject); ok {
+						if j != 0 && nArrays == 0 && nObjects == 0 {
+							varDecl.List[0], varDecl.List[j] = varDecl.List[j], varDecl.List[0]
+						}
+						nObjects++
+					} else if _, ok := item.Binding.(*js.BindingArray); ok {
+						if j != 0 && nArrays == 0 && nObjects == 0 {
+							varDecl.List[0], varDecl.List[j] = varDecl.List[j], varDecl.List[0]
+						}
+						nArrays++
+					}
+					score -= m.countHoistLength(item.Binding) // var names and commas
+					hasDefinitions = true
+					n++
+				}
+			}
+			if nArrays == 0 && nObjects == 0 {
+				score++ // required space after var
+			}
+			if !hasDefinitions && varDecl.InFor {
+				score-- // semicolon can be reused
+			}
+			if nObjects != 0 && !varDecl.InFor && nObjects == n {
+				// required parenthesis around braces to not confound it with a block statement
+				score -= 2
+			}
+			if score < scores[best] || body.Scope.VarDecls[best].InForInOf {
+				// select var decl that reduces the least when hoist target
+				best = i
+			}
+			if score < 0 {
+				// don't hoist if it increases the amount of characters
+				hoist[i] = false
+			}
+			scores[i] = score
+		}
+		if body.Scope.VarDecls[best].InForInOf {
+			// no savings possible
+			return
+		}
+
+		decl := body.Scope.VarDecls[best]
+		if 10000 < len(decl.List) {
+			return
+		}
+		hoist[best] = false
+
+		// get original declarations
+		orig := []*js.Var{}
+		for _, item := range decl.List {
+			orig = append(orig, bindingVars(item.Binding)...)
+		}
+
+		// hoist other variable declarations in this function scope but don't initialize yet
+		j := 0
+		for i, varDecl := range body.Scope.VarDecls {
+			if hoist[i] {
+				varDecl.TokenType = js.ErrorToken
+				for _, item := range varDecl.List {
+					refs := bindingVars(item.Binding)
+					bindingElements := make([]js.BindingElement, 0, len(refs))
+				DeclaredLoop:
+					for _, ref := range refs {
+						for _, v := range orig {
+							if ref == v {
+								continue DeclaredLoop
+							}
+						}
+						bindingElements = append(bindingElements, js.BindingElement{Binding: ref, Default: nil})
+						orig = append(orig, ref)
+
+						s := decl.Scope
+						for s != nil && s != s.Func {
+							s.AddUndeclared(ref)
+							s = s.Parent
+						}
+						if item.Default != nil {
+							ref.Uses++
+						}
+					}
+					if i < best {
+						// prepend
+						decl.List = append(decl.List[:j], append(bindingElements, decl.List[j:]...)...)
+						j += len(bindingElements)
+					} else {
+						// append
+						decl.List = append(decl.List, bindingElements...)
+					}
+				}
+			}
+		}
+
+		// rearrange to put array/object first
+		var prevRefs []*js.Var
+	BeginArrayObject:
+		for i, item := range decl.List {
+			refs := bindingVars(item.Binding)
+			if _, ok := item.Binding.(*js.Var); !ok {
+				if i != 0 {
+					interferes := false
+					if item.Default != nil {
+					InterferenceLoop:
+						for _, ref := range refs {
+							for _, v := range prevRefs {
+								if ref == v {
+									interferes = true
+									break InterferenceLoop
+								}
+							}
+						}
+					}
+					if !interferes {
+						decl.List[0], decl.List[i] = decl.List[i], decl.List[0]
+						break BeginArrayObject
+					}
+				} else {
+					break BeginArrayObject
+				}
+			}
+			if item.Default != nil {
+				prevRefs = append(prevRefs, refs...)
+			}
+		}
+	}
 }

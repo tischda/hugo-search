@@ -14,7 +14,9 @@
 package hugolib
 
 import (
-	"github.com/gohugoio/hugo/markup/converter"
+	"fmt"
+
+	"github.com/gohugoio/hugo/identity"
 	"github.com/gohugoio/hugo/output"
 	"github.com/gohugoio/hugo/resources/page"
 	"github.com/gohugoio/hugo/resources/resource"
@@ -24,7 +26,8 @@ func newPageOutput(
 	ps *pageState,
 	pp pagePaths,
 	f output.Format,
-	render bool) *pageOutput {
+	render bool,
+) *pageOutput {
 	var targetPathsProvider targetPathsHolder
 	var linksProvider resource.ResourceLinksProvider
 
@@ -36,12 +39,16 @@ func newPageOutput(
 	targetPathsProvider = ft
 	linksProvider = ft
 
-	var paginatorProvider page.PaginatorProvider = page.NopPage
+	var paginatorProvider page.PaginatorProvider
 	var pag *pagePaginator
 
 	if render && ps.IsNode() {
 		pag = newPagePaginator(ps)
 		paginatorProvider = pag
+	} else {
+		paginatorProvider = page.PaginatorNotSupportedFunc(func() error {
+			return fmt.Errorf("pagination not supported for this page: %s", ps.getPageInfoForError())
+		})
 	}
 
 	providers := struct {
@@ -55,12 +62,16 @@ func newPageOutput(
 	}
 
 	po := &pageOutput{
+		p:                       ps,
 		f:                       f,
 		pagePerOutputProviders:  providers,
+		MarkupProvider:          page.NopPage,
 		ContentProvider:         page.NopPage,
+		PageRenderProvider:      page.NopPage,
 		TableOfContentsProvider: page.NopPage,
 		render:                  render,
 		paginator:               pag,
+		dependencyManagerOutput: ps.s.Conf.NewIdentityManager((ps.Path() + "/" + f.Name)),
 	}
 
 	return po
@@ -69,6 +80,8 @@ func newPageOutput(
 // We create a pageOutput for every output format combination, even if this
 // particular page isn't configured to be rendered to that format.
 type pageOutput struct {
+	p *pageState
+
 	// Set if this page isn't configured to be rendered to this format.
 	render bool
 
@@ -81,81 +94,56 @@ type pageOutput struct {
 
 	// These interface provides the functionality that is specific for this
 	// output format.
+	contentRenderer page.ContentRenderer
 	pagePerOutputProviders
+	page.MarkupProvider
 	page.ContentProvider
+	page.PageRenderProvider
 	page.TableOfContentsProvider
+	page.RenderShortcodesProvider
 
 	// May be nil.
-	cp *pageContentOutput
+	pco *pageContentOutput
+
+	dependencyManagerOutput identity.Manager
+
+	renderState int  // Reset when it needs to be rendered again.
+	renderOnce  bool // To make sure we at least try to render it once.
 }
 
-func (o *pageOutput) initRenderHooks() error {
-	if o.cp == nil {
-		return nil
+func (po *pageOutput) incrRenderState() {
+	po.renderState++
+	po.renderOnce = true
+}
+
+// isRendered reports whether this output format or its content has been rendered.
+func (po *pageOutput) isRendered() bool {
+	if po.renderState > 0 {
+		return true
 	}
-
-	var initErr error
-
-	o.cp.renderHooks.init.Do(func() {
-		ps := o.cp.p
-
-		c := ps.getContentConverter()
-		if c == nil || !c.Supports(converter.FeatureRenderHooks) {
-			return
-		}
-
-		h, err := ps.createRenderHooks(o.f)
-		if err != nil {
-			initErr = err
-			return
-		}
-		o.cp.renderHooks.hooks = h
-
-		if !o.cp.renderHooksHaveVariants || h.IsZero() {
-			// Check if there is a different render hooks template
-			// for any of the other page output formats.
-			// If not, we can reuse this.
-			for _, po := range ps.pageOutputs {
-				if po.f.Name != o.f.Name {
-					h2, err := ps.createRenderHooks(po.f)
-					if err != nil {
-						initErr = err
-						return
-					}
-
-					if h2.IsZero() {
-						continue
-					}
-
-					if o.cp.renderHooks.hooks.IsZero() {
-						o.cp.renderHooks.hooks = h2
-					}
-
-					o.cp.renderHooksHaveVariants = !h2.Eq(o.cp.renderHooks.hooks)
-
-					if o.cp.renderHooksHaveVariants {
-						break
-					}
-
-				}
-			}
-		}
-	})
-
-	return initErr
+	if po.pco != nil && po.pco.contentRendered.Load() {
+		return true
+	}
+	return false
 }
 
-func (p *pageOutput) initContentProvider(cp *pageContentOutput) {
+func (po *pageOutput) IdentifierBase() string {
+	return po.p.f.Name
+}
+
+func (po *pageOutput) GetDependencyManager() identity.Manager {
+	return po.dependencyManagerOutput
+}
+
+func (p *pageOutput) setContentProvider(cp *pageContentOutput) {
 	if cp == nil {
 		return
 	}
+	p.contentRenderer = cp
 	p.ContentProvider = cp
+	p.MarkupProvider = cp
+	p.PageRenderProvider = cp
 	p.TableOfContentsProvider = cp
-	p.cp = cp
-}
-
-func (p *pageOutput) enablePlaceholders() {
-	if p.cp != nil {
-		p.cp.enablePlaceholders()
-	}
+	p.RenderShortcodesProvider = cp
+	p.pco = cp
 }

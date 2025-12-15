@@ -14,25 +14,30 @@
 package collections
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 
+	"github.com/gohugoio/hugo/common/hreflect"
+	"github.com/gohugoio/hugo/common/hstrings"
 	"github.com/gohugoio/hugo/common/maps"
 )
 
-// Where returns a filtered subset of a given data type.
-func (ns *Namespace) Where(seq, key interface{}, args ...interface{}) (interface{}, error) {
-	seqv, isNil := indirect(reflect.ValueOf(seq))
+// Where returns a filtered subset of collection c.
+func (ns *Namespace) Where(ctx context.Context, c, key any, args ...any) (any, error) {
+	seqv, isNil := indirect(reflect.ValueOf(c))
 	if isNil {
-		return nil, errors.New("can't iterate over a nil value of type " + reflect.ValueOf(seq).Type().String())
+		return nil, errors.New("can't iterate over a nil value of type " + reflect.ValueOf(c).Type().String())
 	}
 
 	mv, op, err := parseWhereArgs(args...)
 	if err != nil {
 		return nil, err
 	}
+
+	ctxv := reflect.ValueOf(ctx)
 
 	var path []string
 	kv := reflect.ValueOf(key)
@@ -42,11 +47,11 @@ func (ns *Namespace) Where(seq, key interface{}, args ...interface{}) (interface
 
 	switch seqv.Kind() {
 	case reflect.Array, reflect.Slice:
-		return ns.checkWhereArray(seqv, kv, mv, path, op)
+		return ns.checkWhereArray(ctxv, seqv, kv, mv, path, op)
 	case reflect.Map:
-		return ns.checkWhereMap(seqv, kv, mv, path, op)
+		return ns.checkWhereMap(ctxv, seqv, kv, mv, path, op)
 	default:
-		return nil, fmt.Errorf("can't iterate over %v", seq)
+		return nil, fmt.Errorf("can't iterate over %T", c)
 	}
 }
 
@@ -83,7 +88,7 @@ func (ns *Namespace) checkCondition(v, mv reflect.Value, op string) (bool, error
 	var ivp, imvp *int64
 	var fvp, fmvp *float64
 	var svp, smvp *string
-	var slv, slmv interface{}
+	var slv, slmv any
 	var ima []int64
 	var fma []float64
 	var sma []string
@@ -94,6 +99,11 @@ func (ns *Namespace) checkCondition(v, mv reflect.Value, op string) (bool, error
 			iv := v.Int()
 			ivp = &iv
 			imv := mv.Int()
+			imvp = &imv
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			iv := int64(v.Uint())
+			ivp = &iv
+			imv := int64(mv.Uint())
 			imvp = &imv
 		case reflect.String:
 			sv := v.String()
@@ -106,11 +116,10 @@ func (ns *Namespace) checkCondition(v, mv reflect.Value, op string) (bool, error
 			fmv := mv.Float()
 			fmvp = &fmv
 		case reflect.Struct:
-			switch v.Type() {
-			case timeType:
-				iv := toTimeUnix(v)
+			if hreflect.IsTime(v.Type()) {
+				iv := ns.toTimeUnix(v)
 				ivp = &iv
-				imv := toTimeUnix(mv)
+				imv := ns.toTimeUnix(mv)
 				imvp = &imv
 			}
 		case reflect.Array, reflect.Slice:
@@ -134,6 +143,9 @@ func (ns *Namespace) checkCondition(v, mv reflect.Value, op string) (bool, error
 		}
 
 		if mv.Len() == 0 {
+			if op == "not in" {
+				return true, nil
+			}
 			return false, nil
 		}
 
@@ -144,7 +156,7 @@ func (ns *Namespace) checkCondition(v, mv reflect.Value, op string) (bool, error
 		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 			iv := v.Int()
 			ivp = &iv
-			for i := 0; i < mv.Len(); i++ {
+			for i := range mv.Len() {
 				if anInt, err := toInt(mv.Index(i)); err == nil {
 					ima = append(ima, anInt)
 				}
@@ -152,7 +164,7 @@ func (ns *Namespace) checkCondition(v, mv reflect.Value, op string) (bool, error
 		case reflect.String:
 			sv := v.String()
 			svp = &sv
-			for i := 0; i < mv.Len(); i++ {
+			for i := range mv.Len() {
 				if aString, err := toString(mv.Index(i)); err == nil {
 					sma = append(sma, aString)
 				}
@@ -160,18 +172,17 @@ func (ns *Namespace) checkCondition(v, mv reflect.Value, op string) (bool, error
 		case reflect.Float64:
 			fv := v.Float()
 			fvp = &fv
-			for i := 0; i < mv.Len(); i++ {
+			for i := range mv.Len() {
 				if aFloat, err := toFloat(mv.Index(i)); err == nil {
 					fma = append(fma, aFloat)
 				}
 			}
 		case reflect.Struct:
-			switch v.Type() {
-			case timeType:
-				iv := toTimeUnix(v)
+			if hreflect.IsTime(v.Type()) {
+				iv := ns.toTimeUnix(v)
 				ivp = &iv
-				for i := 0; i < mv.Len(); i++ {
-					ima = append(ima, toTimeUnix(mv.Index(i)))
+				for i := range mv.Len() {
+					ima = append(ima, ns.toTimeUnix(mv.Index(i)))
 				}
 			}
 		case reflect.Array, reflect.Slice:
@@ -270,13 +281,24 @@ func (ns *Namespace) checkCondition(v, mv reflect.Value, op string) (bool, error
 			return false, nil
 		}
 		return false, errors.New("invalid intersect values")
+	case "like":
+		if svp != nil && smvp != nil {
+			re, err := hstrings.GetOrCompileRegexp(*smvp)
+			if err != nil {
+				return false, err
+			}
+			if re.MatchString(*svp) {
+				return true, nil
+			}
+			return false, nil
+		}
 	default:
 		return false, errors.New("no such operator")
 	}
 	return false, nil
 }
 
-func evaluateSubElem(obj reflect.Value, elemName string) (reflect.Value, error) {
+func evaluateSubElem(ctx, obj reflect.Value, elemName string) (reflect.Value, error) {
 	if !obj.IsValid() {
 		return zero, errors.New("can't evaluate an invalid value")
 	}
@@ -300,13 +322,22 @@ func evaluateSubElem(obj reflect.Value, elemName string) (reflect.Value, error) 
 		objPtr = objPtr.Addr()
 	}
 
-	mt, ok := objPtr.Type().MethodByName(elemName)
-	if ok {
+	index := hreflect.GetMethodIndexByName(objPtr.Type(), elemName)
+	if index != -1 {
+		var args []reflect.Value
+		mt := objPtr.Type().Method(index)
+		num := mt.Type.NumIn()
+		maxNumIn := 1
+		if num > 1 && hreflect.IsContextType(mt.Type.In(1)) {
+			args = []reflect.Value{ctx}
+			maxNumIn = 2
+		}
+
 		switch {
 		case mt.PkgPath != "":
 			return zero, fmt.Errorf("%s is an unexported method of type %s", elemName, typ)
-		case mt.Type.NumIn() > 1:
-			return zero, fmt.Errorf("%s is a method of type %s but requires more than 1 parameter", elemName, typ)
+		case mt.Type.NumIn() > maxNumIn:
+			return zero, fmt.Errorf("%s is a method of type %s but requires more than %d parameter", elemName, typ, maxNumIn)
 		case mt.Type.NumOut() == 0:
 			return zero, fmt.Errorf("%s is a method of type %s but returns no output", elemName, typ)
 		case mt.Type.NumOut() > 2:
@@ -316,7 +347,7 @@ func evaluateSubElem(obj reflect.Value, elemName string) (reflect.Value, error) 
 		case mt.Type.NumOut() == 2 && !mt.Type.Out(1).Implements(errorType):
 			return zero, fmt.Errorf("%s is a method of type %s returning two values but the second value is not an error type", elemName, typ)
 		}
-		res := objPtr.Method(mt.Index).Call([]reflect.Value{})
+		res := objPtr.Method(mt.Index).Call(args)
 		if len(res) == 2 && !res[1].IsNil() {
 			return zero, fmt.Errorf("error at calling a method %s of type %s: %s", elemName, typ, res[1].Interface().(error))
 		}
@@ -351,7 +382,7 @@ func evaluateSubElem(obj reflect.Value, elemName string) (reflect.Value, error) 
 
 // parseWhereArgs parses the end arguments to the where function.  Return a
 // match value and an operator, if one is defined.
-func parseWhereArgs(args ...interface{}) (mv reflect.Value, op string, err error) {
+func parseWhereArgs(args ...any) (mv reflect.Value, op string, err error) {
 	switch len(args) {
 	case 1:
 		mv = reflect.ValueOf(args[0])
@@ -371,22 +402,21 @@ func parseWhereArgs(args ...interface{}) (mv reflect.Value, op string, err error
 
 // checkWhereArray handles the where-matching logic when the seqv value is an
 // Array or Slice.
-func (ns *Namespace) checkWhereArray(seqv, kv, mv reflect.Value, path []string, op string) (interface{}, error) {
+func (ns *Namespace) checkWhereArray(ctxv, seqv, kv, mv reflect.Value, path []string, op string) (any, error) {
 	rv := reflect.MakeSlice(seqv.Type(), 0, 0)
 
-	for i := 0; i < seqv.Len(); i++ {
+	for i := range seqv.Len() {
 		var vvv reflect.Value
 		rvv := seqv.Index(i)
 
 		if kv.Kind() == reflect.String {
 			if params, ok := rvv.Interface().(maps.Params); ok {
-				vvv = reflect.ValueOf(params.Get(path...))
+				vvv = reflect.ValueOf(params.GetNested(path...))
 			} else {
 				vvv = rvv
 				for i, elemName := range path {
 					var err error
-					vvv, err = evaluateSubElem(vvv, elemName)
-
+					vvv, err = evaluateSubElem(ctxv, vvv, elemName)
 					if err != nil {
 						continue
 					}
@@ -394,7 +424,7 @@ func (ns *Namespace) checkWhereArray(seqv, kv, mv reflect.Value, path []string, 
 					if i < len(path)-1 && vvv.IsValid() {
 						if params, ok := vvv.Interface().(maps.Params); ok {
 							// The current path element is the map itself, .Params.
-							vvv = reflect.ValueOf(params.Get(path[i+1:]...))
+							vvv = reflect.ValueOf(params.GetNested(path[i+1:]...))
 							break
 						}
 					}
@@ -417,14 +447,17 @@ func (ns *Namespace) checkWhereArray(seqv, kv, mv reflect.Value, path []string, 
 }
 
 // checkWhereMap handles the where-matching logic when the seqv value is a Map.
-func (ns *Namespace) checkWhereMap(seqv, kv, mv reflect.Value, path []string, op string) (interface{}, error) {
+func (ns *Namespace) checkWhereMap(ctxv, seqv, kv, mv reflect.Value, path []string, op string) (any, error) {
 	rv := reflect.MakeMap(seqv.Type())
-	keys := seqv.MapKeys()
-	for _, k := range keys {
-		elemv := seqv.MapIndex(k)
+	k := reflect.New(seqv.Type().Key()).Elem()
+	elemv := reflect.New(seqv.Type().Elem()).Elem()
+	iter := seqv.MapRange()
+	for iter.Next() {
+		k.SetIterKey(iter)
+		elemv.SetIterValue(iter)
 		switch elemv.Kind() {
 		case reflect.Array, reflect.Slice:
-			r, err := ns.checkWhereArray(elemv, kv, mv, path, op)
+			r, err := ns.checkWhereArray(ctxv, elemv, kv, mv, path, op)
 			if err != nil {
 				return nil, err
 			}
@@ -443,7 +476,7 @@ func (ns *Namespace) checkWhereMap(seqv, kv, mv reflect.Value, path []string, op
 
 			switch elemvv.Kind() {
 			case reflect.Array, reflect.Slice:
-				r, err := ns.checkWhereArray(elemvv, kv, mv, path, op)
+				r, err := ns.checkWhereArray(ctxv, elemvv, kv, mv, path, op)
 				if err != nil {
 					return nil, err
 				}
@@ -466,6 +499,8 @@ func toFloat(v reflect.Value) (float64, error) {
 	case reflect.Float32, reflect.Float64:
 		return v.Float(), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Convert(reflect.TypeOf(float64(0))).Float(), nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		return v.Convert(reflect.TypeOf(float64(0))).Float(), nil
 	case reflect.Interface:
 		return toFloat(v.Elem())
@@ -506,12 +541,10 @@ func toString(v reflect.Value) (string, error) {
 	return "", errors.New("unable to convert value to string")
 }
 
-func toTimeUnix(v reflect.Value) int64 {
-	if v.Kind() == reflect.Interface {
-		return toTimeUnix(v.Elem())
-	}
-	if v.Type() != timeType {
+func (ns *Namespace) toTimeUnix(v reflect.Value) int64 {
+	t, ok := hreflect.AsTime(v, ns.loc)
+	if !ok {
 		panic("coding error: argument must be time.Time type reflect Value")
 	}
-	return v.MethodByName("Unix").Call([]reflect.Value{})[0].Int()
+	return t.Unix()
 }

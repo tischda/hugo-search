@@ -23,6 +23,7 @@ type Headline struct {
 	Index      int
 	Lvl        int
 	Status     string
+	IsComment  bool
 	Priority   string
 	Properties *PropertyDrawer
 	Title      []Node
@@ -31,7 +32,7 @@ type Headline struct {
 }
 
 var headlineRegexp = regexp.MustCompile(`^([*]+)\s+(.*)`)
-var tagRegexp = regexp.MustCompile(`(.*?)\s+(:[A-Za-z0-9_@#%:]+:\s*$)`)
+var tagRegexp = regexp.MustCompile(`(.*?)\s+(:[\p{L}0-9_@#%:]+:\s*$)`)
 
 func lexHeadline(line string) (token, bool) {
 	if m := headlineRegexp.FindStringSubmatch(line); m != nil {
@@ -43,11 +44,10 @@ func lexHeadline(line string) (token, bool) {
 func (d *Document) parseHeadline(i int, parentStop stopFn) (int, Node) {
 	t, headline := d.tokens[i], Headline{}
 	headline.Lvl = len(t.matches[1])
-
-	headline.Index = d.addHeadline(&headline)
-
 	text := t.content
-	todoKeywords := strings.FieldsFunc(d.Get("TODO"), func(r rune) bool { return unicode.IsSpace(r) || r == '|' })
+	todoKeywords := trimFastTags(
+		strings.FieldsFunc(d.Get("TODO"), func(r rune) bool { return unicode.IsSpace(r) || r == '|' }),
+	)
 	for _, k := range todoKeywords {
 		if strings.HasPrefix(text, k) && len(text) > len(k) && unicode.IsSpace(rune(text[len(k)])) {
 			headline.Status = k
@@ -60,12 +60,15 @@ func (d *Document) parseHeadline(i int, parentStop stopFn) (int, Node) {
 		headline.Priority = text[2:3]
 		text = strings.TrimSpace(text[4:])
 	}
-
+	if strings.HasPrefix(text, "COMMENT ") {
+		headline.IsComment = true
+		text = strings.TrimPrefix(text, "COMMENT ")
+	}
 	if m := tagRegexp.FindStringSubmatch(text); m != nil {
 		text = m[1]
 		headline.Tags = strings.FieldsFunc(m[2], func(r rune) bool { return r == ':' })
 	}
-
+	headline.Index = d.addHeadline(&headline)
 	headline.Title = d.parseInline(text)
 
 	stop := func(d *Document, i int) bool {
@@ -82,11 +85,40 @@ func (d *Document) parseHeadline(i int, parentStop stopFn) (int, Node) {
 	return consumed + 1, headline
 }
 
+func trimFastTags(tags []string) []string {
+	trimmedTags := make([]string, len(tags))
+	for i, t := range tags {
+		lParen := strings.LastIndex(t, "(")
+		rParen := strings.LastIndex(t, ")")
+		end := len(t) - 1
+		if lParen == end-2 && rParen == end {
+			trimmedTags[i] = t[:end-2]
+		} else {
+			trimmedTags[i] = t
+		}
+	}
+	return trimmedTags
+}
+
 func (h Headline) ID() string {
 	if customID, ok := h.Properties.Get("CUSTOM_ID"); ok {
 		return customID
 	}
 	return fmt.Sprintf("headline-%d", h.Index)
+}
+
+func (h Headline) IsExcluded(d *Document) bool {
+	if h.IsComment {
+		return true
+	}
+	for _, excludedTag := range strings.Fields(d.Get("EXCLUDE_TAGS")) {
+		for _, tag := range h.Tags {
+			if tag == excludedTag {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (parent *Section) add(current *Section) {
@@ -98,4 +130,4 @@ func (parent *Section) add(current *Section) {
 	}
 }
 
-func (n Headline) String() string { return orgWriter.WriteNodesAsString(n) }
+func (n Headline) String() string { return String(n) }

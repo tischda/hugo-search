@@ -16,23 +16,15 @@ package hugolib
 import (
 	"sync"
 
-	"github.com/bep/gitmap"
 	"github.com/gohugoio/hugo/common/maps"
 	"github.com/gohugoio/hugo/compare"
 	"github.com/gohugoio/hugo/lazy"
+	"github.com/gohugoio/hugo/markup/converter"
 	"github.com/gohugoio/hugo/navigation"
-	"github.com/gohugoio/hugo/output"
 	"github.com/gohugoio/hugo/resources/page"
 	"github.com/gohugoio/hugo/resources/resource"
+	"github.com/gohugoio/hugo/source"
 )
-
-type treeRefProvider interface {
-	getTreeRef() *contentTreeRef
-}
-
-func (p *pageCommon) getTreeRef() *contentTreeRef {
-	return p.treeRef
-}
 
 type nextPrevProvider interface {
 	getNextPrev() *nextPrev
@@ -54,17 +46,16 @@ type pageCommon struct {
 	s *Site
 	m *pageMeta
 
-	bucket  *pagesMapBucket
-	treeRef *contentTreeRef
+	sWrapped page.Site
 
 	// Lazily initialized dependencies.
 	init *lazy.Init
 
+	// Store holds state that survives server rebuilds.
+	store *maps.Scratch
+
 	// All of these represents the common parts of a page.Page
-	maps.Scratcher
 	navigation.PageMenusProvider
-	page.AuthorProvider
-	page.PageRenderProvider
 	page.AlternativeOutputFormatsProvider
 	page.ChildCareProvider
 	page.FileProvider
@@ -73,18 +64,17 @@ type pageCommon struct {
 	page.InSectionPositioner
 	page.OutputFormatsProvider
 	page.PageMetaProvider
+	page.PageMetaInternalProvider
 	page.Positioner
 	page.RawContentProvider
-	page.RelatedKeywordsProvider
 	page.RefProvider
 	page.ShortcodeInfoProvider
 	page.SitesProvider
-	page.DeprecatedWarningPageMethods
 	page.TranslationsProvider
 	page.TreeProvider
 	resource.LanguageProvider
 	resource.ResourceDataProvider
-	resource.ResourceMetaProvider
+	resource.ResourceNameTitleProvider
 	resource.ResourceParamsProvider
 	resource.ResourceTypeProvider
 	resource.MediaTypeProvider
@@ -95,14 +85,9 @@ type pageCommon struct {
 	// should look like.
 	targetPathDescriptor page.TargetPathDescriptor
 
-	layoutDescriptor     output.LayoutDescriptor
-	layoutDescriptorInit sync.Once
-
-	// The parsed page content.
-	pageContent
-
 	// Set if feature enabled and this is in a Git repo.
-	gitInfo *gitmap.GitInfo
+	gitInfo    *source.GitInfo
+	codeowners []string
 
 	// Positional navigation
 	posNextPrev        *nextPrev
@@ -112,36 +97,17 @@ type pageCommon struct {
 	pageMenus *pageMenus
 
 	// Internal use
-	page.InternalDependencies
+	page.RelatedDocsHandlerProvider
 
-	// The children. Regular pages will have none.
-	*pagePages
-
-	// Any bundled resources
-	resources            resource.Resources
-	resourcesInit        sync.Once
-	resourcesPublishInit sync.Once
-
-	translations    page.Pages
-	allTranslations page.Pages
-
-	// Calculated an cached translation mapping key
-	translationKey     string
-	translationKeyInit sync.Once
-
-	// Will only be set for bundled pages.
-	parent *pageState
-
-	// Set in fast render mode to force render a given page.
-	forceRender bool
+	contentConverterInit sync.Once
+	contentConverter     converter.Converter
 }
 
-type pagePages struct {
-	pagesInit sync.Once
-	pages     page.Pages
+func (p *pageCommon) Store() *maps.Scratch {
+	return p.store
+}
 
-	regularPagesInit          sync.Once
-	regularPages              page.Pages
-	regularPagesRecursiveInit sync.Once
-	regularPagesRecursive     page.Pages
+// See issue 13016.
+func (p *pageCommon) Scratch() *maps.Scratch {
+	return p.Store()
 }

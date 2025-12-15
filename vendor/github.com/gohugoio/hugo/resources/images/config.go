@@ -14,26 +14,44 @@
 package images
 
 import (
+	"errors"
 	"fmt"
 	"image/color"
 	"strconv"
 	"strings"
 
-	"github.com/gohugoio/hugo/helpers"
-
-	"github.com/pkg/errors"
+	"github.com/gohugoio/hugo/common/hashing"
+	"github.com/gohugoio/hugo/common/maps"
+	"github.com/gohugoio/hugo/config"
+	"github.com/gohugoio/hugo/media"
+	"github.com/mitchellh/mapstructure"
 
 	"github.com/bep/gowebp/libwebp/webpoptions"
 
 	"github.com/disintegration/gift"
-
-	"github.com/mitchellh/mapstructure"
 )
+
+const (
+	ActionResize = "resize"
+	ActionCrop   = "crop"
+	ActionFit    = "fit"
+	ActionFill   = "fill"
+)
+
+var Actions = map[string]bool{
+	ActionResize: true,
+	ActionCrop:   true,
+	ActionFit:    true,
+	ActionFill:   true,
+}
 
 var (
 	imageFormats = map[string]Format{
 		".jpg":  JPEG,
 		".jpeg": JPEG,
+		".jpe":  JPEG,
+		".jif":  JPEG,
+		".jfif": JPEG,
 		".png":  PNG,
 		".tif":  TIFF,
 		".tiff": TIFF,
@@ -42,11 +60,21 @@ var (
 		".webp": WEBP,
 	}
 
+	imageFormatsBySubType = map[string]Format{
+		media.Builtin.JPEGType.SubType: JPEG,
+		media.Builtin.PNGType.SubType:  PNG,
+		media.Builtin.TIFFType.SubType: TIFF,
+		media.Builtin.BMPType.SubType:  BMP,
+		media.Builtin.GIFType.SubType:  GIF,
+		media.Builtin.WEBPType.SubType: WEBP,
+	}
+
 	// Add or increment if changes to an image format's processing requires
 	// re-generation.
 	imageFormatsVersions = map[Format]int{
-		PNG:  3, // Fix transparency issue with 32 bit images.
-		WEBP: 2, // Fix transparency issue with 32 bit images.
+		PNG:  0,
+		WEBP: 0,
+		GIF:  0,
 	}
 
 	// Increment to mark all processed images as stale. Only use when absolutely needed.
@@ -64,6 +92,7 @@ var anchorPositions = map[string]gift.Anchor{
 	strings.ToLower("BottomLeft"):  gift.BottomLeftAnchor,
 	strings.ToLower("Bottom"):      gift.BottomAnchor,
 	strings.ToLower("BottomRight"): gift.BottomRightAnchor,
+	smartCropIdentifier:            SmartCropAnchor,
 }
 
 // These encoding hints are currently only relevant for Webp.
@@ -76,7 +105,6 @@ var hints = map[string]webpoptions.EncodingPreset{
 }
 
 var imageFilters = map[string]gift.Resampling{
-
 	strings.ToLower("NearestNeighbor"):   gift.NearestNeighborResampling,
 	strings.ToLower("Box"):               gift.BoxResampling,
 	strings.ToLower("Linear"):            gift.LinearResampling,
@@ -99,97 +127,117 @@ func ImageFormatFromExt(ext string) (Format, bool) {
 	return f, found
 }
 
+func ImageFormatFromMediaSubType(sub string) (Format, bool) {
+	f, found := imageFormatsBySubType[sub]
+	return f, found
+}
+
 const (
 	defaultJPEGQuality    = 75
 	defaultResampleFilter = "box"
-	defaultBgColor        = "ffffff"
+	defaultBgColor        = "#ffffff"
 	defaultHint           = "photo"
 )
 
-var defaultImaging = Imaging{
-	ResampleFilter: defaultResampleFilter,
-	BgColor:        defaultBgColor,
-	Hint:           defaultHint,
-	Quality:        defaultJPEGQuality,
-}
-
-func DecodeConfig(m map[string]interface{}) (ImagingConfig, error) {
-	if m == nil {
-		m = make(map[string]interface{})
+var (
+	defaultImaging = map[string]any{
+		"resampleFilter": defaultResampleFilter,
+		"bgColor":        defaultBgColor,
+		"hint":           defaultHint,
+		"quality":        defaultJPEGQuality,
 	}
 
-	i := ImagingConfig{
-		Cfg:     defaultImaging,
-		CfgHash: helpers.HashString(m),
-	}
+	defaultImageConfig *config.ConfigNamespace[ImagingConfig, ImagingConfigInternal]
+)
 
-	if err := mapstructure.WeakDecode(m, &i.Cfg); err != nil {
-		return i, err
-	}
-
-	if err := i.Cfg.init(); err != nil {
-		return i, err
-	}
-
+func init() {
 	var err error
-	i.BgColor, err = hexStringToColor(i.Cfg.BgColor)
+	defaultImageConfig, err = DecodeConfig(defaultImaging)
 	if err != nil {
-		return i, err
+		panic(err)
 	}
-
-	if i.Cfg.Anchor != "" && i.Cfg.Anchor != smartCropIdentifier {
-		anchor, found := anchorPositions[i.Cfg.Anchor]
-		if !found {
-			return i, errors.Errorf("invalid anchor value %q in imaging config", i.Anchor)
-		}
-		i.Anchor = anchor
-	} else {
-		i.Cfg.Anchor = smartCropIdentifier
-	}
-
-	filter, found := imageFilters[i.Cfg.ResampleFilter]
-	if !found {
-		return i, fmt.Errorf("%q is not a valid resample filter", filter)
-	}
-	i.ResampleFilter = filter
-
-	if strings.TrimSpace(i.Cfg.Exif.IncludeFields) == "" && strings.TrimSpace(i.Cfg.Exif.ExcludeFields) == "" {
-		// Don't change this for no good reason. Please don't.
-		i.Cfg.Exif.ExcludeFields = "GPS|Exif|Exposure[M|P|B]|Contrast|Resolution|Sharp|JPEG|Metering|Sensing|Saturation|ColorSpace|Flash|WhiteBalance"
-	}
-
-	return i, nil
 }
 
-func DecodeImageConfig(action, config string, defaults ImagingConfig, sourceFormat Format) (ImageConfig, error) {
+func DecodeConfig(in map[string]any) (*config.ConfigNamespace[ImagingConfig, ImagingConfigInternal], error) {
+	if in == nil {
+		in = make(map[string]any)
+	}
+
+	buildConfig := func(in any) (ImagingConfigInternal, any, error) {
+		m, err := maps.ToStringMapE(in)
+		if err != nil {
+			return ImagingConfigInternal{}, nil, err
+		}
+		// Merge in the defaults.
+		maps.MergeShallow(m, defaultImaging)
+
+		var i ImagingConfigInternal
+		if err := mapstructure.Decode(m, &i.Imaging); err != nil {
+			return i, nil, err
+		}
+
+		if err := i.Imaging.init(); err != nil {
+			return i, nil, err
+		}
+
+		i.BgColor, err = hexStringToColorGo(i.Imaging.BgColor)
+		if err != nil {
+			return i, nil, err
+		}
+
+		if i.Imaging.Anchor != "" {
+			anchor, found := anchorPositions[i.Imaging.Anchor]
+			if !found {
+				return i, nil, fmt.Errorf("invalid anchor value %q in imaging config", i.Anchor)
+			}
+			i.Anchor = anchor
+		}
+
+		filter, found := imageFilters[i.Imaging.ResampleFilter]
+		if !found {
+			return i, nil, fmt.Errorf("%q is not a valid resample filter", filter)
+		}
+
+		i.ResampleFilter = filter
+
+		return i, nil, nil
+	}
+
+	ns, err := config.DecodeNamespace[ImagingConfig](in, buildConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode media types: %w", err)
+	}
+	return ns, nil
+}
+
+func DecodeImageConfig(options []string, defaults *config.ConfigNamespace[ImagingConfig, ImagingConfigInternal], sourceFormat Format) (ImageConfig, error) {
 	var (
-		c   ImageConfig = GetDefaultImageConfig(action, defaults)
+		c   ImageConfig = GetDefaultImageConfig(defaults)
 		err error
 	)
 
-	c.Action = action
-
-	if config == "" {
-		return c, errors.New("image config cannot be empty")
+	// Make to lower case, trim space and remove any empty strings.
+	n := 0
+	for _, s := range options {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			options[n] = strings.ToLower(s)
+			n++
+		}
 	}
+	options = options[:n]
 
-	parts := strings.Fields(config)
-	for _, part := range parts {
-		part = strings.ToLower(part)
-
-		if part == smartCropIdentifier {
-			c.AnchorStr = smartCropIdentifier
+	for _, part := range options {
+		if _, ok := Actions[part]; ok {
+			c.Action = part
 		} else if pos, ok := anchorPositions[part]; ok {
 			c.Anchor = pos
-			c.AnchorStr = part
 		} else if filter, ok := imageFilters[part]; ok {
 			c.Filter = filter
-			c.FilterStr = part
 		} else if hint, ok := hints[part]; ok {
 			c.Hint = hint
 		} else if part[0] == '#' {
-			c.BgColorStr = part[1:]
-			c.BgColor, err = hexStringToColor(c.BgColorStr)
+			c.BgColor, err = hexStringToColorGo(part[1:])
 			if err != nil {
 				return c, err
 			}
@@ -235,22 +283,31 @@ func DecodeImageConfig(action, config string, defaults ImagingConfig, sourceForm
 		}
 	}
 
-	if c.Width == 0 && c.Height == 0 {
-		return c, errors.New("must provide Width or Height")
+	switch c.Action {
+	case ActionCrop, ActionFill, ActionFit:
+		if c.Width == 0 || c.Height == 0 {
+			return c, errors.New("must provide Width and Height")
+		}
+	case ActionResize:
+		if c.Width == 0 && c.Height == 0 {
+			return c, errors.New("must provide Width or Height")
+		}
+	default:
+		if c.Width != 0 || c.Height != 0 {
+			return c, errors.New("width or height are not supported for this action")
+		}
 	}
 
-	if c.FilterStr == "" {
-		c.FilterStr = defaults.Cfg.ResampleFilter
-		c.Filter = defaults.ResampleFilter
+	if c.Action != "" && c.Filter == nil {
+		c.Filter = defaults.Config.ResampleFilter
 	}
 
 	if c.Hint == 0 {
 		c.Hint = webpoptions.EncodingPresetPhoto
 	}
 
-	if c.AnchorStr == "" {
-		c.AnchorStr = defaults.Cfg.Anchor
-		c.Anchor = defaults.Anchor
+	if c.Action != "" && c.Anchor == -1 {
+		c.Anchor = defaults.Config.Anchor
 	}
 
 	// default to the source format
@@ -260,15 +317,28 @@ func DecodeImageConfig(action, config string, defaults ImagingConfig, sourceForm
 
 	if c.Quality <= 0 && c.TargetFormat.RequiresDefaultQuality() {
 		// We need a quality setting for all JPEGs and WEBPs.
-		c.Quality = defaults.Cfg.Quality
+		c.Quality = defaults.Config.Imaging.Quality
 	}
 
 	if c.BgColor == nil && c.TargetFormat != sourceFormat {
 		if sourceFormat.SupportsTransparency() && !c.TargetFormat.SupportsTransparency() {
-			c.BgColor = defaults.BgColor
-			c.BgColorStr = defaults.Cfg.BgColor
+			c.BgColor = defaults.Config.BgColor
 		}
 	}
+
+	if mainImageVersionNumber > 0 {
+		options = append(options, strconv.Itoa(mainImageVersionNumber))
+	}
+
+	if v, ok := imageFormatsVersions[sourceFormat]; ok && v > 0 {
+		options = append(options, strconv.Itoa(v))
+	}
+
+	if smartCropVersionNumber > 0 && c.Anchor == SmartCropAnchor {
+		options = append(options, strconv.Itoa(smartCropVersionNumber))
+	}
+
+	c.Key = hashing.HashStringHex(options)
 
 	return c, nil
 }
@@ -298,8 +368,7 @@ type ImageConfig struct {
 	// not support transparency.
 	// When set per image operation, it's used even for formats that does support
 	// transparency.
-	BgColor    color.Color
-	BgColorStr string
+	BgColor color.Color
 
 	// Hint about what type of picture this is. Used to optimize encoding
 	// when target is set to webp.
@@ -308,75 +377,53 @@ type ImageConfig struct {
 	Width  int
 	Height int
 
-	Filter    gift.Resampling
-	FilterStr string
+	Filter gift.Resampling
 
-	Anchor    gift.Anchor
-	AnchorStr string
+	Anchor gift.Anchor
 }
 
-func (i ImageConfig) GetKey(format Format) string {
-	if i.Key != "" {
-		return i.Action + "_" + i.Key
-	}
-
-	k := strconv.Itoa(i.Width) + "x" + strconv.Itoa(i.Height)
-	if i.Action != "" {
-		k += "_" + i.Action
-	}
-	// This slightly odd construct is here to preserve the old image keys.
-	if i.qualitySetForImage || i.TargetFormat.RequiresDefaultQuality() {
-		k += "_q" + strconv.Itoa(i.Quality)
-	}
-	if i.Rotate != 0 {
-		k += "_r" + strconv.Itoa(i.Rotate)
-	}
-	if i.BgColorStr != "" {
-		k += "_bg" + i.BgColorStr
-	}
-
-	if i.TargetFormat == WEBP {
-		k += "_h" + strconv.Itoa(int(i.Hint))
-	}
-
-	anchor := i.AnchorStr
-	if anchor == smartCropIdentifier {
-		anchor = anchor + strconv.Itoa(smartCropVersionNumber)
-	}
-
-	k += "_" + i.FilterStr
-
-	if strings.EqualFold(i.Action, "fill") {
-		k += "_" + anchor
-	}
-
-	if v, ok := imageFormatsVersions[format]; ok {
-		k += "_" + strconv.Itoa(v)
-	}
-
-	if mainImageVersionNumber > 0 {
-		k += "_" + strconv.Itoa(mainImageVersionNumber)
-	}
-
-	return k
+func (cfg ImageConfig) Reanchor(a gift.Anchor) ImageConfig {
+	cfg.Anchor = a
+	cfg.Key = hashing.HashStringHex(cfg.Key, "reanchor", a)
+	return cfg
 }
 
-type ImagingConfig struct {
+type ImagingConfigInternal struct {
 	BgColor        color.Color
 	Hint           webpoptions.EncodingPreset
 	ResampleFilter gift.Resampling
 	Anchor         gift.Anchor
 
-	// Config as provided by the user.
-	Cfg Imaging
-
-	// Hash of the config map provided by the user.
-	CfgHash string
+	Imaging ImagingConfig
 }
 
-// Imaging contains default image processing configuration. This will be fetched
+func (i *ImagingConfigInternal) Compile(externalCfg *ImagingConfig) error {
+	var err error
+	i.BgColor, err = hexStringToColorGo(externalCfg.BgColor)
+	if err != nil {
+		return err
+	}
+
+	if externalCfg.Anchor != "" {
+		anchor, found := anchorPositions[externalCfg.Anchor]
+		if !found {
+			return fmt.Errorf("invalid anchor value %q in imaging config", i.Anchor)
+		}
+		i.Anchor = anchor
+	}
+
+	filter, found := imageFilters[externalCfg.ResampleFilter]
+	if !found {
+		return fmt.Errorf("%q is not a valid resample filter", filter)
+	}
+	i.ResampleFilter = filter
+
+	return nil
+}
+
+// ImagingConfig contains default image processing configuration. This will be fetched
 // from site (or language) config.
-type Imaging struct {
+type ImagingConfig struct {
 	// Default image quality setting (1-100). Only used for JPEG images.
 	Quality int
 
@@ -398,7 +445,7 @@ type Imaging struct {
 	Exif ExifConfig
 }
 
-func (cfg *Imaging) init() error {
+func (cfg *ImagingConfig) init() error {
 	if cfg.Quality < 0 || cfg.Quality > 100 {
 		return errors.New("image quality must be a number between 1 and 100")
 	}
@@ -408,11 +455,19 @@ func (cfg *Imaging) init() error {
 	cfg.ResampleFilter = strings.ToLower(cfg.ResampleFilter)
 	cfg.Hint = strings.ToLower(cfg.Hint)
 
+	if cfg.Anchor == "" {
+		cfg.Anchor = smartCropIdentifier
+	}
+
+	if strings.TrimSpace(cfg.Exif.IncludeFields) == "" && strings.TrimSpace(cfg.Exif.ExcludeFields) == "" {
+		// Don't change this for no good reason. Please don't.
+		cfg.Exif.ExcludeFields = "GPS|Exif|Exposure[M|P|B]|Contrast|Resolution|Sharp|JPEG|Metering|Sensing|Saturation|ColorSpace|Flash|WhiteBalance"
+	}
+
 	return nil
 }
 
 type ExifConfig struct {
-
 	// Regexp matching the Exif fields you want from the (massive) set of Exif info
 	// available. As we cache this info to disk, this is for performance and
 	// disk space reasons more than anything.

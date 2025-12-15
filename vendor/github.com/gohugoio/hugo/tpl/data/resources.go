@@ -15,18 +15,15 @@ package data
 
 import (
 	"bytes"
-	"io/ioutil"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"time"
 
-	"github.com/pkg/errors"
-
 	"github.com/gohugoio/hugo/cache/filecache"
-
-	"github.com/gohugoio/hugo/config"
-	"github.com/gohugoio/hugo/helpers"
+	"github.com/gohugoio/hugo/common/hashing"
 	"github.com/spf13/afero"
 )
 
@@ -38,9 +35,16 @@ var (
 // getRemote loads the content of a remote file. This method is thread safe.
 func (ns *Namespace) getRemote(cache *filecache.Cache, unmarshal func([]byte) (bool, error), req *http.Request) error {
 	url := req.URL.String()
+	if err := ns.deps.ExecHelper.Sec().CheckAllowedHTTPURL(url); err != nil {
+		return err
+	}
+	if err := ns.deps.ExecHelper.Sec().CheckAllowedHTTPMethod("GET"); err != nil {
+		return err
+	}
+
 	var headers bytes.Buffer
 	req.Header.Write(&headers)
-	id := helpers.MD5String(url + headers.String())
+	id := hashing.MD5FromStringHexEncoded(url + headers.String())
 	var handled bool
 	var retry bool
 
@@ -56,14 +60,14 @@ func (ns *Namespace) getRemote(cache *filecache.Cache, unmarshal func([]byte) (b
 			}
 
 			var b []byte
-			b, err = ioutil.ReadAll(res.Body)
+			b, err = io.ReadAll(res.Body)
 			if err != nil {
 				return nil, err
 			}
 			res.Body.Close()
 
 			if isHTTPError(res) {
-				return nil, errors.Errorf("Failed to retrieve remote file: %s, body: %q", http.StatusText(res.StatusCode), b)
+				return nil, fmt.Errorf("failed to retrieve remote file: %s, body: %q", http.StatusText(res.StatusCode), b)
 			}
 
 			retry, err = unmarshal(b)
@@ -94,8 +98,8 @@ func (ns *Namespace) getRemote(cache *filecache.Cache, unmarshal func([]byte) (b
 }
 
 // getLocal loads the content of a local file
-func getLocal(url string, fs afero.Fs, cfg config.Provider) ([]byte, error) {
-	filename := filepath.Join(cfg.GetString("workingDir"), url)
+func getLocal(workingDir, url string, fs afero.Fs) ([]byte, error) {
+	filename := filepath.Join(workingDir, url)
 	return afero.ReadFile(fs, filename)
 }
 
@@ -108,7 +112,7 @@ func (ns *Namespace) getResource(cache *filecache.Cache, unmarshal func(b []byte
 		if err != nil {
 			return err
 		}
-		b, err := getLocal(url, ns.deps.Fs.Source, ns.deps.Cfg)
+		b, err := getLocal(ns.deps.Conf.BaseConfig().WorkingDir, url, ns.deps.Fs.Source)
 		if err != nil {
 			return err
 		}

@@ -14,6 +14,7 @@
 package time
 
 import (
+	"context"
 	"errors"
 
 	"github.com/gohugoio/hugo/deps"
@@ -25,14 +26,14 @@ const name = "time"
 
 func init() {
 	f := func(d *deps.Deps) *internal.TemplateFuncsNamespace {
-		if d.Language == nil {
+		if d.Conf.Language() == nil {
 			panic("Language must be set")
 		}
-		ctx := New(langs.GetTranslator(d.Language), langs.GetLocation(d.Language))
+		ctx := New(langs.GetTimeFormatter(d.Conf.Language()), langs.GetLocation(d.Conf.Language()), d)
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name: name,
-			Context: func(args ...interface{}) (interface{}, error) {
+			Context: func(cctx context.Context, args ...any) (any, error) {
 				// Handle overlapping "time" namespace and func.
 				//
 				// If no args are passed to `time`, assume namespace usage and
@@ -50,7 +51,7 @@ func init() {
 
 				// 3 or more arguments. Currently not supported.
 				default:
-					return nil, errors.New("Invalid arguments supplied to `time`. Refer to time documentation: https://gohugo.io/functions/time/")
+					return nil, errors.New("invalid arguments supplied to `time`")
 				}
 			},
 		}

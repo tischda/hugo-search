@@ -71,6 +71,8 @@ const (
 	NodeVariable                   // A $ variable.
 	NodeWith                       // A with action.
 	NodeComment                    // A comment.
+	NodeBreak                      // A break action.
+	NodeContinue                   // A continue action.
 )
 
 // Nodes.
@@ -215,7 +217,11 @@ func (p *PipeNode) writeTo(sb *strings.Builder) {
 			}
 			v.writeTo(sb)
 		}
-		sb.WriteString(" := ")
+		if p.IsAssign {
+			sb.WriteString(" = ")
+		} else {
+			sb.WriteString(" := ")
+		}
 	}
 	for i, c := range p.Cmds {
 		if i > 0 {
@@ -282,7 +288,6 @@ func (a *ActionNode) tree() *Tree {
 
 func (a *ActionNode) Copy() Node {
 	return a.tr.newAction(a.Pos, a.Line, a.Pipe.CopyPipe())
-
 }
 
 // CommandNode holds a command (a pipeline inside an evaluating action).
@@ -345,12 +350,12 @@ type IdentifierNode struct {
 	Ident string // The identifier's name.
 }
 
-// NewIdentifier returns a new IdentifierNode with the given identifier name.
+// NewIdentifier returns a new [IdentifierNode] with the given identifier name.
 func NewIdentifier(ident string) *IdentifierNode {
 	return &IdentifierNode{NodeType: NodeIdentifier, Ident: ident}
 }
 
-// SetPos sets the position. NewIdentifier is a public method so we can't modify its signature.
+// SetPos sets the position. [NewIdentifier] is a public method so we can't modify its signature.
 // Chained for convenience.
 // TODO: fix one day?
 func (i *IdentifierNode) SetPos(pos Pos) *IdentifierNode {
@@ -358,7 +363,7 @@ func (i *IdentifierNode) SetPos(pos Pos) *IdentifierNode {
 	return i
 }
 
-// SetTree sets the parent tree for the node. NewIdentifier is a public method so we can't modify its signature.
+// SetTree sets the parent tree for the node. [NewIdentifier] is a public method so we can't modify its signature.
 // Chained for convenience.
 // TODO: fix one day?
 func (i *IdentifierNode) SetTree(t *Tree) *IdentifierNode {
@@ -906,6 +911,40 @@ func (t *Tree) newIf(pos Pos, line int, pipe *PipeNode, list, elseList *ListNode
 func (i *IfNode) Copy() Node {
 	return i.tr.newIf(i.Pos, i.Line, i.Pipe.CopyPipe(), i.List.CopyList(), i.ElseList.CopyList())
 }
+
+// BreakNode represents a {{break}} action.
+type BreakNode struct {
+	tr *Tree
+	NodeType
+	Pos
+	Line int
+}
+
+func (t *Tree) newBreak(pos Pos, line int) *BreakNode {
+	return &BreakNode{tr: t, NodeType: NodeBreak, Pos: pos, Line: line}
+}
+
+func (b *BreakNode) Copy() Node                  { return b.tr.newBreak(b.Pos, b.Line) }
+func (b *BreakNode) String() string              { return "{{break}}" }
+func (b *BreakNode) tree() *Tree                 { return b.tr }
+func (b *BreakNode) writeTo(sb *strings.Builder) { sb.WriteString("{{break}}") }
+
+// ContinueNode represents a {{continue}} action.
+type ContinueNode struct {
+	tr *Tree
+	NodeType
+	Pos
+	Line int
+}
+
+func (t *Tree) newContinue(pos Pos, line int) *ContinueNode {
+	return &ContinueNode{tr: t, NodeType: NodeContinue, Pos: pos, Line: line}
+}
+
+func (c *ContinueNode) Copy() Node                  { return c.tr.newContinue(c.Pos, c.Line) }
+func (c *ContinueNode) String() string              { return "{{continue}}" }
+func (c *ContinueNode) tree() *Tree                 { return c.tr }
+func (c *ContinueNode) writeTo(sb *strings.Builder) { sb.WriteString("{{continue}}") }
 
 // RangeNode represents a {{range}} action and its commands.
 type RangeNode struct {

@@ -16,6 +16,7 @@ package hugolib
 import (
 	"sync"
 
+	"github.com/gohugoio/hugo/resources/kinds"
 	"github.com/gohugoio/hugo/resources/page"
 )
 
@@ -41,10 +42,10 @@ func (p *pagePaginator) reset() {
 	p.pagePaginatorInit = &pagePaginatorInit{}
 }
 
-func (p *pagePaginator) Paginate(seq interface{}, options ...interface{}) (*page.Pager, error) {
+func (p *pagePaginator) Paginate(seq any, options ...any) (*page.Pager, error) {
 	var initErr error
 	p.init.Do(func() {
-		pagerSize, err := page.ResolvePagerSize(p.source.s.Cfg, options...)
+		pagerSize, err := page.ResolvePagerSize(p.source.s.Conf, options...)
 		if err != nil {
 			initErr = err
 			return
@@ -68,10 +69,10 @@ func (p *pagePaginator) Paginate(seq interface{}, options ...interface{}) (*page
 	return p.current, nil
 }
 
-func (p *pagePaginator) Paginator(options ...interface{}) (*page.Pager, error) {
+func (p *pagePaginator) Paginator(options ...any) (*page.Pager, error) {
 	var initErr error
 	p.init.Do(func() {
-		pagerSize, err := page.ResolvePagerSize(p.source.s.Cfg, options...)
+		pagerSize, err := page.ResolvePagerSize(p.source.s.Conf, options...)
 		if err != nil {
 			initErr = err
 			return
@@ -83,12 +84,12 @@ func (p *pagePaginator) Paginator(options ...interface{}) (*page.Pager, error) {
 		var pages page.Pages
 
 		switch p.source.Kind() {
-		case page.KindHome:
+		case kinds.KindHome:
 			// From Hugo 0.57 we made home.Pages() work like any other
 			// section. To avoid the default paginators for the home page
 			// changing in the wild, we make this a special case.
 			pages = p.source.s.RegularPages()
-		case page.KindTerm, page.KindTaxonomy:
+		case kinds.KindTerm, kinds.KindTaxonomy:
 			pages = p.source.Pages()
 		default:
 			pages = p.source.RegularPages()

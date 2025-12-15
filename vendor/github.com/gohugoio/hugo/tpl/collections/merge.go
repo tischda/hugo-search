@@ -14,19 +14,20 @@
 package collections
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 
 	"github.com/gohugoio/hugo/common/hreflect"
 	"github.com/gohugoio/hugo/common/maps"
-
-	"github.com/pkg/errors"
 )
 
-// Merge creates a copy of the final parameter and merges the preceding
+// Merge creates a copy of the final parameter in params and merges the preceding
 // parameters into it in reverse order.
+//
 // Currently only maps are supported. Key handling is case insensitive.
-func (ns *Namespace) Merge(params ...interface{}) (interface{}, error) {
+func (ns *Namespace) Merge(params ...any) (any, error) {
 	if len(params) < 2 {
 		return nil, errors.New("merge requires at least two parameters")
 	}
@@ -45,11 +46,11 @@ func (ns *Namespace) Merge(params ...interface{}) (interface{}, error) {
 }
 
 // merge creates a copy of dst and merges src into it.
-func (ns *Namespace) merge(src, dst interface{}) (interface{}, error) {
+func (ns *Namespace) merge(src, dst any) (any, error) {
 	vdst, vsrc := reflect.ValueOf(dst), reflect.ValueOf(src)
 
 	if vdst.Kind() != reflect.Map {
-		return nil, errors.Errorf("destination must be a map, got %T", dst)
+		return nil, fmt.Errorf("destination must be a map, got %T", dst)
 	}
 
 	if !hreflect.IsTruthfulValue(vsrc) {
@@ -57,11 +58,11 @@ func (ns *Namespace) merge(src, dst interface{}) (interface{}, error) {
 	}
 
 	if vsrc.Kind() != reflect.Map {
-		return nil, errors.Errorf("source must be a map, got %T", src)
+		return nil, fmt.Errorf("source must be a map, got %T", src)
 	}
 
 	if vsrc.Type().Key() != vdst.Type().Key() {
-		return nil, errors.Errorf("incompatible map types, got %T to %T", src, dst)
+		return nil, fmt.Errorf("incompatible map types, got %T to %T", src, dst)
 	}
 
 	return mergeMap(vdst, vsrc).Interface(), nil
@@ -74,9 +75,13 @@ func caseInsensitiveLookup(m, k reflect.Value) (reflect.Value, bool) {
 		return v, hreflect.IsTruthfulValue(v)
 	}
 
-	for _, key := range m.MapKeys() {
-		if strings.EqualFold(k.String(), key.String()) {
-			return m.MapIndex(key), true
+	k2 := reflect.New(m.Type().Key()).Elem()
+
+	iter := m.MapRange()
+	for iter.Next() {
+		k2.SetIterKey(iter)
+		if strings.EqualFold(k.String(), k2.String()) {
+			return iter.Value(), true
 		}
 	}
 
@@ -89,17 +94,28 @@ func mergeMap(dst, src reflect.Value) reflect.Value {
 	// If the destination is Params, we must lower case all keys.
 	_, lowerCase := dst.Interface().(maps.Params)
 
+	k := reflect.New(dst.Type().Key()).Elem()
+	v := reflect.New(dst.Type().Elem()).Elem()
+
 	// Copy the destination map.
-	for _, key := range dst.MapKeys() {
-		v := dst.MapIndex(key)
-		out.SetMapIndex(key, v)
+	iter := dst.MapRange()
+	for iter.Next() {
+		k.SetIterKey(iter)
+		v.SetIterValue(iter)
+		out.SetMapIndex(k, v)
 	}
 
 	// Add all keys in src not already in destination.
 	// Maps of the same type will be merged.
-	for _, key := range src.MapKeys() {
-		sv := src.MapIndex(key)
-		dv, found := caseInsensitiveLookup(dst, key)
+	k = reflect.New(src.Type().Key()).Elem()
+	sv := reflect.New(src.Type().Elem()).Elem()
+
+	iter = src.MapRange()
+	for iter.Next() {
+		sv.SetIterValue(iter)
+		k.SetIterKey(iter)
+
+		dv, found := caseInsensitiveLookup(dst, k)
 
 		if found {
 			// If both are the same map key type, merge.
@@ -111,14 +127,15 @@ func mergeMap(dst, src reflect.Value) reflect.Value {
 				}
 
 				if dve.Type().Key() == sve.Type().Key() {
-					out.SetMapIndex(key, mergeMap(dve, sve))
+					out.SetMapIndex(k, mergeMap(dve, sve))
 				}
 			}
 		} else {
-			if lowerCase && key.Kind() == reflect.String {
-				key = reflect.ValueOf(strings.ToLower(key.String()))
+			kk := k
+			if lowerCase && k.Kind() == reflect.String {
+				kk = reflect.ValueOf(strings.ToLower(k.String()))
 			}
-			out.SetMapIndex(key, sv)
+			out.SetMapIndex(kk, sv)
 		}
 	}
 

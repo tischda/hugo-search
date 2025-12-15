@@ -25,9 +25,9 @@ func TestPageHasTitle(t *testing.T) {
 	var a, b bool
 	for _, page := range pages {
 		if page.Title() == "Title-page-1" {
-			a = pageHasTitle(page)
+			a = pageHasTitle(page, false)
 		} else if page.Title() == "" {
-			b = !pageHasTitle(page)
+			b = !pageHasTitle(page, false)
 		}
 	}
 	if !(a && b) {

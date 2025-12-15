@@ -14,7 +14,10 @@
 package compare
 
 import (
+	"context"
+
 	"github.com/gohugoio/hugo/deps"
+	"github.com/gohugoio/hugo/langs"
 	"github.com/gohugoio/hugo/tpl/internal"
 )
 
@@ -22,11 +25,16 @@ const name = "compare"
 
 func init() {
 	f := func(d *deps.Deps) *internal.TemplateFuncsNamespace {
-		ctx := New(false)
+		language := d.Conf.Language()
+		if language == nil {
+			panic("language must be set")
+		}
+
+		ctx := New(langs.GetLocation(language), false)
 
 		ns := &internal.TemplateFuncsNamespace{
 			Name:    name,
-			Context: func(args ...interface{}) (interface{}, error) { return ctx, nil },
+			Context: func(cctx context.Context, args ...any) (any, error) { return ctx, nil },
 		}
 
 		ns.AddMethodMapping(ctx.Default,
@@ -40,14 +48,14 @@ func init() {
 		ns.AddMethodMapping(ctx.Eq,
 			[]string{"eq"},
 			[][2]string{
-				{`{{ if eq .Section "blog" }}current{{ end }}`, `current`},
+				{`{{ if eq .Section "blog" }}current-section{{ end }}`, `current-section`},
 			},
 		)
 
 		ns.AddMethodMapping(ctx.Ge,
 			[]string{"ge"},
 			[][2]string{
-				{`{{ if ge .Hugo.Version "0.36" }}Reasonable new Hugo version!{{ end }}`, `Reasonable new Hugo version!`},
+				{`{{ if ge hugo.Version "0.80" }}Reasonable new Hugo version!{{ end }}`, `Reasonable new Hugo version!`},
 			},
 		)
 

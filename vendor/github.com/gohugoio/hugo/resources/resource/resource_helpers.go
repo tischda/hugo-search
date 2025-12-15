@@ -17,27 +17,30 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gohugoio/hugo/common/maps"
+
 	"github.com/gohugoio/hugo/helpers"
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/spf13/cast"
 )
 
 // GetParam will return the param with the given key from the Resource,
 // nil if not found.
-func GetParam(r Resource, key string) interface{} {
+func GetParam(r Resource, key string) any {
 	return getParam(r, key, false)
 }
 
 // GetParamToLower is the same as GetParam but it will lower case any string
 // result, including string slices.
-func GetParamToLower(r Resource, key string) interface{} {
+func GetParamToLower(r Resource, key string) any {
 	return getParam(r, key, true)
 }
 
-func getParam(r Resource, key string, stringToLower bool) interface{} {
-	v := r.Params()[strings.ToLower(key)]
+func getParam(r Resource, key string, stringToLower bool) any {
+	v, err := maps.GetNestedParam(key, ".", r.Params())
 
-	if v == nil {
+	if v == nil || err != nil {
 		return nil
 	}
 
@@ -55,16 +58,19 @@ func getParam(r Resource, key string, stringToLower bool) interface{} {
 		return cast.ToFloat64(v)
 	case time.Time:
 		return val
+	case toml.LocalDate:
+		return val.AsTime(time.UTC)
+	case toml.LocalDateTime:
+		return val.AsTime(time.UTC)
 	case []string:
 		if stringToLower {
 			return helpers.SliceToLower(val)
 		}
 		return v
-	case map[string]interface{}: // JSON and TOML
+	case map[string]any:
 		return v
-	case map[interface{}]interface{}: // YAML
+	case map[any]any:
 		return v
 	}
-
 	return nil
 }

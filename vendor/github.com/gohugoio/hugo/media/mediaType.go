@@ -11,39 +11,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package media contains Media Type (MIME type) related types and functions.
 package media
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"sort"
+	"net/http"
 	"strings"
-
-	"github.com/spf13/cast"
-
-	"github.com/gohugoio/hugo/common/maps"
-
-	"github.com/mitchellh/mapstructure"
 )
+
+var zero Type
 
 const (
-	defaultDelimiter = "."
+	DefaultDelimiter = "."
 )
 
-// Type (also known as MIME type and content type) is a two-part identifier for
+// MediaType (also known as MIME type and content type) is a two-part identifier for
 // file formats and format contents transmitted on the Internet.
 // For Hugo's use case, we use the top-level type name / subtype name + suffix.
 // One example would be application/svg+xml
 // If suffix is not provided, the sub type will be used.
-// See // https://en.wikipedia.org/wiki/Media_type
+// <docsmeta>{ "name": "MediaType" }</docsmeta>
 type Type struct {
-	MainType  string `json:"mainType"`  // i.e. text
-	SubType   string `json:"subType"`   // i.e. html
-	Delimiter string `json:"delimiter"` // e.g. "."
+	// The full MIME type string, e.g. "application/rss+xml".
+	Type string `json:"-"`
 
-	// FirstSuffix holds the first suffix defined for this Type.
-	FirstSuffix SuffixInfo `json:"firstSuffix"`
+	// The top-level type name, e.g. "application".
+	MainType string `json:"mainType"`
+	// The subtype name, e.g. "rss".
+	SubType string `json:"subType"`
+	// The delimiter before the suffix, e.g. ".".
+	Delimiter string `json:"delimiter"`
+
+	// FirstSuffix holds the first suffix defined for this MediaType.
+	FirstSuffix SuffixInfo `json:"-"`
 
 	// This is the optional suffix after the "+" in the MIME type,
 	//  e.g. "xml" in "application/rss+xml".
@@ -51,30 +53,88 @@ type Type struct {
 
 	// E.g. "jpg,jpeg"
 	// Stored as a string to make Type comparable.
-	suffixesCSV string
+	// For internal use only.
+	SuffixesCSV string `json:"-"`
 }
 
-// SuffixInfo holds information about a Type's suffix.
+// SuffixInfo holds information about a Media Type's suffix.
 type SuffixInfo struct {
-	Suffix     string `json:"suffix"`
+	// Suffix is the suffix without the delimiter, e.g. "xml".
+	Suffix string `json:"suffix"`
+
+	// FullSuffix is the suffix with the delimiter, e.g. ".xml".
 	FullSuffix string `json:"fullSuffix"`
 }
 
-// FromStringAndExt creates a Type from a MIME string and a given extension.
-func FromStringAndExt(t, ext string) (Type, error) {
-	tp, err := fromString(t)
+// FromContent resolve the Type primarily using http.DetectContentType.
+// If http.DetectContentType resolves to application/octet-stream, a zero Type is returned.
+// If http.DetectContentType  resolves to text/plain or application/xml, we try to get more specific using types and ext.
+func FromContent(types Types, extensionHints []string, content []byte) Type {
+	t := strings.Split(http.DetectContentType(content), ";")[0]
+	if t == "application/octet-stream" {
+		return zero
+	}
+
+	var found bool
+	m, found := types.GetByType(t)
+	if !found {
+		if t == "text/xml" {
+			// This is how it's configured in Hugo by default.
+			m, found = types.GetByType("application/xml")
+		}
+	}
+
+	if !found {
+		return zero
+	}
+
+	var mm Type
+
+	for _, extension := range extensionHints {
+		extension = strings.TrimPrefix(extension, ".")
+		mm, _, found = types.GetFirstBySuffix(extension)
+		if found {
+			break
+		}
+	}
+
+	if found {
+		if m == mm {
+			return m
+		}
+
+		if m.IsText() && mm.IsText() {
+			// http.DetectContentType isn't brilliant when it comes to common text formats, so we need to do better.
+			// For now we say that if it's detected to be a text format and the extension/content type in header reports
+			// it to be a text format, then we use that.
+			return mm
+		}
+
+		// E.g. an image with a *.js extension.
+		return zero
+	}
+
+	return m
+}
+
+// FromStringAndExt creates a Type from a MIME string and a given extensions
+func FromStringAndExt(t string, ext ...string) (Type, error) {
+	tp, err := FromString(t)
 	if err != nil {
 		return tp, err
 	}
-	tp.suffixesCSV = strings.TrimPrefix(ext, ".")
-	tp.Delimiter = defaultDelimiter
+	for i, e := range ext {
+		ext[i] = strings.TrimPrefix(e, ".")
+	}
+	tp.SuffixesCSV = strings.Join(ext, ",")
+	tp.Delimiter = DefaultDelimiter
 	tp.init()
 	return tp, nil
 }
 
 // FromString creates a new Type given a type string on the form MainType/SubType and
 // an optional suffix, e.g. "text/html" or "text/html+html".
-func fromString(t string) (Type, error) {
+func FromString(t string) (Type, error) {
 	t = strings.ToLower(t)
 	parts := strings.Split(t, "/")
 	if len(parts) != 2 {
@@ -91,35 +151,57 @@ func fromString(t string) (Type, error) {
 		suffix = subParts[1]
 	}
 
-	return Type{MainType: mainType, SubType: subType, mimeSuffix: suffix}, nil
-}
-
-// Type returns a string representing the main- and sub-type of a media type, e.g. "text/css".
-// A suffix identifier will be appended after a "+" if set, e.g. "image/svg+xml".
-// Hugo will register a set of default media types.
-// These can be overridden by the user in the configuration,
-// by defining a media type with the same Type.
-func (m Type) Type() string {
-	// Examples are
-	// image/svg+xml
-	// text/css
-	if m.mimeSuffix != "" {
-		return m.MainType + "/" + m.SubType + "+" + m.mimeSuffix
+	var typ string
+	if suffix != "" {
+		typ = mainType + "/" + subType + "+" + suffix
+	} else {
+		typ = mainType + "/" + subType
 	}
-	return m.MainType + "/" + m.SubType
+
+	return Type{Type: typ, MainType: mainType, SubType: subType, mimeSuffix: suffix}, nil
 }
 
+// For internal use.
 func (m Type) String() string {
-	return m.Type()
+	return m.Type
 }
 
 // Suffixes returns all valid file suffixes for this type.
 func (m Type) Suffixes() []string {
-	if m.suffixesCSV == "" {
+	if m.SuffixesCSV == "" {
 		return nil
 	}
 
-	return strings.Split(m.suffixesCSV, ",")
+	return strings.Split(m.SuffixesCSV, ",")
+}
+
+// IsText returns whether this Type is a text format.
+// Note that this may currently return false negatives.
+// TODO(bep) improve
+// For internal use.
+func (m Type) IsText() bool {
+	if m.MainType == "text" {
+		return true
+	}
+	switch m.SubType {
+	case "javascript", "json", "rss", "xml", "svg", "toml", "yml", "yaml":
+		return true
+	}
+	return false
+}
+
+// For internal use.
+func (m Type) IsHTML() bool {
+	return m.SubType == Builtin.HTMLType.SubType
+}
+
+// For internal use.
+func (m Type) IsMarkdown() bool {
+	return m.SubType == Builtin.MarkdownType.SubType
+}
+
+func InitMediaType(m *Type) {
+	m.init()
 }
 
 func (m *Type) init() {
@@ -131,16 +213,8 @@ func (m *Type) init() {
 	}
 }
 
-// WithDelimiterAndSuffixes is used in tests.
-func WithDelimiterAndSuffixes(t Type, delimiter, suffixesCSV string) Type {
-	t.Delimiter = delimiter
-	t.suffixesCSV = suffixesCSV
-	t.init()
-	return t
-}
-
 func newMediaType(main, sub string, suffixes []string) Type {
-	t := Type{MainType: main, SubType: sub, suffixesCSV: strings.Join(suffixes, ","), Delimiter: defaultDelimiter}
+	t := Type{MainType: main, SubType: sub, SuffixesCSV: strings.Join(suffixes, ","), Delimiter: DefaultDelimiter}
 	t.init()
 	return t
 }
@@ -152,95 +226,38 @@ func newMediaTypeWithMimeSuffix(main, sub, mimeSuffix string, suffixes []string)
 	return mt
 }
 
-// Definitions from https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_types etc.
-// Note that from Hugo 0.44 we only set Suffix if it is part of the MIME type.
-var (
-	CalendarType   = newMediaType("text", "calendar", []string{"ics"})
-	CSSType        = newMediaType("text", "css", []string{"css"})
-	SCSSType       = newMediaType("text", "x-scss", []string{"scss"})
-	SASSType       = newMediaType("text", "x-sass", []string{"sass"})
-	CSVType        = newMediaType("text", "csv", []string{"csv"})
-	HTMLType       = newMediaType("text", "html", []string{"html"})
-	JavascriptType = newMediaType("application", "javascript", []string{"js"})
-	TypeScriptType = newMediaType("application", "typescript", []string{"ts"})
-	TSXType        = newMediaType("text", "tsx", []string{"tsx"})
-	JSXType        = newMediaType("text", "jsx", []string{"jsx"})
-
-	JSONType           = newMediaType("application", "json", []string{"json"})
-	WebAppManifestType = newMediaTypeWithMimeSuffix("application", "manifest", "json", []string{"webmanifest"})
-	RSSType            = newMediaTypeWithMimeSuffix("application", "rss", "xml", []string{"xml"})
-	XMLType            = newMediaType("application", "xml", []string{"xml"})
-	SVGType            = newMediaTypeWithMimeSuffix("image", "svg", "xml", []string{"svg"})
-	TextType           = newMediaType("text", "plain", []string{"txt"})
-	TOMLType           = newMediaType("application", "toml", []string{"toml"})
-	YAMLType           = newMediaType("application", "yaml", []string{"yaml", "yml"})
-
-	// Common image types
-	PNGType  = newMediaType("image", "png", []string{"png"})
-	JPEGType = newMediaType("image", "jpeg", []string{"jpg", "jpeg"})
-	GIFType  = newMediaType("image", "gif", []string{"gif"})
-	TIFFType = newMediaType("image", "tiff", []string{"tif", "tiff"})
-	BMPType  = newMediaType("image", "bmp", []string{"bmp"})
-	WEBPType = newMediaType("image", "webp", []string{"webp"})
-
-	// Common video types
-	AVIType  = newMediaType("video", "x-msvideo", []string{"avi"})
-	MPEGType = newMediaType("video", "mpeg", []string{"mpg", "mpeg"})
-	MP4Type  = newMediaType("video", "mp4", []string{"mp4"})
-	OGGType  = newMediaType("video", "ogg", []string{"ogv"})
-	WEBMType = newMediaType("video", "webm", []string{"webm"})
-	GPPType  = newMediaType("video", "3gpp", []string{"3gpp", "3gp"})
-
-	OctetType = newMediaType("application", "octet-stream", nil)
-)
-
-// DefaultTypes is the default media types supported by Hugo.
-var DefaultTypes = Types{
-	CalendarType,
-	CSSType,
-	CSVType,
-	SCSSType,
-	SASSType,
-	HTMLType,
-	JavascriptType,
-	TypeScriptType,
-	TSXType,
-	JSXType,
-	JSONType,
-	WebAppManifestType,
-	RSSType,
-	XMLType,
-	SVGType,
-	TextType,
-	OctetType,
-	YAMLType,
-	TOMLType,
-	PNGType,
-	JPEGType,
-	WEBPType,
-	AVIType,
-	MPEGType,
-	MP4Type,
-	OGGType,
-	WEBMType,
-	GPPType,
-}
-
-func init() {
-	sort.Sort(DefaultTypes)
-}
-
 // Types is a slice of media types.
+// <docsmeta>{ "name": "MediaTypes" }</docsmeta>
 type Types []Type
 
 func (t Types) Len() int           { return len(t) }
 func (t Types) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
-func (t Types) Less(i, j int) bool { return t[i].Type() < t[j].Type() }
+func (t Types) Less(i, j int) bool { return t[i].Type < t[j].Type }
+
+// GetBestMatch returns the best match for the given media type string.
+func (t Types) GetBestMatch(s string) (Type, bool) {
+	// First try an exact match.
+	if mt, found := t.GetByType(s); found {
+		return mt, true
+	}
+
+	// Try main type.
+	if mt, found := t.GetBySubType(s); found {
+		return mt, true
+	}
+
+	// Try extension.
+	if mt, _, found := t.GetFirstBySuffix(s); found {
+		return mt, true
+	}
+
+	return Type{}, false
+}
 
 // GetByType returns a media type for tp.
 func (t Types) GetByType(tp string) (Type, bool) {
 	for _, tt := range t {
-		if strings.EqualFold(tt.Type(), tp) {
+		if strings.EqualFold(tt.Type, tp) {
 			return tt, true
 		}
 	}
@@ -256,12 +273,16 @@ func (t Types) GetByType(tp string) (Type, bool) {
 	return Type{}, false
 }
 
+func (t Types) normalizeSuffix(s string) string {
+	return strings.ToLower(strings.TrimPrefix(s, "."))
+}
+
 // BySuffix will return all media types matching a suffix.
 func (t Types) BySuffix(suffix string) []Type {
-	suffix = strings.ToLower(suffix)
+	suffix = t.normalizeSuffix(suffix)
 	var types []Type
 	for _, tt := range t {
-		if tt.hasSuffix(suffix) {
+		if tt.HasSuffix(suffix) {
 			types = append(types, tt)
 		}
 	}
@@ -270,9 +291,9 @@ func (t Types) BySuffix(suffix string) []Type {
 
 // GetFirstBySuffix will return the first type matching the given suffix.
 func (t Types) GetFirstBySuffix(suffix string) (Type, SuffixInfo, bool) {
-	suffix = strings.ToLower(suffix)
+	suffix = t.normalizeSuffix(suffix)
 	for _, tt := range t {
-		if tt.hasSuffix(suffix) {
+		if tt.HasSuffix(suffix) {
 			return tt, SuffixInfo{
 				FullSuffix: tt.Delimiter + suffix,
 				Suffix:     suffix,
@@ -287,9 +308,9 @@ func (t Types) GetFirstBySuffix(suffix string) (Type, SuffixInfo, bool) {
 // is ambiguous.
 // The lookup is case insensitive.
 func (t Types) GetBySuffix(suffix string) (tp Type, si SuffixInfo, found bool) {
-	suffix = strings.ToLower(suffix)
+	suffix = t.normalizeSuffix(suffix)
 	for _, tt := range t {
-		if tt.hasSuffix(suffix) {
+		if tt.HasSuffix(suffix) {
 			if found {
 				// ambiguous
 				found = false
@@ -306,8 +327,18 @@ func (t Types) GetBySuffix(suffix string) (tp Type, si SuffixInfo, found bool) {
 	return
 }
 
-func (m Type) hasSuffix(suffix string) bool {
-	return strings.Contains(","+m.suffixesCSV+",", ","+suffix+",")
+func (t Types) IsTextSuffix(suffix string) bool {
+	suffix = t.normalizeSuffix(suffix)
+	for _, tt := range t {
+		if tt.HasSuffix(suffix) {
+			return tt.IsText()
+		}
+	}
+	return false
+}
+
+func (m Type) HasSuffix(suffix string) bool {
+	return strings.Contains(","+m.SuffixesCSV+",", ","+suffix+",")
 }
 
 // GetByMainSubType gets a media type given a main and a sub type e.g. "text" and "plain".
@@ -330,102 +361,30 @@ func (t Types) GetByMainSubType(mainType, subType string) (tp Type, found bool) 
 	return
 }
 
-func suffixIsRemoved() error {
-	return errors.New(`MediaType.Suffix is removed. Before Hugo 0.44 this was used both to set a custom file suffix and as way
-to augment the mediatype definition (what you see after the "+", e.g. "image/svg+xml").
-
-This had its limitations. For one, it was only possible with one file extension per MIME type.
-
-Now you can specify multiple file suffixes using "suffixes", but you need to specify the full MIME type
-identifier:
-
-[mediaTypes]
-[mediaTypes."image/svg+xml"]
-suffixes = ["svg", "abc" ]
-
-In most cases, it will be enough to just change:
-
-[mediaTypes]
-[mediaTypes."my/custom-mediatype"]
-suffix = "txt"
-
-To:
-
-[mediaTypes]
-[mediaTypes."my/custom-mediatype"]
-suffixes = ["txt"]
-
-Note that you can still get the Media Type's suffix from a template: {{ $mediaType.Suffix }}. But this will now map to the MIME type filename.
-`)
-}
-
-// DecodeTypes takes a list of media type configurations and merges those,
-// in the order given, with the Hugo defaults as the last resort.
-func DecodeTypes(mms ...map[string]interface{}) (Types, error) {
-	var m Types
-
-	// Maps type string to Type. Type string is the full application/svg+xml.
-	mmm := make(map[string]Type)
-	for _, dt := range DefaultTypes {
-		mmm[dt.Type()] = dt
-	}
-
-	for _, mm := range mms {
-		for k, v := range mm {
-			var mediaType Type
-
-			mediaType, found := mmm[k]
-			if !found {
-				var err error
-				mediaType, err = fromString(k)
-				if err != nil {
-					return m, err
-				}
+// GetBySubType gets a media type given a sub type e.g. "plain".
+func (t Types) GetBySubType(subType string) (tp Type, found bool) {
+	for _, tt := range t {
+		if strings.EqualFold(subType, tt.SubType) {
+			if found {
+				// ambiguous
+				found = false
+				return
 			}
-
-			if err := mapstructure.WeakDecode(v, &mediaType); err != nil {
-				return m, err
-			}
-
-			vm := maps.ToStringMap(v)
-			maps.PrepareParams(vm)
-			_, delimiterSet := vm["delimiter"]
-			_, suffixSet := vm["suffix"]
-
-			if suffixSet {
-				return Types{}, suffixIsRemoved()
-			}
-
-			if suffixes, found := vm["suffixes"]; found {
-				mediaType.suffixesCSV = strings.TrimSpace(strings.ToLower(strings.Join(cast.ToStringSlice(suffixes), ",")))
-			}
-
-			// The user may set the delimiter as an empty string.
-			if !delimiterSet && mediaType.suffixesCSV != "" {
-				mediaType.Delimiter = defaultDelimiter
-			}
-
-			mediaType.init()
-
-			mmm[k] = mediaType
-
+			tp = tt
+			found = true
 		}
 	}
-
-	for _, v := range mmm {
-		m = append(m, v)
-	}
-	sort.Sort(m)
-
-	return m, nil
+	return
 }
 
 // IsZero reports whether this Type represents a zero value.
+// For internal use.
 func (m Type) IsZero() bool {
 	return m.SubType == ""
 }
 
 // MarshalJSON returns the JSON encoding of m.
+// For internal use.
 func (m Type) MarshalJSON() ([]byte, error) {
 	type Alias Type
 	return json.Marshal(&struct {
@@ -435,8 +394,8 @@ func (m Type) MarshalJSON() ([]byte, error) {
 		Suffixes []string `json:"suffixes"`
 	}{
 		Alias:    (Alias)(m),
-		Type:     m.Type(),
+		Type:     m.Type,
 		String:   m.String(),
-		Suffixes: strings.Split(m.suffixesCSV, ","),
+		Suffixes: strings.Split(m.SuffixesCSV, ","),
 	})
 }

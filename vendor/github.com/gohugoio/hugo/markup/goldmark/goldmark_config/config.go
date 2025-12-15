@@ -15,52 +15,259 @@
 package goldmark_config
 
 const (
-	AutoHeadingIDTypeGitHub      = "github"
-	AutoHeadingIDTypeGitHubAscii = "github-ascii"
-	AutoHeadingIDTypeBlackfriday = "blackfriday"
+	AutoIDTypeBlackfriday         = "blackfriday"
+	AutoIDTypeGitHub              = "github"
+	AutoIDTypeGitHubAscii         = "github-ascii"
+	RenderHookUseEmbeddedAlways   = "always"
+	RenderHookUseEmbeddedAuto     = "auto"
+	RenderHookUseEmbeddedFallback = "fallback"
+	RenderHookUseEmbeddedNever    = "never"
 )
 
-// DefaultConfig holds the default Goldmark configuration.
+// Default holds the default Goldmark configuration.
 var Default = Config{
 	Extensions: Extensions{
-		Typographer:    true,
-		Footnote:       true,
-		DefinitionList: true,
-		Table:          true,
-		Strikethrough:  true,
-		Linkify:        true,
-		TaskList:       true,
+		Typographer: Typographer{
+			Disable:          false,
+			LeftSingleQuote:  "&lsquo;",
+			RightSingleQuote: "&rsquo;",
+			LeftDoubleQuote:  "&ldquo;",
+			RightDoubleQuote: "&rdquo;",
+			EnDash:           "&ndash;",
+			EmDash:           "&mdash;",
+			Ellipsis:         "&hellip;",
+			LeftAngleQuote:   "&laquo;",
+			RightAngleQuote:  "&raquo;",
+			Apostrophe:       "&rsquo;",
+		},
+		Footnote: Footnote{
+			Enable:             true,
+			EnableAutoIDPrefix: false,
+			BacklinkHTML:       "&#x21a9;&#xfe0e;",
+		},
+		DefinitionList:  true,
+		Table:           true,
+		Strikethrough:   true,
+		Linkify:         true,
+		LinkifyProtocol: "https",
+		TaskList:        true,
+		CJK: CJK{
+			Enable:                   false,
+			EastAsianLineBreaks:      false,
+			EastAsianLineBreaksStyle: "simple",
+			EscapedSpace:             false,
+		},
+		Extras: Extras{
+			Delete: Delete{
+				Enable: false,
+			},
+			Insert: Insert{
+				Enable: false,
+			},
+			Mark: Mark{
+				Enable: false,
+			},
+			Subscript: Subscript{
+				Enable: false,
+			},
+			Superscript: Superscript{
+				Enable: false,
+			},
+		},
+		Passthrough: Passthrough{
+			Enable: false,
+			Delimiters: DelimitersConfig{
+				Inline: [][]string{},
+				Block:  [][]string{},
+			},
+		},
 	},
 	Renderer: Renderer{
 		Unsafe: false,
 	},
 	Parser: Parser{
-		AutoHeadingID:     true,
-		AutoHeadingIDType: AutoHeadingIDTypeGitHub,
+		AutoHeadingID:                      true,
+		AutoDefinitionTermID:               false,
+		AutoIDType:                         AutoIDTypeGitHub,
+		WrapStandAloneImageWithinParagraph: true,
 		Attribute: ParserAttribute{
 			Title: true,
 			Block: false,
+		},
+	},
+	RenderHooks: RenderHooks{
+		Image: ImageRenderHook{
+			UseEmbedded: RenderHookUseEmbeddedAuto,
+		},
+		Link: LinkRenderHook{
+			UseEmbedded: RenderHookUseEmbeddedAuto,
 		},
 	},
 }
 
 // Config configures Goldmark.
 type Config struct {
-	Renderer   Renderer
-	Parser     Parser
-	Extensions Extensions
+	Renderer               Renderer
+	Parser                 Parser
+	Extensions             Extensions
+	DuplicateResourceFiles bool
+	RenderHooks            RenderHooks
+}
+
+func (c *Config) Init() error {
+	if err := c.Parser.Init(); err != nil {
+		return err
+	}
+	if c.Parser.AutoDefinitionTermID && !c.Extensions.DefinitionList {
+		c.Parser.AutoDefinitionTermID = false
+	}
+	return nil
+}
+
+// RenderHooks contains configuration for Goldmark render hooks.
+type RenderHooks struct {
+	Image ImageRenderHook
+	Link  LinkRenderHook
+}
+
+// ImageRenderHook contains configuration for the image render hook.
+type ImageRenderHook struct {
+	// Enable the default image render hook.
+	// We need to know if it is set or not, hence the pointer.
+	// Deprecated: Use UseEmbedded instead.
+	EnableDefault *bool
+
+	// When to use the embedded image render hook.
+	// One of auto, never, always, or fallback. Default is auto.
+	UseEmbedded string
+}
+
+// LinkRenderHook contains configuration for the link render hook.
+type LinkRenderHook struct {
+	// Disable the default image render hook.
+	// We need to know if it is set or not, hence the pointer.
+	// Deprecated: Use UseEmbedded instead.
+	EnableDefault *bool
+
+	// When to use the embedded link render hook.
+	// One of auto, never, always, or fallback. Default is auto.
+	UseEmbedded string
 }
 
 type Extensions struct {
-	Typographer    bool
-	Footnote       bool
+	Typographer    Typographer
+	Footnote       Footnote
 	DefinitionList bool
+	Extras         Extras
+	Passthrough    Passthrough
 
 	// GitHub flavored markdown
-	Table         bool
-	Strikethrough bool
-	Linkify       bool
-	TaskList      bool
+	Table           bool
+	Strikethrough   bool
+	Linkify         bool
+	LinkifyProtocol string
+	TaskList        bool
+	CJK             CJK
+}
+
+// Footnote holds footnote configuration.
+type Footnote struct {
+	Enable             bool
+	EnableAutoIDPrefix bool
+	BacklinkHTML       string
+}
+
+// Typographer holds typographer configuration.
+type Typographer struct {
+	// Whether to disable typographer.
+	Disable bool
+
+	// Value used for left single quote.
+	LeftSingleQuote string
+	// Value used for right single quote.
+	RightSingleQuote string
+	// Value used for left double quote.
+	LeftDoubleQuote string
+	// Value used for right double quote.
+	RightDoubleQuote string
+	// Value used for en dash.
+	EnDash string
+	// Value used for em dash.
+	EmDash string
+	// Value used for ellipsis.
+	Ellipsis string
+	// Value used for left angle quote.
+	LeftAngleQuote string
+	// Value used for right angle quote.
+	RightAngleQuote string
+	// Value used for apostrophe.
+	Apostrophe string
+}
+
+// Extras holds extras configuration.
+// github.com/hugoio/hugo-goldmark-extensions/extras
+type Extras struct {
+	Delete      Delete
+	Insert      Insert
+	Mark        Mark
+	Subscript   Subscript
+	Superscript Superscript
+}
+
+type Delete struct {
+	Enable bool
+}
+
+type Insert struct {
+	Enable bool
+}
+
+type Mark struct {
+	Enable bool
+}
+
+type Subscript struct {
+	Enable bool
+}
+
+type Superscript struct {
+	Enable bool
+}
+
+// Passthrough holds passthrough configuration.
+// github.com/hugoio/hugo-goldmark-extensions/passthrough
+type Passthrough struct {
+	// Whether to enable the extension
+	Enable bool
+
+	// The delimiters to use for inline and block passthroughs.
+	Delimiters DelimitersConfig
+}
+
+type DelimitersConfig struct {
+	// The delimiters to use for inline passthroughs. Each entry in the list
+	// is a size-2 list of strings, where the first string is the opening delimiter
+	// and the second string is the closing delimiter, e.g.,
+	//
+	// [["$", "$"], ["\\(", "\\)"]]
+	Inline [][]string
+
+	// The delimiters to use for block passthroughs. Same format as Inline.
+	Block [][]string
+}
+
+type CJK struct {
+	// Whether to enable CJK support.
+	Enable bool
+
+	// Whether softline breaks between east asian wide characters should be ignored.
+	EastAsianLineBreaks bool
+
+	// Styles of Line Breaking of EastAsianLineBreaks: "simple" or "css3draft"
+	EastAsianLineBreaksStyle string
+
+	// Whether a '\' escaped half-space(0x20) should not be rendered.
+	EscapedSpace bool
 }
 
 type Renderer struct {
@@ -79,18 +286,35 @@ type Parser struct {
 	// auto generated heading ids.
 	AutoHeadingID bool
 
-	// The strategy to use when generating heading IDs.
-	// Available options are "github", "github-ascii".
+	// Enables auto definition term ids.
+	AutoDefinitionTermID bool
+
+	// The strategy to use when generating IDs.
+	// Available options are "github", "github-ascii", and "blackfriday".
 	// Default is "github", which will create GitHub-compatible anchor names.
-	AutoHeadingIDType string
+	AutoIDType string
 
 	// Enables custom attributes.
 	Attribute ParserAttribute
+
+	// Whether to wrap stand-alone images within a paragraph or not.
+	WrapStandAloneImageWithinParagraph bool
+
+	// Renamed to AutoIDType in 0.144.0.
+	AutoHeadingIDType string `json:"-"`
+}
+
+func (p *Parser) Init() error {
+	// Renamed from AutoHeadingIDType to AutoIDType in 0.144.0.
+	if p.AutoHeadingIDType != "" {
+		p.AutoIDType = p.AutoHeadingIDType
+	}
+	return nil
 }
 
 type ParserAttribute struct {
 	// Enables custom attributes for titles.
 	Title bool
-	// Enables custom attributeds for blocks.
+	// Enables custom attributes for blocks.
 	Block bool
 }

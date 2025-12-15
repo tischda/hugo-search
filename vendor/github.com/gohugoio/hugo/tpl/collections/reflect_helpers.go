@@ -14,18 +14,18 @@
 package collections
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
-	"time"
 
-	"github.com/mitchellh/hashstructure"
-	"github.com/pkg/errors"
+	"github.com/gohugoio/hugo/common/hashing"
+	"github.com/gohugoio/hugo/common/types"
+	"github.com/gohugoio/hugo/resources/resource"
 )
 
 var (
 	zero      reflect.Value
-	errorType = reflect.TypeOf((*error)(nil)).Elem()
-	timeType  = reflect.TypeOf((*time.Time)(nil)).Elem()
+	errorType = reflect.TypeFor[error]()
 )
 
 func numberToFloat(v reflect.Value) (float64, error) {
@@ -46,34 +46,35 @@ func numberToFloat(v reflect.Value) (float64, error) {
 // normalizes different numeric types if isNumber
 // or get the hash values if not Comparable (such as map or struct)
 // to make them comparable
-func normalize(v reflect.Value) interface{} {
+func normalize(v reflect.Value) any {
 	k := v.Kind()
-
 	switch {
 	case !v.Type().Comparable():
-		h, err := hashstructure.Hash(v.Interface(), nil)
-		if err != nil {
-			panic(err)
-		}
-		return h
+		return hashing.HashUint64(v.Interface())
 	case isNumber(k):
 		f, err := numberToFloat(v)
 		if err == nil {
 			return f
 		}
 	}
-	return v.Interface()
+
+	vv := types.Unwrapv(v.Interface())
+	if ip, ok := vv.(resource.TransientIdentifier); ok {
+		return ip.TransientKey()
+	}
+
+	return vv
 }
 
 // collects identities from the slices in seqs into a set. Numeric values are normalized,
 // pointers unwrapped.
-func collectIdentities(seqs ...interface{}) (map[interface{}]bool, error) {
-	seen := make(map[interface{}]bool)
+func collectIdentities(seqs ...any) (map[any]bool, error) {
+	seen := make(map[any]bool)
 	for _, seq := range seqs {
 		v := reflect.ValueOf(seq)
 		switch v.Kind() {
 		case reflect.Array, reflect.Slice:
-			for i := 0; i < v.Len(); i++ {
+			for i := range v.Len() {
 				ev, _ := indirectInterface(v.Index(i))
 
 				if !ev.Type().Comparable() {
@@ -103,7 +104,7 @@ func convertValue(v reflect.Value, to reflect.Type) (reflect.Value, error) {
 	case isNumber(kind):
 		return convertNumber(v, kind)
 	default:
-		return reflect.Value{}, errors.Errorf("%s is not assignable to %s", v.Type(), to)
+		return reflect.Value{}, fmt.Errorf("%s is not assignable to %s", v.Type(), to)
 	}
 }
 
@@ -157,7 +158,6 @@ func convertNumber(v reflect.Value, to reflect.Kind) (reflect.Value, error) {
 		case reflect.Uint64:
 			n = reflect.ValueOf(uint64(i))
 		}
-
 	}
 
 	if !n.IsValid() {
@@ -167,7 +167,7 @@ func convertNumber(v reflect.Value, to reflect.Kind) (reflect.Value, error) {
 	return n, nil
 }
 
-func newSliceElement(items interface{}) interface{} {
+func newSliceElement(items any) any {
 	tp := reflect.TypeOf(items)
 	if tp == nil {
 		return nil

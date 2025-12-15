@@ -16,53 +16,67 @@
 package partials
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"html/template"
 	"io"
-	"io/ioutil"
-	"reflect"
 	"strings"
-	"sync"
+	"time"
 
-	"github.com/gohugoio/hugo/common/hreflect"
+	"github.com/bep/lazycache"
+	"github.com/gohugoio/hugo/common/constants"
+	"github.com/gohugoio/hugo/common/hashing"
+	"github.com/gohugoio/hugo/identity"
 	texttemplate "github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate"
 
-	"github.com/gohugoio/hugo/helpers"
-
 	"github.com/gohugoio/hugo/tpl"
+	"github.com/gohugoio/hugo/tpl/tplimpl"
 
 	bp "github.com/gohugoio/hugo/bufferpool"
 	"github.com/gohugoio/hugo/deps"
 )
 
-// TestTemplateProvider is global deps.ResourceProvider.
-// NOTE: It's currently unused.
-var TestTemplateProvider deps.ResourceProvider
-
 type partialCacheKey struct {
-	name    string
-	variant interface{}
+	Name     string
+	Variants []any
+}
+type includeResult struct {
+	name     string
+	result   any
+	mangager identity.Manager
+	err      error
 }
 
-// partialCache represents a cache of partials protected by a mutex.
+func (k partialCacheKey) Key() string {
+	if k.Variants == nil {
+		return k.Name
+	}
+	return hashing.HashString(append([]any{k.Name}, k.Variants...)...)
+}
+
+// partialCache represents a LRU cache of partials.
 type partialCache struct {
-	sync.RWMutex
-	p map[partialCacheKey]interface{}
+	cache *lazycache.Cache[string, includeResult]
 }
 
 func (p *partialCache) clear() {
-	p.Lock()
-	defer p.Unlock()
-	p.p = make(map[partialCacheKey]interface{})
+	p.cache.DeleteFunc(func(s string, r includeResult) bool {
+		return true
+	})
 }
 
 // New returns a new instance of the templates-namespaced template functions.
 func New(deps *deps.Deps) *Namespace {
-	cache := &partialCache{p: make(map[partialCacheKey]interface{})}
+	// This lazycache was introduced in Hugo 0.111.0.
+	// We're going to expand and consolidate all memory caches in Hugo using this,
+	// so just set a high limit for now.
+	lru := lazycache.New(lazycache.Options[string, includeResult]{MaxEntries: 1000})
+
+	cache := &partialCache{cache: lru}
 	deps.BuildStartListeners.Add(
-		func() {
+		func(...any) bool {
 			cache.clear()
+			return false
 		})
 
 	return &Namespace{
@@ -79,12 +93,12 @@ type Namespace struct {
 
 // contextWrapper makes room for a return value in a partial invocation.
 type contextWrapper struct {
-	Arg    interface{}
-	Result interface{}
+	Arg    any
+	Result any
 }
 
 // Set sets the return value and returns an empty string.
-func (c *contextWrapper) Set(in interface{}) string {
+func (c *contextWrapper) Set(in any) string {
 	c.Result = in
 	return ""
 }
@@ -93,145 +107,146 @@ func (c *contextWrapper) Set(in interface{}) string {
 // If the partial contains a return statement, that value will be returned.
 // Else, the rendered output will be returned:
 // A string if the partial is a text/template, or template.HTML when html/template.
-func (ns *Namespace) Include(name string, contextList ...interface{}) (interface{}, error) {
-	name = strings.TrimPrefix(name, "partials/")
-
-	var context interface{}
-	if len(contextList) > 0 {
-		context = contextList[0]
+// Note that ctx is provided by Hugo, not the end user.
+func (ns *Namespace) Include(ctx context.Context, name string, contextList ...any) (any, error) {
+	res := ns.include(ctx, name, contextList...)
+	if res.err != nil {
+		return nil, res.err
 	}
 
-	n := "partials/" + name
-	templ, found := ns.deps.Tmpl().Lookup(n)
-
-	if !found {
-		// For legacy reasons.
-		templ, found = ns.deps.Tmpl().Lookup(n + ".html")
+	if ns.deps.Metrics != nil {
+		ns.deps.Metrics.TrackValue(res.name, res.result, false)
 	}
 
-	if !found {
-		return "", fmt.Errorf("partial %q not found", name)
+	return res.result, nil
+}
+
+func (ns *Namespace) include(ctx context.Context, name string, dataList ...any) includeResult {
+	v, err := ns.lookup(name)
+	if err != nil {
+		return includeResult{err: err}
+	}
+	return ns.doInclude(ctx, "", v, dataList...)
+}
+
+func (ns *Namespace) lookup(name string) (*tplimpl.TemplInfo, error) {
+	if strings.HasPrefix(name, "partials/") {
+		// This is most likely not what the user intended.
+		// This worked before Hugo 0.146.0.
+		ns.deps.Log.Warnidf(constants.WarnPartialSuperfluousPrefix, "Doubtful use of partial function in {{ partial \"%s\"}}), this is most likely not what you want. Consider removing superfluous prefix \"partials/\" from template name given as first function argument.", name)
+	}
+	v := ns.deps.TemplateStore.LookupPartial(name)
+	if v == nil {
+		return nil, fmt.Errorf("partial %q not found", name)
+	}
+	return v, nil
+}
+
+// include is a helper function that lookups and executes the named partial.
+// Returns the final template name and the rendered output.
+func (ns *Namespace) doInclude(ctx context.Context, key string, templ *tplimpl.TemplInfo, dataList ...any) includeResult {
+	var data any
+	if len(dataList) > 0 {
+		data = dataList[0]
 	}
 
-	var info tpl.ParseInfo
-	if ip, ok := templ.(tpl.Info); ok {
-		info = ip.ParseInfo()
-	}
+	info := templ.ParseInfo
 
 	var w io.Writer
 
 	if info.HasReturn {
-		if !hreflect.IsTruthful(context) {
-			// TODO(bep) we need to fix this, but it is non-trivial.
-			return nil, errors.New("partial that returns a value needs a non-zero argument.")
-		}
 		// Wrap the context sent to the template to capture the return value.
 		// Note that the template is rewritten to make sure that the dot (".")
 		// and the $ variable points to Arg.
-		context = &contextWrapper{
-			Arg: context,
+		data = &contextWrapper{
+			Arg: data,
 		}
 
 		// We don't care about any template output.
-		w = ioutil.Discard
+		w = io.Discard
 	} else {
 		b := bp.GetBuffer()
 		defer bp.PutBuffer(b)
 		w = b
 	}
 
-	if err := ns.deps.Tmpl().Execute(templ, w, context); err != nil {
-		return "", err
+	if err := ns.deps.GetTemplateStore().ExecuteWithContextAndKey(ctx, key, templ, w, data); err != nil {
+		return includeResult{err: err}
 	}
 
-	var result interface{}
+	var result any
 
-	if ctx, ok := context.(*contextWrapper); ok {
+	if ctx, ok := data.(*contextWrapper); ok {
 		result = ctx.Result
-	} else if _, ok := templ.(*texttemplate.Template); ok {
+	} else if _, ok := templ.Template.(*texttemplate.Template); ok {
 		result = w.(fmt.Stringer).String()
 	} else {
 		result = template.HTML(w.(fmt.Stringer).String())
 	}
 
-	if ns.deps.Metrics != nil {
-		ns.deps.Metrics.TrackValue(templ.Name(), result)
+	return includeResult{
+		name:   templ.Name(),
+		result: result,
 	}
-
-	return result, nil
 }
 
 // IncludeCached executes and caches partial templates.  The cache is created with name+variants as the key.
-func (ns *Namespace) IncludeCached(name string, context interface{}, variants ...interface{}) (interface{}, error) {
-	key, err := createKey(name, variants...)
+// Note that ctx is provided by Hugo, not the end user.
+func (ns *Namespace) IncludeCached(ctx context.Context, name string, context any, variants ...any) (any, error) {
+	start := time.Now()
+	key := partialCacheKey{
+		Name:     name,
+		Variants: variants,
+	}
+	keyString := key.Key()
+
+	depsManagerIn := tpl.Context.GetDependencyManagerInCurrentScope(ctx)
+	ti, err := ns.lookup(name)
 	if err != nil {
 		return nil, err
 	}
 
-	result, err := ns.getOrCreate(key, context)
-	if err == errUnHashable {
-		// Try one more
-		key.variant = helpers.HashString(key.variant)
-		result, err = ns.getOrCreate(key, context)
-	}
-
-	return result, err
-}
-
-func createKey(name string, variants ...interface{}) (partialCacheKey, error) {
-	var variant interface{}
-
-	if len(variants) > 1 {
-		variant = helpers.HashString(variants...)
-	} else if len(variants) == 1 {
-		variant = variants[0]
-		t := reflect.TypeOf(variant)
-		switch t.Kind() {
-		// This isn't an exhaustive list of unhashable types.
-		// There may be structs with slices,
-		// but that should be very rare. We do recover from that situation
-		// below.
-		case reflect.Slice, reflect.Array, reflect.Map:
-			variant = helpers.HashString(variant)
-		}
-	}
-
-	return partialCacheKey{name: name, variant: variant}, nil
-}
-
-var errUnHashable = errors.New("unhashable")
-
-func (ns *Namespace) getOrCreate(key partialCacheKey, context interface{}) (result interface{}, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = r.(error)
-			if strings.Contains(err.Error(), "unhashable type") {
-				ns.cachedPartials.RUnlock()
-				err = errUnHashable
+	if parent := tpl.Context.CurrentTemplate.Get(ctx); parent != nil {
+		for parent != nil {
+			if parent.CurrentTemplateInfoOps == ti && parent.Key == keyString {
+				// This will deadlock if we continue.
+				return nil, fmt.Errorf("circular call stack detected in partial %q", ti.Filename())
 			}
+			parent = parent.Parent
 		}
-	}()
-
-	ns.cachedPartials.RLock()
-	p, ok := ns.cachedPartials.p[key]
-	ns.cachedPartials.RUnlock()
-
-	if ok {
-		return p, nil
 	}
 
-	p, err = ns.Include(key.name, context)
+	r, found, err := ns.cachedPartials.cache.GetOrCreate(keyString, func(string) (includeResult, error) {
+		var depsManagerShared identity.Manager
+		if ns.deps.Conf.Watching() {
+			// We need to create a shared dependency manager to pass downwards
+			// and add those same dependencies to any cached invocation of this partial.
+			depsManagerShared = identity.NewManager("partials")
+			ctx = tpl.Context.DependencyManagerScopedProvider.Set(ctx, depsManagerShared.(identity.DependencyManagerScopedProvider))
+		}
+		r := ns.doInclude(ctx, keyString, ti, context)
+		if ns.deps.Conf.Watching() {
+			r.mangager = depsManagerShared
+		}
+		return r, r.err
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	ns.cachedPartials.Lock()
-	defer ns.cachedPartials.Unlock()
-	// Double-check.
-	if p2, ok := ns.cachedPartials.p[key]; ok {
-		return p2, nil
+	if ns.deps.Metrics != nil {
+		if found {
+			// The templates that gets executed is measured in Execute.
+			// We need to track the time spent in the cache to
+			// get the totals correct.
+			ns.deps.Metrics.MeasureSince(r.name, start)
+		}
+		ns.deps.Metrics.TrackValue(r.name, r.result, found)
 	}
-	ns.cachedPartials.p[key] = p
 
-	return p, nil
+	if r.mangager != nil && depsManagerIn != nil {
+		depsManagerIn.AddIdentity(r.mangager)
+	}
+
+	return r.result, nil
 }
