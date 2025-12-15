@@ -31,10 +31,6 @@ func TestInitFlags(t *testing.T) {
 		"-v",
 	}
 
-	// Reset flag set and reinitialize
-	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	cfg = initFlags()
-
 	// Parse test arguments
 	err := flag.CommandLine.Parse(testArgs[1:])
 	if err != nil {
