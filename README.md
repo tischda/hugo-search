@@ -1,9 +1,9 @@
 [![Build Status](https://github.com/tischda/hugo-search/actions/workflows/build.yml/badge.svg)](https://github.com/tischda/hugo-search/actions/workflows/build.yml)
 [![Test Status](https://github.com/tischda/hugo-search/actions/workflows/test.yml/badge.svg)](https://github.com/tischda/hugo-search/actions/workflows/test.yml)
 [![Coverage Status](https://coveralls.io/repos/tischda/hugo-search/badge.svg)](https://coveralls.io/r/tischda/hugo-search)
-[![Linter Status](https://github.com/github.com/tischda/hugo-search/actions/workflows/linter.yml/badge.svg)](https://github.com/github.com/tischda/hugo-search/actions/workflows/linter.yml)
-[![License](https://img.shields.io/github/license/github.com/tischda/hugo-search)](/LICENSE)
-[![Release](https://img.shields.io/github/release/github.com/tischda/hugo-search.svg)](https://github.com/github.com/tischda/hugo-search/releases/latest)
+[![Linter Status](https://github.com/tischda/hugo-search/actions/workflows/linter.yml/badge.svg)](https://github.com/tischda/hugo-search/actions/workflows/linter.yml)
+[![License](https://img.shields.io/github/license/tischda/hugo-search)](/LICENSE)
+[![Release](https://img.shields.io/github/release/tischda/hugo-search.svg)](https://github.com/tischda/hugo-search/releases/latest)
 
 # hugo search
 
