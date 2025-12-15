@@ -8,7 +8,13 @@ import (
 	"testing"
 )
 
-const testIndexName = "test.bleve"
+var testCfg = &Config{
+	hugoPath:  "test",
+	indexPath: "test/indexes/search.bleve",
+	verbose:   false,
+}
+
+const TEST_INDEX_NAME = "test.bleve"
 
 type Response struct {
 	Status  string   `json:"status"`
@@ -18,20 +24,20 @@ type Response struct {
 func TestHttpServer(t *testing.T) {
 
 	// prepare index
-	buildIndexFromSite(testHugoPath, testIndexPath)
+	buildIndexFromSite(testCfg)
 
-	index := registerIndex(testIndexPath, testIndexName)
-	defer unregisterIndex(index, testIndexName)
+	index := registerIndex(testCfg.indexPath, TEST_INDEX_NAME, testCfg.verbose)
+	defer unregisterIndex(index, TEST_INDEX_NAME)
 
 	// http recorder
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "http://localhost/api", nil)
 
 	// http handler
-	handler := getCorsHandler(testIndexName)
+	handler := getCorsHandler(TEST_INDEX_NAME)
 	handler.ServeHTTP(recorder, request)
 
-	expected := testIndexName
+	expected := TEST_INDEX_NAME
 
 	rawJSON := recorder.Body.String()
 	var response *Response

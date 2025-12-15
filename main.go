@@ -7,38 +7,91 @@ import (
 	"os"
 )
 
-var version string
+// https://goreleaser.com/cookbooks/using-main.version/
+var (
+	name    string
+	version string
+	date    string
+	commit  string
+)
 
-var verbose = flag.Bool("verbose", false, "verbose output")
+// flags
+type Config struct {
+	bindAddr  string
+	hugoPath  string
+	indexPath string
+	verbose   bool
+	help      bool
+	version   bool
+}
+
+func initFlags() *Config {
+	cfg := &Config{}
+	flag.StringVar(&cfg.bindAddr, "a", ":8080", "")
+	flag.StringVar(&cfg.bindAddr, "bindAddr", ":8080", "http listen address")
+	flag.StringVar(&cfg.hugoPath, "h", ".", "")
+	flag.StringVar(&cfg.hugoPath, "hugoPath", ".", "path of the hugo site")
+	flag.StringVar(&cfg.indexPath, "i", "indexes/search.bleve", "")
+	flag.StringVar(&cfg.indexPath, "indexPath", "indexes/search.bleve", "path of the bleve index")
+	flag.BoolVar(&cfg.verbose, "vv", false, "")
+	flag.BoolVar(&cfg.verbose, "verbose", false, "verbose output")
+	flag.BoolVar(&cfg.help, "?", false, "")
+	flag.BoolVar(&cfg.help, "help", false, "displays this help message")
+	flag.BoolVar(&cfg.version, "v", false, "")
+	flag.BoolVar(&cfg.version, "version", false, "print version and exit")
+	return cfg
+}
 
 func main() {
-	var (
-		bindAddr    = flag.String("addr", ":8080", "http listen address")
-		hugoPath    = flag.String("hugoPath", ".", "path of the hugo site")
-		indexPath   = flag.String("indexPath", "indexes/search.bleve", "path of the bleve index")
-		showVersion = flag.Bool("version", false, "print version and exit")
-	)
+	log.SetFlags(0)
+	cfg := initFlags()
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "\nUsage: %s [OPTIONS]\n\nOPTIONS:\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  -addr <string>\thttp listen address (default \"%s\")\n"+
-			"  -hugoPath <string>\tpath of the hugo site (default \"%s\")\n"+
-			"  -indexPath <string>\tpath of the bleve index (default \"%s\")\n"+
-			"  -verbose\t\tverbose output\n"+
-			"  -version\t\tprint version and exit\n", *bindAddr, *hugoPath, *indexPath)
+		fmt.Fprintln(os.Stderr, "Usage: "+name+` [OPTIONS]
+
+Starts a search engine for a Hugo site using a Bleve index.
+
+OPTIONS:
+
+  -a, --bindAddr"
+          http listen address (default ":8080")
+  -h, --hugoPath
+          path to the hugo site (default ".")
+  -i, --indexPath
+          path to the bleve index (default "indexes/search.bleve")
+  -vv, --verbose
+          verbose output
+  -?, --help
+          display this help message
+  -v, --version
+          print version and exit
+
+EXAMPLES:`)
+
+		fmt.Fprintln(os.Stderr, "\n  $ "+name+` --hugoPath test
+  All pages: 12, regular pages: 5
+  Search server listening on :8080
+  `)
 	}
 	flag.Parse()
+
+	if flag.Arg(0) == "version" || cfg.version {
+		fmt.Printf("%s %s, built on %s (commit: %s)\n", name, version, date, commit)
+		return
+	}
+
+	if cfg.help {
+		flag.Usage()
+		return
+	}
+
 	if !flag.Parsed() || flag.NArg() > 0 {
 		flag.Usage()
 		os.Exit(1)
 	}
-	if flag.Arg(0) == "version" || *showVersion {
-		fmt.Println("hugo-search", version)
-		return
-	}
 	log.SetFlags(0)
 
-	buildIndexFromSite(*hugoPath, *indexPath)
-	startSearchServer(*bindAddr, *indexPath)
+	buildIndexFromSite(cfg)
+	startSearchServer(cfg)
 }
 
 func exitOnError(e error) {

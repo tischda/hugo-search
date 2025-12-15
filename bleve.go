@@ -13,19 +13,19 @@ import (
 )
 
 // start the web server for the search API
-func startSearchServer(addr string, indexPath string) {
-	indexName := path.Base(indexPath)
-	index := registerIndex(indexPath, indexName)
+func startSearchServer(cfg *Config) {
+	indexName := path.Base(cfg.indexPath)
+	index := registerIndex(cfg.indexPath, indexName, cfg.verbose)
 	defer unregisterIndex(index, indexName)
 	handler := getCorsHandler(indexName)
 
-	log.Printf("Search server listening on %v", addr)
-	log.Fatal(http.ListenAndServe(addr, handler))
+	log.Printf("Search server listening on %v", cfg.bindAddr)
+	log.Fatal(http.ListenAndServe(cfg.bindAddr, handler))
 }
 
 // registers the index by its name so that handler can use it
-func registerIndex(indexPath string, indexName string) bleve.Index {
-	if *verbose {
+func registerIndex(indexPath string, indexName string, verbose bool) bleve.Index {
+	if verbose {
 		log.Printf("Registering index: %s", indexPath)
 	}
 	index, err := bleve.OpenUsing(indexPath, map[string]interface{}{"read_only": true})

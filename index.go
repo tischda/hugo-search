@@ -10,24 +10,24 @@ import (
 )
 
 // builds the search index by passing all pages of hugo site that have a title to the indexer
-func buildIndexFromSite(theHugoPath string, theIndexPath string) {
-	pages := readSitePages(theHugoPath)
-	index := createIndex(theIndexPath)
+func buildIndexFromSite(cfg *Config) {
+	pages := readSitePages(cfg.hugoPath)
+	index := createIndex(cfg.indexPath, cfg.verbose)
 	defer func() {
 		if err := index.Close(); err != nil {
-			log.Printf("Error closing index %s: %v", theIndexPath, err)
+			log.Printf("Error closing index %s: %v", cfg.indexPath, err)
 		}
 	}()
 	for _, page := range pages {
 		if pageHasTitle(page, false) && page.Type() != "search" {
-			addPageToIndex(index, page)
+			addPageToIndex(index, page, cfg.verbose)
 		}
 	}
 }
 
 // creates the index from scratch (does not reuse existing index)
-func createIndex(path string) bleve.Index {
-	if *verbose {
+func createIndex(path string, verbose bool) bleve.Index {
+	if verbose {
 		log.Println("Creating Index:", path)
 	}
 
@@ -53,10 +53,10 @@ func pageHasTitle(p page.Page, verbose bool) bool {
 }
 
 // adds a hugo page to the bleve search index
-func addPageToIndex(index bleve.Index, p page.Page) {
+func addPageToIndex(index bleve.Index, p page.Page, verbose bool) {
 	link := p.RelPermalink()
 	exitOnError(index.Index(link, newIndexEntry(p)))
-	if *verbose {
+	if verbose {
 		log.Printf("Indexed: %s [%s]", p.File().Path(), p.Title())
 	}
 }

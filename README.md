@@ -7,7 +7,10 @@
 
 # hugo search
 
-A [Bleve](http://www.blevesearch.com) search server for your [Hugo](http://gohugo.io) site.
+A search engine for a [Hugo](http://gohugo.io) site using a [Bleve](http://www.blevesearch.com) index.
+
+THIS REPOSITORY IS ARCHIVED.
+I last tested hugo-search with Bleve v2.5.6 and Hugo v0.152.2 as a proof of concept (not for production use!).
 
 ## Install
 
@@ -18,40 +21,49 @@ go install https://github.com/tischda/hugo-search@latest
 ## Usage
 
 ~~~
-Usage of hugo-search:
-  -addr string
-        http listen address (default ":8080")
-  -hugoPath string
-        path of the hugo site (default ".")
-  -indexPath string
-        path of the bleve index (default "indexes/search.bleve")
-  -verbose    verbose output
-  -version
-        print version and exit
+Usage: hugo-search [OPTIONS]
+
+OPTIONS:
+
+  -a, --bindAddr"
+          http listen address (default ":8080")
+  -h, --hugoPath
+          path to the hugo site (default ".")
+  -i, --indexPath
+          path to the bleve index (default "indexes/search.bleve")
+  -vv, --verbose
+          verbose output
+  -?, --help
+          display this help message
+  -v, --version
+          print version and exit
 ~~~
 
 
 ## Examples
 
+Start hugo server:
 ~~~
 hugo server --source test
 ~~~
 
 In another console:
 ~~~
-hugo-search.exe -hugoPath test
+hugo-search.exe --hugoPath test
 ~~~
 
-Open browser on http://localhost:1313
+Open browser on [http://localhost:1313](http://localhost:1313)
 
 
 ## Query index
 
 ~~~
-$ curl http://localhost:8080/api/search.bleve/_search -d '{"query":{"query":"lorem"}}'
-{"request":{"query":{"query":"lorem","boost":1},"size":0,"from":0,"highlight":null,"fields":null,"facets":null,"explain":false},"hits":[],"total_hits":2,"max_score":0.15713484143442302,"took":0,"facets":{}}
+curl http://localhost:8080/api/search.bleve/_search -d "{\"query\":{\"query\":\"lorem\"}}"
+~~~
 
-{"status":{"total":1,"failed":0,"successful":1},"request":{"query":{"query":"lorem","boost":1},"size":0,"from":0,"highlight":null,"fields":null,"facets":null,"explain":false},"hits":[],"total_hits":3,"max_score":0.15713484143442302,"took":0,"facets":{}}
+result:
+~~~
+{"status":{"total":1,"failed":0,"successful":1},"hits":[{"index":"indexes/search.bleve","id":"/page1/","score":0.112627352112581,"sort":["_score"]},{"index":"indexes/search.bleve","id":"/page2/","score":0.11192996459618623,"sort":["_score"]},{"index":"indexes/search.bleve","id":"/parent1/page3/","score":0.10991304652804537,"sort":["_score"]}],"total_hits":3,"cost":2647,"max_score":0.112627352112581,"took":0,"facets":null}
 ~~~
 
 ## Explore index with bleve-explorer
@@ -64,4 +76,4 @@ go install github.com/blevesearch/bleve-explorer@latest
 bleve-explorer -dataDir indexes
 ~~~
 
-check on [http://localhost:8095/](http://localhost:8095/)
+Open browser on [http://localhost:8095/](http://localhost:8095/)

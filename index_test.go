@@ -6,12 +6,10 @@ import (
 	"github.com/blevesearch/bleve/v2"
 )
 
-const testIndexPath = "test/indexes/search.bleve"
-
 // checks the actual index creation and validity
 func TestBuildIndex(t *testing.T) {
-	buildIndexFromSite(testHugoPath, testIndexPath)
-	index := openIndex(t, testIndexPath)
+	buildIndexFromSite(testCfg)
+	index := openIndex(t, testCfg.indexPath)
 	defer index.Close()
 	queryIndex(t, index)
 }
