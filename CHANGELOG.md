@@ -1,15 +1,12 @@
 # Changelog
 
-## [v1.5.0] - unreleased
+## [v1.4.0] - 15 December 2025
 
-* Update hugo to 0.89.4, fixes #1
 * Freshen-up build and release system
-* Minor improvements
-
-## [v1.4.0] - 21 January 2019
-
+* Update hugo to 0.152.2 (fixes #1)
+* Update bleve to 2.5.6 (had to take over bleve/http as well from v1)
 * Use go modules instead of govendor
-* Update Bleve & Hugo dependencies
+* Update javascript in test site
 
 ## [v1.3.0] - 2 December 2017
 
